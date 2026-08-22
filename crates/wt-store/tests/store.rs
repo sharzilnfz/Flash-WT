@@ -209,3 +209,64 @@ fn suite_is_fast_and_self_contained() {
         "store suite must not touch real project trees or be slow"
     );
 }
+
+// --- ticket 07: linking verified content out with shared-write protection ---
+
+#[test]
+fn link_out_shares_a_read_only_inode() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+
+    let id = store.put(b"linked into a tree").expect("put");
+    let dest = dir.path().join("tree/file.txt");
+    fs::create_dir_all(dest.parent().unwrap()).expect("mkdir tree");
+
+    store.link_out(&id, &dest).expect("link_out");
+
+    assert_eq!(fs::read(&dest).expect("read"), b"linked into a tree");
+    // One blob plus one linked copy of it behind one inode: the tree
+    // file and the store object are the same content, stored once.
+    assert_eq!(fs::metadata(&dest).expect("meta").nlink(), 2);
+    assert!(
+        fs::metadata(&dest).expect("meta").permissions().readonly(),
+        "shared inode must be read-only"
+    );
+    assert!(
+        fs::write(&dest, b"poison").is_err(),
+        "in-place rewrite of a linked-out blob must fail"
+    );
+    // The store object shares the inode, so it is protected too.
+    assert_eq!(store.get(&id).expect("get"), b"linked into a tree");
+}
+
+#[test]
+fn link_out_unknown_content_errors_without_creating_dest() {
+    let dir = temp_root();
+    let store = DiskStore::open(dir.path()).expect("open");
+    let missing = ContentId([3u8; 32]);
+    let dest = dir.path().join("out/file.txt");
+
+    match store.link_out(&missing, &dest) {
+        Err(Error::UnknownContent(id)) => assert_eq!(id, missing),
+        other => panic!("expected UnknownContent, got {other:?}"),
+    }
+    assert!(!dest.exists());
+}
+
+#[test]
+fn link_out_corrupted_content_errors_without_creating_dest() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+
+    let id = store.put(b"soon corrupted").expect("put");
+    clobber_all_files(dir.path());
+    let dest = dir.path().join("out/file.txt");
+
+    match store.link_out(&id, &dest) {
+        Err(Error::Corrupted(c)) => assert_eq!(c, id),
+        other => panic!("expected Corrupted, got {other:?}"),
+    }
+    assert!(!dest.exists(), "corrupt bytes must never land in a tree");
+}

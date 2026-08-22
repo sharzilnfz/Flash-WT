@@ -16,7 +16,7 @@ use wt_copy::{
 };
 
 /// Backends that can actually operate on `dir` right now: supported,
-/// and enabled by safety. Hardlink never appears here.
+/// and enabled by safety. Since ticket 07 this includes hardlink.
 fn runnable_backends(dir: &Path) -> Vec<Box<dyn CopyBackend>> {
     candidates()
         .into_iter()
@@ -152,44 +152,52 @@ fn reflink_copies_on_a_supporting_linux_filesystem() {
     assert!(elapsed < Duration::from_secs(1), "reflink took {elapsed:?}");
 }
 
-/// Hardlink mode ships disabled until ticket 07 makes it safe.
+/// Ticket 07: hardlink mode runs, guarded — linked files share one
+/// read-only inode with the source.
 #[test]
-fn hardlink_backend_exists_but_reports_unsafe_pending() {
+fn hardlink_backend_runs_with_copy_on_shared_write_guard() {
+    use std::os::unix::fs::MetadataExt;
+
     use wt_copy::HardlinkBackend;
 
     let backend = HardlinkBackend;
     assert_eq!(backend.kind(), BackendKind::Hardlink);
-    assert_eq!(backend.safety(), Safety::UnsafePending);
-    assert!(
-        backend.supports(Path::new("/")),
-        "hardlinks work anywhere on POSIX"
-    );
-
+    assert_eq!(backend.safety(), Safety::Safe);
     let fixture = TreeFixture::heavy_tree(2);
-    let dest = fixture.src.parent().unwrap().join("dest-hardlink");
     assert!(
-        matches!(
-            backend.copy_dir(&fixture.src, &dest),
-            Err(Error::UnsafeBackend)
-        ),
-        "unsafe-pending backend must refuse to run"
+        backend.supports(&fixture.src),
+        "tempdirs sit on ordinary writable filesystems"
     );
-    assert!(!dest.exists(), "refused backend must not create dest");
+    let dest = fixture.src.parent().unwrap().join("dest-hardlink");
+    backend.copy_dir(&fixture.src, &dest).expect("copy_dir");
+
+    let src_file = fixture.src.join("pkg00/nested/file-0.txt");
+    let dest_file = dest.join("pkg00/nested/file-0.txt");
+    let meta = std::fs::metadata(&dest_file).expect("meta");
+    assert!(meta.nlink() >= 2, "linked file must share its inode");
+    assert!(
+        meta.permissions().readonly(),
+        "shared inode must be read-only"
+    );
+    assert!(
+        std::fs::write(&dest_file, b"poison").is_err(),
+        "in-place rewrite of a shared inode must fail"
+    );
+    assert_eq!(
+        std::fs::read(&src_file).expect("read"),
+        b"file 0 of 2\n",
+        "source content changed"
+    );
 }
 
-/// Selection picks the best available backend per filesystem: never
-/// hardlink, always something safe, and the fastest thing that works.
+/// Selection picks the best available backend per filesystem: always
+/// something safe, and the fastest thing that works.
 #[test]
 fn selection_picks_the_best_available_backend() {
     let fixture = TreeFixture::heavy_tree(1);
     let dir = fixture.src.parent().unwrap();
 
     let picked = select_backend(dir);
-    assert_ne!(
-        picked.kind(),
-        BackendKind::Hardlink,
-        "hardlink stays disabled"
-    );
     assert_eq!(picked.safety(), Safety::Safe);
     assert!(picked.supports(dir));
 
@@ -201,12 +209,12 @@ fn selection_picks_the_best_available_backend() {
     );
 
     // Candidates are ordered fastest-first and end with the portable
-    // fallback; hardlink is absent entirely.
+    // fallback; hardlink is the last fast candidate (ticket 07).
     let all = candidates();
     assert!(!all.is_empty());
     assert!(all.iter().any(|b| b.kind() == BackendKind::DeepCopy));
-    assert!(all.iter().all(|b| b.kind() != BackendKind::Hardlink));
     assert_eq!(all.last().unwrap().kind(), BackendKind::DeepCopy);
+    assert_eq!(all[all.len() - 2].kind(), BackendKind::Hardlink);
 }
 
 /// Selection falls back to deep copy when no fast mechanism applies.

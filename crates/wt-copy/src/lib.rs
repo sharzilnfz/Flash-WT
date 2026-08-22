@@ -35,7 +35,9 @@ pub enum BackendKind {
     Clonefile,
     /// Linux reflink copies (btrfs/XFS `FICLONE`).
     Reflink,
-    /// Plain hardlinks. Fast but shares inode content between trees.
+    /// Plain hardlinks. Fast; shared inodes are made read-only so
+    /// in-place rewrites fail instead of corrupting sibling trees
+    /// (ticket 07).
     Hardlink,
     /// Portable byte-by-byte fallback. Slow; always available.
     DeepCopy,
@@ -58,7 +60,9 @@ pub enum Safety {
     /// Safe to use without extra machinery.
     Safe,
     /// Exists but must stay disabled until the shared-write hazard is
-    /// solved (ticket 07: cache poisoning through mutated hardlinks).
+    /// solved. No current backend reports this: ticket 07 cleared the
+    /// hardlink hazard with copy-on-shared-write protection, but the
+    /// classification and its refusal path stay part of the contract.
     UnsafePending,
 }
 
@@ -121,8 +125,9 @@ pub trait CopyBackend {
     /// Which strategy this backend implements.
     fn kind(&self) -> BackendKind;
 
-    /// Static safety classification. [`BackendKind::Hardlink`] reports
-    /// [`Safety::UnsafePending`] until ticket 07 lands.
+    /// Static safety classification. Every shipped backend reports
+    /// [`Safety::Safe`]: hardlink earned it in ticket 07 by making
+    /// shared inodes read-only (copy-on-shared-write).
     fn safety(&self) -> Safety {
         Safety::Safe
     }

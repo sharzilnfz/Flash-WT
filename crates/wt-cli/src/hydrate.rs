@@ -100,13 +100,33 @@ fn rel_text(root: &Path, path: &Path) -> String {
         .into_owned()
 }
 
-/// Recreate the ingested tree under `dest_root` from store content,
-/// verifying every blob's hash on the way out.
+/// Outcome of materializing one heavy directory.
+pub struct MaterializeReport {
+    /// Total files placed.
+    pub files: usize,
+    /// Files written as byte copies because hardlinking was disabled
+    /// or refused by the filesystem. Zero means everything was
+    /// hardlinked from the store (ticket 07).
+    pub copied: usize,
+}
+
+/// Recreate the ingested tree under `dest_root` from store content.
+///
+/// Ticket 07: files are hard-linked out of the store instead of
+/// rewritten, so hydration costs near zero and two worktrees share
+/// one inode per blob. `link_out` verifies the blob's hash first and
+/// strips write bits from the shared inode, so a package manager's
+/// in-place rewrite fails loudly instead of poisoning every tree and
+/// the store; replacement-style writes break the share and stay
+/// private. Filesystems that refuse the link (or `WT_NO_HARDLINK=1`)
+/// fall back to byte copies, which are private and may stay writable.
 pub fn materialize(
     store: &DiskStore,
     ingested: &Ingested,
     dest_root: &Path,
-) -> Result<usize, String> {
+) -> Result<MaterializeReport, String> {
+    let allow_hardlinks = std::env::var_os("WT_NO_HARDLINK").is_none();
+    let mut copied = 0usize;
     for rel in &ingested.dirs {
         fs::create_dir_all(dest_root.join(rel))
             .map_err(|e| format!("cannot prepare {}: {e}", dest_root.join(rel).display()))?;
@@ -123,9 +143,47 @@ pub fn materialize(
             .ok_or_else(|| format!("{rel} has no parent"))?;
         fs::create_dir_all(parent)
             .map_err(|e| format!("cannot prepare {}: {e}", parent.display()))?;
-        fs::write(&dest, &bytes).map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
+
+        let mut linked = false;
+        if allow_hardlinks {
+            match store.link_out(id, &dest) {
+                Ok(()) => linked = true,
+                Err(wt_store::Error::Io(e)) if link_refused(&e) => {}
+                Err(e) => return Err(format!("materialize {rel}: {e}")),
+            }
+        }
+        if !linked {
+            copied += 1;
+            fs::write(&dest, &bytes)
+                .map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
+        }
     }
-    Ok(ingested.files.len())
+    Ok(MaterializeReport {
+        files: ingested.files.len(),
+        copied,
+    })
+}
+
+/// Link errors that mean "this filesystem cannot do it" and deserve a
+/// byte-copy fallback rather than a failure: cross-device links, no
+/// kernel/fs support, or link-count exhaustion. Permission problems
+/// on the destination are real failures and stay loud.
+#[cfg(unix)]
+fn link_refused(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(code)
+            if code == libc::EPERM
+                || code == libc::EXDEV
+                || code == libc::EMLINK
+                || code == libc::EOPNOTSUPP
+                || code == libc::ENOSYS
+    )
+}
+
+#[cfg(not(unix))]
+fn link_refused(_e: &std::io::Error) -> bool {
+    true
 }
 
 /// Give this worktree one reference on every distinct blob it uses,

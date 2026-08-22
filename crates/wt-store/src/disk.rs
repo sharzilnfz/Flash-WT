@@ -14,7 +14,8 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
@@ -67,7 +68,6 @@ impl DiskStore {
         tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
         Ok(())
     }
-
     /// Every content id currently stored, in stable order. Malformed
     /// names under `objects/` are skipped rather than failing the
     /// enumeration — the sweep must tolerate a store that was touched
@@ -156,6 +156,24 @@ impl DiskStore {
             examined,
             reclaimed,
         })
+    }
+
+    /// Hard-link a verified blob out to `dest`, which must not exist.
+    ///
+    /// Ticket 07: the hash is verified before anything lands in a
+    /// tree, then the write bits are stripped from the shared inode —
+    /// an in-place rewrite of the linked copy would otherwise corrupt
+    /// every other tree and the store itself (the pnpm lesson).
+    /// Replacement-style writes (rename-over, unlink plus recreate)
+    /// break the share and stay private, so writers still work; they
+    /// just get their own copy. The store object becomes read-only
+    /// along with the link: permissions live on the inode.
+    pub fn link_out(&self, id: &ContentId, dest: &Path) -> Result<()> {
+        self.get(id)?;
+        fs::hard_link(self.object_path(id), dest)?;
+        let mut perms = fs::metadata(dest)?.permissions();
+        perms.set_mode(perms.mode() & !0o222);
+        Ok(fs::set_permissions(dest, perms)?)
     }
 }
 
