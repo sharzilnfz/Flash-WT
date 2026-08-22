@@ -1,11 +1,14 @@
-//! Manifest-driven hydration for `wt create` (ticket 02).
+//! Manifest-driven hydration for `wt create` (tickets 02 + 05).
+
+mod hydrate;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::{Parser, Subcommand};
-use wt_copy::{candidates, CopyBackend, Safety};
+
+use hydrate::{claim_references, ingest_dir, materialize};
 
 #[derive(Parser)]
 #[command(
@@ -170,32 +173,6 @@ fn collect_matches(root: &Path, patterns: &[String]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Backends tried in order; the first safe backend whose `supports`
-/// accepts the source filesystem performs the copy. Ticket 03's
-/// selection layer replaces the ticket-01 stub now that real
-/// strategies exist.
-fn backends() -> Vec<Box<dyn CopyBackend>> {
-    candidates()
-}
-
-fn hydrate_one(
-    backends: &[Box<dyn CopyBackend>],
-    src: &Path,
-    dest: &Path,
-) -> Result<&'static str, String> {
-    let mut last = "no usable copy backend".to_string();
-    for b in backends {
-        if b.safety() != Safety::Safe || !b.supports(src) {
-            continue;
-        }
-        match b.copy_dir(src, dest) {
-            Ok(()) => return Ok(b.kind().as_str()),
-            Err(e) => last = e.to_string(),
-        }
-    }
-    Err(last)
-}
-
 fn load_patterns(root: &Path, manifest: Option<&Path>) -> Result<(Vec<String>, bool), String> {
     let path = match manifest {
         Some(m) => m.to_path_buf(),
@@ -273,21 +250,30 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
         return Ok(());
     }
 
-    let backends = backends();
+    let mut store = hydrate::open_store()?;
+    let mut total_files = 0usize;
     for rel in &dirs {
         let src = root.join(rel);
-        let target = dest.join(rel);
-        fs::create_dir_all(target.parent().expect("target has parent"))
-            .map_err(|e| format!("cannot prepare {}: {e}", target.display()))?;
-        let kind = hydrate_one(&backends, &src, &target)
+        let ingested = ingest_dir(&mut store, &root, &src)?;
+        claim_references(&mut store, &dest, &ingested)?;
+        // Ingested paths are repo-relative (they include the heavy
+        // directory itself), so materialize against the worktree root.
+        let count = materialize(&store, &ingested, &dest)
             .map_err(|e| format!("hydration of {} failed: {e}", rel.display()))?;
-        println!("hydrated {} from {} ({kind})", rel.display(), src.display());
+        total_files += count;
+        println!(
+            "hydrated {} from {} via store ({} file{})",
+            rel.display(),
+            src.display(),
+            count,
+            if count == 1 { "" } else { "s" }
+        );
     }
-    println!("hydration complete: {} director{}", dirs.len(), {
-        if dirs.len() == 1 {
-            "y"
+    println!("hydration complete: {total_files} file{} through the store", {
+        if total_files == 1 {
+            ""
         } else {
-            "ies"
+            "s"
         }
     });
     Ok(())

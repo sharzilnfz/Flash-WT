@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-wt-copy = { path = "../wt-copy" }
 wt-store = { path = "../wt-store" }
 
 [dev-dependencies]

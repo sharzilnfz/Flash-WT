@@ -344,7 +344,6 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "tempfile",
- "wt-copy",
  "wt-store",
 ]
 

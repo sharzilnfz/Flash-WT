@@ -52,6 +52,17 @@ impl Fixture {
             .output()
             .expect("run wt binary")
     }
+
+    /// Run `wt <args>` with `WT_STORE` pointed at an isolated store,
+    /// so tests never touch the developer's machine-wide store.
+    pub fn wt_with_store(&self, args: &[&str], store: &Path) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_wt"))
+            .args(args)
+            .env("WT_STORE", store)
+            .current_dir(&self.repo)
+            .output()
+            .expect("run wt binary")
+    }
 }
 
 /// Recursively collect every regular-file path under `dir`, sorted,
