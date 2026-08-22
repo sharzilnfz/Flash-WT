@@ -1,0 +1,127 @@
+//! Copy-backend contract (ticket 01, implemented in ticket 03).
+//!
+//! One trait hides every platform copy strategy: APFS `clonefile`,
+//! Linux reflink, and hardlink. Callers never branch on the OS; they
+//! ask the selection layer (ticket 03) for the best backend for a
+//! given directory and call [`CopyBackend::copy_dir`].
+
+mod stub;
+
+pub use stub::StubBackend;
+
+use std::io;
+use std::path::Path;
+
+/// Which concrete strategy a backend uses.
+///
+/// Stable, displayable names. Selection code and CLI output (ticket 02:
+/// "prints what it linked and from where") must report these strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BackendKind {
+    /// macOS APFS whole-directory `clonefile(2)`.
+    Clonefile,
+    /// Linux reflink copies (btrfs/XFS `FICLONE`).
+    Reflink,
+    /// Plain hardlinks. Fast but shares inode content between trees.
+    Hardlink,
+    /// Portable byte-by-byte fallback. Slow; always available.
+    DeepCopy,
+}
+
+impl BackendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackendKind::Clonefile => "clonefile",
+            BackendKind::Reflink => "reflink",
+            BackendKind::Hardlink => "hardlink",
+            BackendKind::DeepCopy => "deep-copy",
+        }
+    }
+}
+
+/// Whether a backend is safe to enable by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Safety {
+    /// Safe to use without extra machinery.
+    Safe,
+    /// Exists but must stay disabled until the shared-write hazard is
+    /// solved (ticket 07: cache poisoning through mutated hardlinks).
+    UnsafePending,
+}
+
+#[derive(Debug)]
+pub enum Error {
+    /// The destination already exists. Backends never merge into or
+    /// overwrite an existing tree.
+    DestinationExists,
+    /// The filesystem holding the paths does not support this backend.
+    Unsupported,
+    /// This backend is compiled in but not yet safe to run
+    /// ([`Safety::UnsafePending`]) and a caller tried to use it anyway.
+    UnsafeBackend,
+    /// Any filesystem failure during the copy.
+    Io(io::Error),
+}
+
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
+        Error::Io(e)
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::DestinationExists => write!(f, "destination already exists"),
+            Error::Unsupported => write!(f, "backend unsupported on this filesystem"),
+            Error::UnsafeBackend => write!(f, "backend is unsafe-pending and disabled"),
+            Error::Io(e) => write!(f, "copy failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// A strategy for copying one directory tree as cheaply as the
+/// filesystem allows.
+///
+/// Contract for implementors (ticket 03):
+///
+/// - `copy_dir` copies the **entire** tree rooted at `src`, including
+///   nested directories, regular files, and permissions. It does not
+///   follow symlinks out of `src`; symlinks inside are recreated as-is
+///   where the mechanism allows it, otherwise skipped (never followed).
+/// - `dest` must not exist. Implementors create `dest` itself; callers
+///   only ensure its parent directory exists.
+/// - `copy_dir` is all-or-nothing on a best-effort basis: if it returns
+///   `Err`, `dest` may exist but must not contain a partially trusted
+///   tree — callers treat any error as "hydration of this directory
+///   failed" and may delete `dest`.
+/// - `supports(dir)` answers for the filesystem that holds `dir`. It
+///   must be cheap enough to call per hydration and must not mutate
+///   anything.
+/// - `safety()` is a static property of the backend kind, not of the
+///   filesystem.
+pub trait CopyBackend {
+    /// Which strategy this backend implements.
+    fn kind(&self) -> BackendKind;
+
+    /// Static safety classification. [`BackendKind::Hardlink`] reports
+    /// [`Safety::UnsafePending`] until ticket 07 lands.
+    fn safety(&self) -> Safety {
+        Safety::Safe
+    }
+
+    /// True if this backend can operate on the filesystem holding
+    /// `dir` (for example, clonefile requires APFS).
+    fn supports(&self, dir: &Path) -> bool;
+
+    /// Copy the tree at `src` to the not-yet-existing path `dest`.
+    ///
+    /// Returns [`Error::DestinationExists`] if `dest` exists,
+    /// [`Error::UnsafeBackend`] when `safety()` is
+    /// [`Safety::UnsafePending`], and [`Error::Io`] on failure.
+    fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()>;
+}
