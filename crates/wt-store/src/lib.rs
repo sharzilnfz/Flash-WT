@@ -1,14 +1,14 @@
-//! Content-addressed store contract (ticket 01, implemented in
-//! ticket 04).
+//! Content-addressed store contract (ticket 01), implemented on disk
+//! in ticket 04.
 //!
 //! The store is the source of truth (ADR-0001): every unique file
 //! content is kept exactly once per machine, addressed by its hash.
 //! Reference counting over stored content feeds garbage collection
 //! (ticket 06).
 
-mod stub;
+mod disk;
 
-pub use stub::StubStore;
+pub use disk::DiskStore;
 
 use std::fmt;
 use std::io;

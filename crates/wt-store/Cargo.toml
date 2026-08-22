@@ -5,3 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+sha2 = "0.10"
+tempfile = "3"
+
+[dev-dependencies]
