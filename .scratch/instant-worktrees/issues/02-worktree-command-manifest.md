@@ -12,8 +12,19 @@ copy-backend trait from ticket 01, using whichever backend is available.
 
 **Status:** ready-for-agent
 
-- [ ] `wt create` produces a working git worktree
-- [ ] Directories matched by `.wtinclude` exist in the worktree, byte-identical to source
-- [ ] Absent manifest falls back to documented defaults plus a suggested starter file
-- [ ] Output lists every hydrated directory and its source
-- [ ] End-to-end tests cover all of the above through the CLI seam
+- [x] `wt create` produces a working git worktree
+- [x] Directories matched by `.wtinclude` exist in the worktree, byte-identical to source
+- [x] Absent manifest falls back to documented defaults plus a suggested starter file
+- [x] Output lists every hydrated directory and its source
+- [x] End-to-end tests cover all of the above through the CLI seam
+
+## Comments
+
+- Implemented on branch `fleet/02-cli-and-manifest`. Hydration goes through
+  the frozen `CopyBackend` trait; selection tries safe backends in order and
+  falls back to a portable deep-copy backend local to wt-cli, so ticket 03's
+  fast backends slot in without CLI changes. Manifest matching supports
+  gitignore anchoring (`/`), trailing `/`, `*`, and `**`; `!` negation lines
+  are ignored rather than misapplied. Absent default-location manifest uses
+  documented defaults and writes a starter `.wtinclude` to the repo root;
+  an explicitly passed missing manifest is an error.
