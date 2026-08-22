@@ -111,7 +111,7 @@ impl DiskStore {
         &self.root
     }
 
-    fn object_path(&self, id: &ContentId) -> PathBuf {
+    pub(crate) fn object_path(&self, id: &ContentId) -> PathBuf {
         let hex = id.to_string();
         self.root.join("objects").join(&hex[..2]).join(&hex[2..])
     }
@@ -126,11 +126,11 @@ impl DiskStore {
         self.object_path(id)
     }
 
-    fn ref_path(&self, id: &ContentId) -> PathBuf {
+    pub(crate) fn ref_path(&self, id: &ContentId) -> PathBuf {
         self.root.join("refs").join(id.to_string())
     }
 
-    fn read_ref_count(&self, id: &ContentId) -> Result<u64> {
+    pub(crate) fn read_ref_count(&self, id: &ContentId) -> Result<u64> {
         let text = fs::read_to_string(self.ref_path(id))?;
         text.trim()
             .parse::<u64>()
@@ -148,7 +148,7 @@ impl DiskStore {
     /// names under `objects/` are skipped rather than failing the
     /// enumeration — the sweep must tolerate a store that was touched
     /// by an interrupted run.
-    pub fn ids(&self) -> Result<Vec<ContentId>> {
+    pub(crate) fn ids(&self) -> Result<Vec<ContentId>> {
         let mut out = Vec::new();
         let shards = fs::read_dir(self.root.join("objects")).map_err(Error::Io)?;
         for shard in shards.flatten() {

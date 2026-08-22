@@ -7,10 +7,17 @@
 //! (ticket 06).
 
 mod disk;
+mod gc;
+mod mirror;
 mod validation;
 mod verified;
 
 pub use disk::DiskStore;
+pub use gc::{GcMode, MarkReport, MarkSwept};
+pub use mirror::{
+    escape, mirror_path, publish as publish_mirror, read_all as read_mirrors, unescape,
+    worktree_key, ReadMirror, StoreMirror,
+};
 pub use validation::{Entry, ValidationCache};
 pub use verified::{Fingerprint, VerifiedLedger};
 

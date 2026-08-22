@@ -32,3 +32,16 @@ file contents are rewritten, only linked or cloned.
 **Human path / agent path**
 Humans keep editing real files in the tree as always. Agents may work through
 the store directly. Only the agent side changes.
+
+**Mirror**
+The store-local GC root for one hydrated worktree: a small TSV file under
+`<store>/worktrees/` listing every blob (or snapshot) the worktree hydrates
+from, written atomically once per successful create. Written beside legacy
+refcounts until the explicit cutover (ADR-0004).
+
+**Grace period**
+How long the store waits before collecting anything unreferenced — blobs,
+snapshots, or whole dead-worktree mirrors. Defaults to 15 minutes,
+overridable with `WT_GC_GRACE`. Deletion needs both "no live root" and
+"older than the grace period", so a kill at any point can only leak
+reclaimable cache data, never collect live data.

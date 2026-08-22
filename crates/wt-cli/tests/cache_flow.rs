@@ -21,6 +21,10 @@ fn store_footprint(store: &Path) -> (usize, usize) {
         for entry in fs::read_dir(&dir).expect("read store dir") {
             let p = entry.expect("store entry").path();
             if p.is_dir() {
+                // GC bookkeeping (ticket 07 mirrors) is not content.
+                if p.file_name() == Some(std::ffi::OsStr::new("worktrees")) {
+                    continue;
+                }
                 stack.push(p);
             } else if p.file_name().unwrap() != "ingest-cache.tsv" {
                 files += 1;

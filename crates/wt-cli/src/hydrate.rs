@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use wt_copy::{CloneOut, FileMaterialize, HardlinkOut, placement_refused};
-use wt_store::{ContentId, DiskStore, Entry as CacheEntry, Store, ValidationCache};
+use wt_store::{ContentId, DiskStore, Entry as CacheEntry, GcMode, Store, ValidationCache};
 
 /// Where the per-machine store lives. `$WT_STORE` wins (tests use it
 /// for isolation); otherwise XDG cache conventions.
@@ -290,27 +290,39 @@ fn place(backend: Option<&dyn FileMaterialize>, src: &Path, dest: &Path) -> std:
 // classified by `wt_copy::placement_refused`; everything else is a
 // real failure.
 
-/// Give this worktree one reference on every distinct blob it uses,
-/// then record the mapping where ticket 06 can find it.
-pub fn claim_references(
-    store: &mut DiskStore,
-    worktree: &Path,
-    ingested: &Ingested,
-) -> Result<(), String> {
-    let distinct: BTreeSet<&ContentId> = ingested.files.values().collect();
-    for id in distinct {
-        store.add_ref(id).map_err(|e| e.to_string())?;
-    }
-
+/// Resolve the (absolute) git dir of a freshly created worktree.
+fn worktree_git_dir(worktree: &Path) -> Result<PathBuf, String> {
     let git_dir = Command::new("git")
         .current_dir(worktree)
-        .args(["rev-parse", "--git-dir"])
+        .args(["rev-parse", "--absolute-git-dir"])
         .output()
         .map_err(|e| format!("cannot query git dir: {e}"))?;
     if !git_dir.status.success() {
         return Err("newly created worktree is not a git worktree".into());
     }
-    let git_dir = worktree.join(String::from_utf8_lossy(&git_dir.stdout).trim());
+    Ok(PathBuf::from(String::from_utf8_lossy(&git_dir.stdout).trim()))
+}
+
+/// Give this worktree one reference on every distinct blob it uses,
+/// then record the mapping where ticket 06 can find it.
+///
+/// Ticket 07: in `mark-sweep-no-refs` mode the refcount writes are
+/// skipped entirely — mirrors are the only bookkeeping. The sidecar
+/// is written in every mode; it stays the diagnostic/recovery record
+/// and the liveness evidence sweep validates roots against.
+pub fn claim_references(
+    store: &mut DiskStore,
+    worktree: &Path,
+    ingested: &Ingested,
+) -> Result<PathBuf, String> {
+    let distinct: BTreeSet<&ContentId> = ingested.files.values().collect();
+    if store.gc_mode() != GcMode::MarkSweepNoRefs {
+        for id in &distinct {
+            store.add_ref(id).map_err(|e| e.to_string())?;
+        }
+    }
+
+    let git_dir = worktree_git_dir(worktree)?;
     let mut sidecar = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -319,5 +331,22 @@ pub fn claim_references(
     for (rel, id) in &ingested.files {
         writeln!(sidecar, "{rel}\t{id}").map_err(|e| format!("cannot write ledger: {e}"))?;
     }
-    Ok(())
+    Ok(git_dir)
+}
+
+/// Publish the authoritative store-local mirror for one successful
+/// create: one atomic write naming the worktree's canonical identity
+/// and every distinct blob it hydrates from (ticket 07). This — not
+/// the per-blob refcounts — is what mark-and-sweep marks through.
+pub fn publish_mirror(
+    store: &mut DiskStore,
+    worktree: &Path,
+    git_dir: &Path,
+    ingested: &Ingested,
+) -> Result<(), String> {
+    let distinct: BTreeSet<&ContentId> = ingested.files.values().collect();
+    store
+        .publish_worktree_mirror(worktree, git_dir, distinct)
+        .map(|_| ())
+        .map_err(|e| format!("cannot publish worktree mirror: {e}"))
 }
