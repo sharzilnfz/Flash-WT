@@ -8,10 +8,10 @@ Correctness does not depend on trusting mtimes: hash verification at materialize
 
 **Status:** ready-for-agent
 
-- [ ] Second create against an unchanged source adds no new store content and reads no unchanged file bytes (warm ingest cost scales with what changed, not tree size)
-- [ ] Editing a file between creations puts its new content in the next hydrated tree
-- [ ] Touching a file (mtime bump, same bytes) cannot produce wrong bytes in a hydrated tree
-- [ ] Changing file size with matching mtime is treated as a miss and re-hashed
-- [ ] A pre-existing store with no cache yet ingests correctly and populates the cache
-- [ ] Deleting or corrupting the cache degrades to full re-ingest, never to wrong output
-- [ ] Store unit tests cover hit/miss matrix; e2e tests cover staleness through the CLI seam
+- [x] Second create against an unchanged source adds no new store content and reads no unchanged file bytes (warm ingest cost scales with what changed, not tree size)
+- [x] Editing a file between creations puts its new content in the next hydrated tree
+- [x] Touching a file (mtime bump, same bytes) cannot produce wrong bytes in a hydrated tree
+- [x] Changing file size with matching mtime is treated as a miss and re-hashed
+- [x] A pre-existing store with no cache yet ingests correctly and populates the cache
+- [x] Deleting or corrupting the cache degrades to full re-ingest, never to wrong output
+- [x] Store unit tests cover hit/miss matrix; e2e tests cover staleness through the CLI seam

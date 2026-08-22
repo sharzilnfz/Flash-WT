@@ -22,7 +22,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use wt_store::{ContentId, DiskStore, Store};
+use wt_store::{ContentId, DiskStore, Entry as CacheEntry, Store, ValidationCache};
 
 /// Where the per-machine store lives. `$WT_STORE` wins (tests use it
 /// for isolation); otherwise XDG cache conventions.
@@ -57,11 +57,22 @@ pub struct Ingested {
 /// Walk `src`, storing every regular file's bytes. Symlinks are never
 /// followed out of `src`; they are skipped for now rather than
 /// misinterpreted (matching the copy-backend trait's stance).
+///
+/// Ticket 02: a validation cache beside the store remembers each
+/// path's size, mtime, and content id from the previous ingest. A
+/// file whose size AND mtime both still match is not read or hashed —
+/// its recorded blob is reused (checked against the store first, in
+/// case a sweep reclaimed it). Every other file goes through the
+/// normal read-and-hash path. The cache can only make runs cheaper,
+/// never wronger: materialize still verifies every blob through
+/// `Store::get`, so lying cached metadata fails loudly instead of
+/// landing bad bytes in a fresh tree.
 pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<Ingested, String> {
     let mut ingested = Ingested {
         dirs: Vec::new(),
         files: BTreeMap::new(),
     };
+    let mut cache = ValidationCache::open(store.root());
     let mut stack = vec![src.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries =
@@ -82,14 +93,37 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
             if !file_type.is_file() {
                 continue;
             }
-            let bytes =
-                fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            let id = store.put(&bytes).map_err(|e| e.to_string())?;
-            ingested.files.insert(rel_text(src_root, &path), id);
+            let rel = rel_text(src_root, &path);
+            let meta =
+                fs::metadata(&path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+            let size = meta.len();
+            let mtime = meta.modified().map_err(|e| format!("cannot stat {}: {e}", rel))?;
+            let id = match cache.lookup(&rel, size, mtime) {
+                // Cache hit: same size and same mtime as last time.
+                // Trust it only while the blob is actually still here.
+                Some(id) if store.contains(&id) => id,
+                _ => {
+                    // Miss (or a swept blob): pay for read and hash.
+                    let bytes = fs::read(&path)
+                        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                    let id = store.put(&bytes).map_err(|e| e.to_string())?;
+                    // An mtime before the epoch cannot round-trip
+                    // through the cache format; skip caching rather
+                    // than fail, so such a file just stays cold.
+                    if mtime >= std::time::UNIX_EPOCH {
+                        cache.record(rel.clone(), CacheEntry { size, mtime, id });
+                    }
+                    id
+                }
+            };
+            ingested.files.insert(rel, id);
         }
     }
     ingested.dirs.sort();
     ingested.dirs.dedup();
+    cache
+        .save()
+        .map_err(|e| format!("cannot update ingest cache: {e}"))?;
     Ok(ingested)
 }
 

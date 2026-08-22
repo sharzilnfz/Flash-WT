@@ -45,6 +45,13 @@ impl DiskStore {
         Ok(DiskStore { root })
     }
 
+    /// The root this store was opened with. The ingest validation
+    /// cache (ticket 02) lives beside `objects/` and `refs/` here,
+    /// which is why the store format itself never changes.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     fn object_path(&self, id: &ContentId) -> PathBuf {
         let hex = id.to_string();
         self.root.join("objects").join(&hex[..2]).join(&hex[2..])

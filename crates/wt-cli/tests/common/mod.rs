@@ -69,6 +69,7 @@ impl Fixture {
 
 /// Recursively collect every regular-file path under `dir`, sorted,
 /// so tests can compare two trees by path list.
+#[allow(dead_code)] // not every suite that compiles this module uses it
 pub fn list_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];

@@ -13,8 +13,13 @@ use std::thread;
 use common::{list_files, Fixture};
 
 /// Total file count under the store root — how much content it holds.
+/// The ingest validation cache beside the store is not content and is
+/// never swept, so it does not count.
 fn store_files(store: &Path) -> usize {
-    list_files(store).len()
+    list_files(store)
+        .into_iter()
+        .filter(|p| p.file_name() != Some(std::ffi::OsStr::new("ingest-cache.tsv")))
+        .count()
 }
 
 /// Resolve a worktree's real git dir from its `.git` pointer file and

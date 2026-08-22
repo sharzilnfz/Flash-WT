@@ -270,3 +270,210 @@ fn link_out_corrupted_content_errors_without_creating_dest() {
     }
     assert!(!dest.exists(), "corrupt bytes must never land in a tree");
 }
+
+// --- ticket 02: the ingest validation cache ---
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use wt_store::{Entry as CacheEntry, ValidationCache};
+
+/// Stat a file and build the cache entry an ingest would record.
+fn entry_for(path: &std::path::Path) -> (u64, SystemTime) {
+    let meta = fs::metadata(path).expect("stat source file");
+    (meta.len(), meta.modified().expect("mtime"))
+}
+
+fn write_source(root: &TempDir, text: &str) -> std::path::PathBuf {
+    let path = root.path().join("heavy/file.txt");
+    fs::create_dir_all(path.parent().unwrap()).expect("mkdir heavy");
+    fs::write(&path, text).expect("write source");
+    path
+}
+
+fn record_for(cache: &mut ValidationCache, store: &mut DiskStore, path: &std::path::Path) -> ContentId {
+    let bytes = fs::read(path).expect("read source");
+    let id = store.put(&bytes).expect("put");
+    let (size, mtime) = entry_for(path);
+    cache.record(
+        "heavy/file.txt".to_string(),
+        CacheEntry { size, mtime, id },
+    );
+    id
+}
+
+#[test]
+fn cache_hits_on_unchanged_file() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "version one\n");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let mut cache = ValidationCache::open(store_dir.path());
+    assert!(cache.is_empty(), "fresh store has no cache yet");
+    let id = record_for(&mut cache, &mut store, &path);
+    cache.save().expect("save");
+
+    // Next run, same size and mtime: hit, no read needed.
+    let reopened = ValidationCache::open(store_dir.path());
+    let (size, mtime) = entry_for(&path);
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime),
+        Some(id),
+        "unchanged size+mtime must be a hit"
+    );
+}
+
+#[test]
+fn cache_misses_on_mtime_change_with_same_size() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "touch me\n");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open");
+    let mut cache = ValidationCache::open(store_dir.path());
+    let id = record_for(&mut cache, &mut store, &path);
+    cache.save().expect("save");
+
+    let reopened = ValidationCache::open(store_dir.path());
+    let (size, mtime) = entry_for(&path);
+    let touched = mtime + Duration::from_secs(1);
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, touched),
+        None,
+        "a bumped mtime must be re-hashed even at the same size"
+    );
+    assert_eq!(reopened.lookup("heavy/file.txt", size, mtime), Some(id));
+}
+
+#[test]
+fn cache_misses_on_size_change_with_same_mtime() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "grow me\n");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open");
+    let mut cache = ValidationCache::open(store_dir.path());
+    let id = record_for(&mut cache, &mut store, &path);
+    cache.save().expect("save");
+
+    let reopened = ValidationCache::open(store_dir.path());
+    let (size, mtime) = entry_for(&path);
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size + 1, mtime),
+        None,
+        "a changed size must be re-hashed even at the same mtime"
+    );
+    assert_eq!(reopened.lookup("heavy/file.txt", size, mtime), Some(id));
+}
+
+#[test]
+fn cache_misses_after_content_change() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "before edit\n");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open");
+    let mut cache = ValidationCache::open(store_dir.path());
+    let old_id = record_for(&mut cache, &mut store, &path);
+    cache.save().expect("save");
+
+    // Edit the content: both size and mtime move in practice.
+    fs::write(&path, "after edit, longer\n").expect("edit source");
+    let (size, mtime) = entry_for(&path);
+
+    let reopened = ValidationCache::open(store_dir.path());
+    assert_eq!(reopened.lookup("heavy/file.txt", size, mtime), None);
+    assert_ne!(store.put(b"after edit, longer\n").expect("put"), old_id);
+}
+
+#[test]
+fn pre_existing_store_without_cache_opens_empty_and_populates() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "first ingest ever\n");
+
+    // A store that predates the cache: no cache file exists yet.
+    let mut cache = ValidationCache::open(dir.path());
+    assert!(cache.is_empty(), "missing cache must open empty");
+
+    let id = record_for(&mut cache, &mut store, &path);
+    cache.save().expect("populate");
+
+    // The next run finds it populated.
+    let reopened = ValidationCache::open(dir.path());
+    let (size, mtime) = entry_for(&path);
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(reopened.lookup("heavy/file.txt", size, mtime), Some(id));
+}
+
+#[test]
+fn deleted_cache_degrades_to_empty_not_error() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "cache me\n");
+
+    let mut cache = ValidationCache::open(dir.path());
+    record_for(&mut cache, &mut store, &path);
+    cache.save().expect("save");
+    fs::remove_file(dir.path().join("ingest-cache.tsv")).expect("delete cache");
+
+    let reopened = ValidationCache::open(dir.path());
+    assert!(reopened.is_empty(), "deleted cache must fall back to cold");
+    assert_eq!(reopened.lookup("heavy/file.txt", 0, SystemTime::UNIX_EPOCH), None);
+}
+
+#[test]
+fn corrupt_cache_lines_are_dropped_not_trusted() {
+    let dir = temp_root();
+    fs::write(
+        dir.path().join("ingest-cache.tsv"),
+        "not a valid line\n\
+         heavy/short\t12\tx\t0\n\
+         heavy/badid\t5\t1\t2\tzzzz\n\
+         heavy/too\tmany\ttabs\there\tok\textra\n",
+    )
+    .expect("write garbage cache");
+
+    let cache = ValidationCache::open(dir.path());
+    assert!(
+        cache.is_empty(),
+        "garbage entries must vanish instead of serving wrong ids"
+    );
+}
+
+#[test]
+fn save_is_atomic_enough_to_round_trip() {
+    let dir = temp_root();
+    let mut cache = ValidationCache::open(dir.path());
+    cache.record(
+        "heavy/a.txt".into(),
+        CacheEntry {
+            size: 3,
+            mtime: UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(42),
+            id: ContentId([7u8; 32]),
+        },
+    );
+    cache.record(
+        "heavy/nested/b.txt".into(),
+        CacheEntry {
+            size: 9,
+            mtime: UNIX_EPOCH + Duration::from_secs(1),
+            id: ContentId([8u8; 32]),
+        },
+    );
+    cache.save().expect("save");
+
+    let reopened = ValidationCache::open(dir.path());
+    assert_eq!(reopened.len(), 2);
+    assert_eq!(
+        reopened.lookup(
+            "heavy/a.txt",
+            3,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(42)
+        ),
+        Some(ContentId([7u8; 32])),
+        "sub-second mtime precision must survive the round trip"
+    );
+}
