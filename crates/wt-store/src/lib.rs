@@ -28,6 +28,24 @@ impl fmt::Display for ContentId {
     }
 }
 
+impl ContentId {
+    /// Parse the lowercase hex form produced by [`Display`]. Returns
+    /// `None` for anything that is not exactly 64 hex digits.
+    pub fn from_hex(text: &str) -> Option<ContentId> {
+        let bytes = text.as_bytes();
+        if bytes.len() != 64 || !bytes.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        let mut out = [0u8; 32];
+        for (i, pair) in text.as_bytes().chunks(2).enumerate() {
+            let hi = (pair[0] as char).to_digit(16).expect("hex digit") as u8;
+            let lo = (pair[1] as char).to_digit(16).expect("hex digit") as u8;
+            out[i] = hi << 4 | lo;
+        }
+        Some(ContentId(out))
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     /// `get` found the entry but its bytes no longer match the
