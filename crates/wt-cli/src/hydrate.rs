@@ -33,8 +33,8 @@ fn store_dir() -> Result<PathBuf, String> {
     let base = match std::env::var_os("XDG_CACHE_HOME") {
         Some(xdg) => PathBuf::from(xdg),
         None => {
-            let home = std::env::var_os("HOME")
-                .ok_or("cannot locate a home directory for the store")?;
+            let home =
+                std::env::var_os("HOME").ok_or("cannot locate a home directory for the store")?;
             PathBuf::from(home).join(".cache")
         }
     };
@@ -57,11 +57,7 @@ pub struct Ingested {
 /// Walk `src`, storing every regular file's bytes. Symlinks are never
 /// followed out of `src`; they are skipped for now rather than
 /// misinterpreted (matching the copy-backend trait's stance).
-pub fn ingest_dir(
-    store: &mut DiskStore,
-    src_root: &Path,
-    src: &Path,
-) -> Result<Ingested, String> {
+pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<Ingested, String> {
     let mut ingested = Ingested {
         dirs: Vec::new(),
         files: BTreeMap::new(),
@@ -89,9 +85,7 @@ pub fn ingest_dir(
             let bytes =
                 fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             let id = store.put(&bytes).map_err(|e| e.to_string())?;
-            ingested
-                .files
-                .insert(rel_text(src_root, &path), id);
+            ingested.files.insert(rel_text(src_root, &path), id);
         }
     }
     ingested.dirs.sort();
@@ -120,13 +114,16 @@ pub fn materialize(
     for (rel, id) in &ingested.files {
         // Hash verification happens here: a mismatch aborts loudly
         // before anything is written into the fresh worktree.
-        let bytes = store.get(id).map_err(|e| format!("materialize {rel}: {e}"))?;
+        let bytes = store
+            .get(id)
+            .map_err(|e| format!("materialize {rel}: {e}"))?;
         let dest = dest_root.join(rel);
-        let parent = dest.parent().ok_or_else(|| format!("{rel} has no parent"))?;
+        let parent = dest
+            .parent()
+            .ok_or_else(|| format!("{rel} has no parent"))?;
         fs::create_dir_all(parent)
             .map_err(|e| format!("cannot prepare {}: {e}", parent.display()))?;
-        fs::write(&dest, &bytes)
-            .map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
+        fs::write(&dest, &bytes).map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
     }
     Ok(ingested.files.len())
 }

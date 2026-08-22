@@ -1,5 +1,7 @@
-//! Manifest-driven hydration for `wt create` (tickets 02 + 05).
+//! Manifest-driven hydration for `wt create` (tickets 02 + 05) and
+//! garbage collection for `wt remove`/`wt sweep` (ticket 06).
 
+mod gc;
 mod hydrate;
 
 use std::fs;
@@ -36,6 +38,27 @@ enum WtCommand {
         /// the current repository named `<repo>-<name>`.
         #[arg(long)]
         dir: Option<PathBuf>,
+    },
+    /// Remove a worktree and release the store references its
+    /// hydration claimed (recorded in the wt-hydrated.tsv ledger).
+    Remove {
+        /// Branch name; also names the worktree directory, unless
+        /// --dir says otherwise.
+        name: String,
+        /// Path of the worktree to remove. Defaults to the sibling
+        /// `<repo>-<name>` that `wt create` produces.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Delete unreferenced store entries older than --age. Entries a
+    /// live worktree references are never touched.
+    Sweep {
+        /// Minimum age of an unreferenced entry before it may be
+        /// deleted (e.g. 0s, 90s, 10m, 24h, 7d). The floor protects
+        /// content that is mid-ingestion or awaiting its first
+        /// reference.
+        #[arg(long, default_value = "7d")]
+        age: String,
     },
 }
 
@@ -269,13 +292,16 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
             if count == 1 { "" } else { "s" }
         );
     }
-    println!("hydration complete: {total_files} file{} through the store", {
-        if total_files == 1 {
-            ""
-        } else {
-            "s"
+    println!(
+        "hydration complete: {total_files} file{} through the store",
+        {
+            if total_files == 1 {
+                ""
+            } else {
+                "s"
+            }
         }
-    });
+    );
     Ok(())
 }
 
@@ -287,6 +313,8 @@ fn main() {
             manifest,
             dir,
         } => create(&name, manifest.as_deref(), dir.as_deref()),
+        WtCommand::Remove { name, dir } => gc::remove(&name, dir.as_deref()),
+        WtCommand::Sweep { age } => gc::sweep(&age),
     };
     if let Err(msg) = result {
         eprintln!("wt: {msg}");
