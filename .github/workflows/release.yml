@@ -1,0 +1,110 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  WT_REPO: sharzilnafis/wt
+
+jobs:
+  setup-version:
+    # Tag v0.1.0 -> version 0.1.0; every artifact name below uses the
+    # bare version number.
+    runs-on: ubuntu-latest
+    outputs:
+      VERSION: ${{ steps.strip.outputs.VERSION }}
+    steps:
+      - id: strip
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >>"$GITHUB_OUTPUT"
+
+  build:
+    needs: setup-version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-14
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.setup-version.outputs.VERSION }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Sign (macOS)
+        if: runner.os == 'macOS'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          MACOS_IDENTITY: ${{ secrets.MACOS_IDENTITY }}
+        run: |
+          BIN="target/${{ matrix.target }}/release/wt"
+          if [ -n "$MACOS_CERTIFICATE" ]; then
+            echo "$MACOS_CERTIFICATE" | base64 --decode > cert.p12
+            KEYCHAIN=$RUNNER_TEMP/signing.keychain-db
+            security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$KEYCHAIN"
+            security default-keychain -s "$KEYCHAIN"
+            security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$KEYCHAIN"
+            security import cert.p12 -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$MACOS_KEYCHAIN_PASSWORD" "$KEYCHAIN"
+            codesign --force --options runtime --timestamp --sign "$MACOS_IDENTITY" "$BIN"
+            rm -f cert.p12
+          else
+            # No Developer ID certificate configured for this run; fall back
+            # to an ad-hoc signature so the binary still carries a valid one.
+            codesign --force --sign - "$BIN"
+          fi
+      - name: Package
+        run: |
+          DIR="wt-${VERSION}-${{ matrix.target }}"
+          mkdir "$DIR"
+          cp "target/${{ matrix.target }}/release/wt" "$DIR/"
+          cp README.md "$DIR/"
+          tar czf "${DIR}.tar.gz" "$DIR"
+          shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            wt-${{ env.VERSION }}-*.tar.gz
+            wt-${{ env.VERSION }}-*.tar.gz.sha256
+
+  release:
+    needs: [setup-version, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.setup-version.outputs.VERSION }}
+      WT_REPO: ${{ env.WT_REPO }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate brew formula with real checksums
+        run: |
+          mkdir -p Formula-generated
+          ./scripts/gen-formula.sh "$VERSION" dist > Formula-generated/wt.rb
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp Formula-generated/wt.rb dist/wt.rb
+          gh release create "v$VERSION" \
+            --repo "$WT_REPO" \
+            --title "v$VERSION" \
+            --generate-notes \
+            dist/*.tar.gz dist/*.tar.gz.sha256 dist/wt.rb
