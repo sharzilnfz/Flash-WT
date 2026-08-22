@@ -7,8 +7,10 @@
 //! (ticket 06).
 
 mod disk;
+mod validation;
 
 pub use disk::DiskStore;
+pub use validation::{Entry, ValidationCache};
 
 use std::fmt;
 use std::io;
