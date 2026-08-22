@@ -27,6 +27,17 @@ struct Cli {
 enum WtCommand {
     /// Create a worktree for NAME (used as the git branch name) and
     /// hydrate the heavy directories listed in the .wtinclude manifest.
+    #[command(long_about = "Create a worktree for NAME (used as the git branch \
+name) and hydrate the heavy directories listed in the .wtinclude manifest.
+
+Hydrated files are private, fully writable copy-on-write clones of store
+blobs (fclonefileat on macOS); they share the store's physical blocks until
+first write. Filesystems that refuse clones fall back to plain byte copies.
+
+WT_HARDLINK=1 opts into EXPERIMENTAL hardlinked materialization for maximum
+space sharing: linked files share the store's inode, which must be made
+read-only, so tools that rewrite hydrated files in place fail loudly with
+permission errors. WT_NO_HARDLINK=1 forces byte copies instead.")]
     Create {
         /// Branch name; also names the new worktree directory.
         name: String,
@@ -276,6 +287,7 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
     let mut store = hydrate::open_store()?;
     let mut total_files = 0usize;
     let mut total_copied = 0usize;
+    let mut strategy = "byte-copy";
     for rel in &dirs {
         let src = root.join(rel);
         let ingested = ingest_dir(&mut store, &root, &src)?;
@@ -286,6 +298,7 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
             .map_err(|e| format!("hydration of {} failed: {e}", rel.display()))?;
         total_files += report.files;
         total_copied += report.copied;
+        strategy = report.strategy;
         println!(
             "hydrated {} from {} via store ({} file{})",
             rel.display(),
@@ -294,15 +307,24 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
             if report.files == 1 { "" } else { "s" }
         );
     }
-    // Ticket 07: say plainly what happened to shared content.
+    // Say plainly what happened to shared content.
     if std::env::var_os("WT_NO_HARDLINK").is_some() {
         println!(
             "hardlink mode off (WT_NO_HARDLINK): wrote byte copies for all {total_files} file(s)"
         );
-    } else if total_copied > 0 {
-        println!(
-            "hardlink unavailable on this filesystem: wrote byte copies for {total_copied} of {total_files} file(s)"
-        );
+    } else {
+        match (strategy, total_copied) {
+            ("hardlink", 0) => println!(
+                "experimental hardlink mode (WT_HARDLINK): linked shared inodes for all {total_files} file(s)"
+            ),
+            ("hardlink", n) => println!(
+                "experimental hardlink mode (WT_HARDLINK): hardlinks refused for {n} of {total_files} file(s); wrote byte copies"
+            ),
+            (_, 0) => {}
+            (name, n) => println!(
+                "{name} unavailable on this filesystem: wrote byte copies for {n} of {total_files} file(s)"
+            ),
+        }
     }
     println!(
         "hydration complete: {total_files} file{} through the store",

@@ -1,10 +1,12 @@
-//! Ticket 07: hardlink safety, asserted through the CLI seam.
+//! Ticket 07 hardlink safety, asserted through the CLI seam, under
+//! the WT_HARDLINK=1 opt-in (hardlinks are no longer the default;
+//! fast-hydration ticket 03).
 //!
-//! Hydration links store objects into worktrees. A package manager
-//! rewriting a file in place must never reach the sibling worktree or
-//! the store; replacement-style writes must keep working on private
-//! copies. Everything below runs the real `wt` binary and inspects
-//! only files on disk.
+//! Hydration can link store objects into worktrees. A package manager
+//! rewriting a linked file in place must never reach the sibling
+//! worktree or the store; replacement-style writes must keep working
+//! on private copies. Everything below runs the real `wt` binary and
+//! inspects only files on disk.
 
 mod common;
 
@@ -53,15 +55,28 @@ fn hydrated_file(worktree: &Path) -> PathBuf {
     f
 }
 
+/// Run `wt create` with hardlinked materialization explicitly opted
+/// into: hardlinks are no longer the default (fast-hydration
+/// ticket 03).
+fn wt_hardlinked(fx: &Fixture, name: &str, store: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_wt"))
+        .args(["create", name])
+        .env("WT_STORE", store)
+        .env("WT_HARDLINK", "1")
+        .current_dir(&fx.repo)
+        .output()
+        .expect("run wt binary")
+}
+
 #[test]
-fn hydration_hardlinks_worktrees_to_the_store_by_default() {
+fn opting_into_hardlinks_shares_one_inode_per_blob_across_worktrees() {
     let fx = Fixture::heavy_repo(60);
     fs::write(fx.repo.join(".wtinclude"), "heavy/\n").unwrap();
 
     let base = tempfile::tempdir().unwrap();
     let store = base.path().join("store");
     let parent = fx.repo.parent().unwrap();
-    let wt = |name: &str| fx.wt_with_store(&["create", name], &store);
+    let wt = |name: &str| wt_hardlinked(&fx, name, &store);
 
     let first = wt("one");
     assert!(
@@ -89,7 +104,7 @@ fn hydration_hardlinks_worktrees_to_the_store_by_default() {
 }
 
 #[test]
-fn in_place_rewrite_cannot_poison_sibling_worktree_or_store() {
+fn opted_in_hardlinks_refuse_in_place_rewrites_and_protect_siblings() {
     if running_as_root() {
         eprintln!("skipping: root bypasses permission-based protection");
         return;
@@ -100,7 +115,7 @@ fn in_place_rewrite_cannot_poison_sibling_worktree_or_store() {
     let base = tempfile::tempdir().unwrap();
     let store = base.path().join("store");
     let parent = fx.repo.parent().unwrap();
-    let wt = |name: &str| fx.wt_with_store(&["create", name], &store);
+    let wt = |name: &str| wt_hardlinked(&fx, name, &store);
     assert!(wt("one").status.success(), "create one failed");
     assert!(wt("two").status.success(), "create two failed");
 
@@ -134,7 +149,7 @@ fn package_manager_rewrite_patterns_stay_isolated_across_worktrees() {
     let base = tempfile::tempdir().unwrap();
     let store = base.path().join("store");
     let parent = fx.repo.parent().unwrap();
-    let wt = |name: &str| fx.wt_with_store(&["create", name], &store);
+    let wt = |name: &str| wt_hardlinked(&fx, name, &store);
     assert!(wt("one").status.success(), "create one failed");
     assert!(wt("two").status.success(), "create two failed");
 
