@@ -9,6 +9,7 @@
 mod disk;
 mod gc;
 mod mirror;
+mod snapshot;
 mod validation;
 mod verified;
 
@@ -17,6 +18,10 @@ pub use gc::{GcMode, MarkReport, MarkSwept};
 pub use mirror::{
     escape, mirror_path, publish as publish_mirror, read_all as read_mirrors, unescape,
     worktree_key, ReadMirror, StoreMirror,
+};
+pub use snapshot::{
+    read_published as read_published_snapshot, snapshot_path, snapshot_tree_path, BuildError,
+    EntryKind, Manifest, PublishOutcome, SnapshotEntry,
 };
 pub use validation::{Entry, ValidationCache};
 pub use verified::{Fingerprint, VerifiedLedger};

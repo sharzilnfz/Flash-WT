@@ -39,6 +39,13 @@ The store-local GC root for one hydrated worktree: a small TSV file under
 from, written atomically once per successful create. Written beside legacy
 refcounts until the explicit cutover (ADR-0004).
 
+**Snapshot**
+A rebuildable whole-directory image in the store:
+`<store>/snapshots/<manifest-hash>/` holds a canonical manifest plus a tree
+of files hardlinked to object blobs. On a hit, hydrating one heavy
+directory is a single recursive APFS clone of that tree; a miss rebuilds
+it from blobs first. Cache only — the blobs remain the truth (ADR-0005).
+
 **Grace period**
 How long the store waits before collecting anything unreferenced — blobs,
 snapshots, or whole dead-worktree mirrors. Defaults to 15 minutes,

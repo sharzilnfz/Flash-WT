@@ -100,11 +100,18 @@ impl DiskStore {
     /// Both paths are canonicalized here, at write time, exactly as
     /// the key derivation requires. One atomic write per successful
     /// create — this replaces per-blob ref writes as GC bookkeeping.
+    ///
+    /// `file_blobs` carries one `file` record per per-file-placed
+    /// blob; `snapshots` carries one `snapshot` record per heavy
+    /// directory hydrated from a whole-directory snapshot. A snapshot
+    /// hydration writes ONLY its snapshot record (the manifest marks
+    /// every child blob); a fallback hydration writes file records.
     pub fn publish_worktree_mirror<'a>(
         &self,
         worktree: &Path,
         gitdir: &Path,
         file_blobs: impl IntoIterator<Item = &'a ContentId>,
+        snapshots: impl IntoIterator<Item = &'a ContentId>,
     ) -> Result<PathBuf> {
         let worktree =
             fs::canonicalize(worktree).map_err(|e| Error::Io(path_error("worktree", e)))?;
@@ -112,6 +119,9 @@ impl DiskStore {
         let mut m = mirror::StoreMirror::new(worktree, gitdir);
         for id in file_blobs {
             m.files.insert(*id);
+        }
+        for id in snapshots {
+            m.snapshots.insert(*id);
         }
         mirror::publish(self.root(), &m).map_err(Error::Io)
     }
@@ -390,21 +400,26 @@ fn cutoff_of(now: SystemTime, grace: Duration) -> SystemTime {
 fn mark_through(report: &mut MarkReport, root: &Path, m: &mirror::StoreMirror) {
     report.marked.extend(m.files.iter().copied());
     for snapshot in &m.snapshots {
-        if snapshot_manifest_exists(root, snapshot) {
-            report.referenced_snapshots.insert(*snapshot);
-            // v1 has no manifest schema yet (Phase 2); nothing
-            // further to mark through it today. An unresolvable
-            // snapshot marks through nothing — its worktree holds
-            // private clones and rebuilds on the next create.
-        } else {
-            report.unresolved_snapshots += 1;
+        match crate::snapshot::read_published(root, snapshot) {
+            Some(manifest) => {
+                report.referenced_snapshots.insert(*snapshot);
+                // Mark every file entry's blob: the snapshot is only
+                // alive while referenced, and its blobs must outlive
+                // it. Symlinks and dirs reference no blobs.
+                for entry in &manifest.entries {
+                    if let Some(blob) = entry.blob {
+                        report.marked.insert(blob);
+                    }
+                }
+            }
+            None => {
+                // A missing, invalid, or incomplete snapshot marks
+                // through nothing — its worktree holds private clones
+                // and rebuilds on the next create.
+                report.unresolved_snapshots += 1;
+            }
         }
     }
-}
-
-fn snapshot_manifest_exists(root: &Path, hash: &ContentId) -> bool {
-    let dir = root.join("snapshots").join(hash.to_string());
-    dir.join("manifest.tsv").is_file() && dir.join(".complete").is_file()
 }
 
 fn remove_tree(path: &Path) -> bool {

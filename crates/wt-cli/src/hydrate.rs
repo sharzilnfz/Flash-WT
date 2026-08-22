@@ -33,6 +33,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -67,11 +68,31 @@ pub struct Ingested {
     pub dirs: Vec<String>,
     /// Repo-relative file path -> stored content address.
     pub files: BTreeMap<String, ContentId>,
+    /// Ticket 08 (only populated when `WT_SNAPSHOTS=1`): repo-relative
+    /// symlink path -> raw target. Symlinks are recorded, never
+    /// followed or stored as blobs; only the snapshot manifest
+    /// consumes them.
+    pub symlinks: BTreeMap<String, String>,
+    /// Ticket 08 (same gate): repo-relative file path -> on-disk mode.
+    /// Only the snapshot manifest consumes these; the per-file ladder
+    /// keeps its existing normalized-mode behavior untouched.
+    pub modes: BTreeMap<String, u32>,
+}
+
+/// Ticket 08 feature gate: `WT_SNAPSHOTS=1` enables whole-directory
+/// snapshots. Anything else — including unset — keeps the existing
+/// per-file materialization. Default stays OFF until parity and
+/// benchmark gates pass (ADR-0005).
+pub fn snapshots_enabled() -> bool {
+    std::env::var("WT_SNAPSHOTS").as_deref() == Ok("1")
 }
 
 /// Walk `src`, storing every regular file's bytes. Symlinks are never
-/// followed out of `src`; they are skipped for now rather than
-/// misinterpreted (matching the copy-backend trait's stance).
+/// followed out of `src`; with the snapshot gate off they are skipped
+/// for now rather than misinterpreted (matching the copy-backend
+/// trait's stance). With `WT_SNAPSHOTS=1` they are recorded for the
+/// manifest instead, and non-regular files fail loudly rather than
+/// silently vanishing from a snapshot.
 ///
 /// Ticket 02: a validation cache beside the store remembers each
 /// path's size, mtime, and content id from the previous ingest. A
@@ -83,9 +104,12 @@ pub struct Ingested {
 /// (`ensure_verified`, ticket 05), so lying cached metadata fails
 /// loudly instead of landing bad bytes in a fresh tree.
 pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<Ingested, String> {
+    let snapshots = snapshots_enabled();
     let mut ingested = Ingested {
         dirs: Vec::new(),
         files: BTreeMap::new(),
+        symlinks: BTreeMap::new(),
+        modes: BTreeMap::new(),
     };
     let mut cache = ValidationCache::open(store.root());
     let mut stack = vec![src.to_path_buf()];
@@ -99,6 +123,17 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
                 .file_type()
                 .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
             if file_type.is_symlink() {
+                // Ticket 08: with snapshots on, symlinks are recorded
+                // faithfully in the manifest (target only — targets are
+                // never stored as blobs). With the gate off, the long-
+                // standing skip applies unchanged.
+                if snapshots {
+                    let target = fs::read_link(&path)
+                        .map_err(|e| format!("cannot read symlink {}: {e}", path.display()))?;
+                    ingested
+                        .symlinks
+                        .insert(rel_text(src_root, &path), target.to_string_lossy().into_owned());
+                }
                 continue;
             }
             if file_type.is_dir() {
@@ -106,11 +141,25 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
                 continue;
             }
             if !file_type.is_file() {
+                // FIFOs, sockets, devices have no place in a snapshot:
+                // fail loudly before placement rather than silently
+                // dropping content the manifest cannot represent.
+                if snapshots {
+                    return Err(format!(
+                        "{} is not a regular file (fifos/sockets/devices are unsupported)",
+                        path.display()
+                    ));
+                }
                 continue;
             }
             let rel = rel_text(src_root, &path);
             let meta =
                 fs::metadata(&path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+            if snapshots {
+                ingested
+                    .modes
+                    .insert(rel.clone(), meta.mode() & 0o7777);
+            }
             let size = meta.len();
             let mtime = meta.modified().map_err(|e| format!("cannot stat {}: {e}", rel))?;
             let id = match cache.lookup(&rel, size, mtime) {
@@ -336,17 +385,64 @@ pub fn claim_references(
 
 /// Publish the authoritative store-local mirror for one successful
 /// create: one atomic write naming the worktree's canonical identity
-/// and every distinct blob it hydrates from (ticket 07). This — not
-/// the per-blob refcounts — is what mark-and-sweep marks through.
+/// and every blob or snapshot it hydrates from (ticket 07). This —
+/// not the per-blob refcounts — is what mark-and-sweep marks through.
+/// A snapshot hydration contributes ONLY its `snapshot` record; the
+/// manifest marks every child blob.
 pub fn publish_mirror(
     store: &mut DiskStore,
     worktree: &Path,
     git_dir: &Path,
     ingested: &Ingested,
+    snapshots: &[ContentId],
 ) -> Result<(), String> {
     let distinct: BTreeSet<&ContentId> = ingested.files.values().collect();
     store
-        .publish_worktree_mirror(worktree, git_dir, distinct)
+        .publish_worktree_mirror(worktree, git_dir, distinct, snapshots.iter())
         .map(|_| ())
         .map_err(|e| format!("cannot publish worktree mirror: {e}"))
+}
+
+/// Ticket 08: give a snapshot-hydrated worktree its bookkeeping.
+///
+/// Legacy refs are still claimed on every distinct child blob (dual-
+/// write safety: an old binary reading the store must not collect
+/// blobs it cannot see through snapshot manifests), but the sidecar
+/// carries TYPED rows so removal knows which ids are blobs and which
+/// name snapshots:
+///
+/// ```text
+/// <rel><TAB>blob<TAB><64-hex-blob-id>
+/// -<TAB>snapshot<TAB><64-hex-manifest-hash>
+/// ```
+///
+/// (Two-field rows remain the legacy per-file format from ticket 05.)
+/// The store-local mirror itself gets only the `snapshot` record.
+pub fn claim_snapshot_references(
+    store: &mut DiskStore,
+    worktree: &Path,
+    ingested: &Ingested,
+    snapshot: ContentId,
+) -> Result<PathBuf, String> {
+    use wt_store::Store as _;
+
+    let distinct: BTreeSet<&ContentId> = ingested.files.values().collect();
+    if store.gc_mode() != GcMode::MarkSweepNoRefs {
+        for id in &distinct {
+            store.add_ref(id).map_err(|e| e.to_string())?;
+        }
+    }
+
+    let git_dir = worktree_git_dir(worktree)?;
+    let mut sidecar = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(git_dir.join("wt-hydrated.tsv"))
+        .map_err(|e| format!("cannot open hydration ledger: {e}"))?;
+    for (rel, id) in &ingested.files {
+        writeln!(sidecar, "{rel}\tblob\t{id}").map_err(|e| format!("cannot write ledger: {e}"))?;
+    }
+    writeln!(sidecar, "-\tsnapshot\t{snapshot}")
+        .map_err(|e| format!("cannot write ledger: {e}"))?;
+    Ok(git_dir)
 }
