@@ -1,0 +1,25 @@
+# Ticket 08: the benchmark suite must run unattended on macOS and
+# Linux CI. Quick mode keeps the smoke run under a couple of minutes;
+# the full suite stays a local command.
+name: benchmarks
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'benchmarks/**'
+      - 'crates/**'
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run benchmark suite (quick mode)
+        run: ./benchmarks/run.sh --quick --verify
