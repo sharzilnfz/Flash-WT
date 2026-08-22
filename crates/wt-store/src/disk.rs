@@ -6,6 +6,9 @@
 //! - `<root>/objects/<2 hex>/<62 hex>` — content blobs named by their
 //!   SHA-256 digest. Identical bytes therefore occupy disk once.
 //! - `<root>/refs/<64 hex>` — decimal reference count per blob.
+//! - `<root>/verified.tsv` — fast-hydration ticket 05's ledger of
+//!   blob fingerprints (size, mtime) recorded when each hash was last
+//!   checked; see [`crate::verified`].
 //!
 //! All state lives on disk, so separate handles on the same root see
 //! each other's writes without shared memory. Blobs are written to a
@@ -16,14 +19,21 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
+use crate::verified::VerifiedLedger;
 use crate::{ContentId, Error, Result, Store};
 
 pub struct DiskStore {
     root: PathBuf,
+    /// Fast-hydration ticket 05: fingerprints of blobs whose hash has
+    /// been checked at least once. Updates go through a mutex so the
+    /// store handle stays shareable behind `&self` (materialization
+    /// only borrows it); the ledger is persisted once per run.
+    ledger: Mutex<VerifiedLedger>,
 }
 
 /// What one sweep pass observed.
@@ -42,7 +52,56 @@ impl DiskStore {
         let root = root.into();
         fs::create_dir_all(root.join("objects"))?;
         fs::create_dir_all(root.join("refs"))?;
-        Ok(DiskStore { root })
+        let ledger = Mutex::new(VerifiedLedger::open(&root));
+        Ok(DiskStore { root, ledger })
+    }
+
+    /// Lock the ledger, recovering from a poisoned one: the entries
+    /// inside stay valid no matter which thread panicked mid-update.
+    fn ledger(&self) -> MutexGuard<'_, VerifiedLedger> {
+        self.ledger.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Persist any pending verified-ledger updates. Called once at the
+    /// end of a run (also from `Drop`, best-effort); a failure here
+    /// only costs verification speed next run, never correctness.
+    pub fn flush(&self) -> io::Result<()> {
+        self.ledger().save_if_dirty()
+    }
+
+    /// Fast-hydration ticket 05: prove the blob at `id` is good,
+    /// paying for a read-and-hash only when there is no choice.
+    ///
+    /// A matching (size, mtime) fingerprint in the verified ledger —
+    /// recorded when this blob's hash was last checked — returns
+    /// without reading a single byte. Otherwise the bytes are read and
+    /// hashed exactly like [`Store::get`]: mismatch fails loudly with
+    /// [`Error::Corrupted`] and records nothing; match records the
+    /// fingerprint. A missing blob stays [`Error::UnknownContent`].
+    pub fn ensure_verified(&self, id: &ContentId) -> Result<()> {
+        let path = self.object_path(id);
+        let meta = match fs::metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(Error::UnknownContent(*id))
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let size = meta.len();
+        let mtime = meta.modified()?;
+        if self.ledger().matches(id, size, mtime) {
+            return Ok(());
+        }
+        let content = fs::read(&path)?;
+        if ContentId(Sha256::digest(&content).into()) != *id {
+            return Err(Error::Corrupted(*id));
+        }
+        drop(content);
+        // Fingerprint AFTER the successful check. Chmod elsewhere does
+        // not touch mtime, so what was stat'd is what was hashed.
+        self.ledger()
+            .record(*id, crate::verified::Fingerprint { size, mtime });
+        Ok(())
     }
 
     /// The root this store was opened with. The ingest validation
@@ -118,6 +177,10 @@ impl DiskStore {
     /// this is interrupted between the two, what remains is an
     /// unreferenced object — a state the sweep already understands and
     /// will reclaim on its next run.
+    ///
+    /// Ticket 05: the verified-ledger entry goes with it (best-effort;
+    /// a stale entry could only ever cost a re-verification, but there
+    /// is no reason to keep it).
     pub fn delete(&mut self, id: &ContentId) -> Result<()> {
         match fs::remove_file(self.ref_path(id)) {
             Ok(()) => {}
@@ -129,6 +192,7 @@ impl DiskStore {
         if let Some(shard) = self.object_path(id).parent() {
             let _ = fs::remove_dir(shard);
         }
+        self.ledger().forget(id);
         Ok(())
     }
 
@@ -206,6 +270,30 @@ impl Store for DiskStore {
             // content races harmlessly because both write identical
             // bytes to the same final name.
             tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
+            // Temp files carry restrictive modes; normalize the blob to
+            // what open(O_CREAT) would have produced (ticket 05). CoW
+            // clones then inherit normal writable permissions, so the
+            // placement path needs no per-file chmod. Blobs written by
+            // older versions keep their 0600 mode until re-ingested —
+            // their clones are owner-rw-only, which is acceptable and
+            // cheaper than a chmod walk over every hydrated file.
+            //
+            // The fingerprint is recorded here too: the address IS the
+            // hash of the bytes just written through an atomic rename,
+            // so a fresh blob is verified by construction.
+            let perms = fs::Permissions::from_mode(default_file_mode());
+            let _ = fs::set_permissions(&path, perms);
+            if let Ok(meta) = fs::metadata(&path) {
+                if let Ok(mtime) = meta.modified() {
+                    self.ledger().record(
+                        id,
+                        crate::verified::Fingerprint {
+                            size: meta.len(),
+                            mtime,
+                        },
+                    );
+                }
+            }
         }
         Ok(id)
     }
@@ -227,12 +315,18 @@ impl Store for DiskStore {
     }
 
     fn add_ref(&mut self, id: &ContentId) -> Result<()> {
-        if !self.contains(id) {
-            return Err(Error::UnknownContent(*id));
-        }
+        // Fast-hydration ticket 05: claim_references calls this once
+        // per distinct blob, so skip the redundant existence stat when
+        // a readable ref file already proves the blob was put before.
         let current = match fs::metadata(self.ref_path(id)) {
             Ok(_) => self.read_ref_count(id)?,
-            Err(_) => 0,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if !self.contains(id) {
+                    return Err(Error::UnknownContent(*id));
+                }
+                0
+            }
+            Err(e) => return Err(e.into()),
         };
         self.write_ref_count(id, current + 1)
     }
@@ -259,5 +353,26 @@ impl Store for DiskStore {
             Ok(_) => self.read_ref_count(id),
             Err(_) => Ok(0),
         }
+    }
+}
+
+/// The mode `open(O_CREAT)` would give a new file: 0o666 minus the
+/// process umask. Read twice and restored immediately; wt runs
+/// single-threaded per store handle, so the window cannot race
+/// anything meaningful.
+fn default_file_mode() -> u32 {
+    // SAFETY: umask(2) has no failure mode; both calls only read and
+    // restore the process mask.
+    let mask = unsafe { libc::umask(0) };
+    unsafe { libc::umask(mask) };
+    0o666 & !(mask as u32)
+}
+
+impl Drop for DiskStore {
+    /// Best-effort persistence of the verified ledger. Failures cost
+    /// verification speed on the next run (the next run re-hashes what
+    /// it cannot trust), never correctness.
+    fn drop(&mut self) {
+        let _ = self.ledger().save_if_dirty();
     }
 }

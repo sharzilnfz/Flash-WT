@@ -8,9 +8,11 @@
 
 mod disk;
 mod validation;
+mod verified;
 
 pub use disk::DiskStore;
 pub use validation::{Entry, ValidationCache};
+pub use verified::{Fingerprint, VerifiedLedger};
 
 use std::fmt;
 use std::io;

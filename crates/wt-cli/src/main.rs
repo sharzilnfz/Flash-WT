@@ -37,7 +37,12 @@ first write. Filesystems that refuse clones fall back to plain byte copies.
 WT_HARDLINK=1 opts into EXPERIMENTAL hardlinked materialization for maximum
 space sharing: linked files share the store's inode, which must be made
 read-only, so tools that rewrite hydrated files in place fail loudly with
-permission errors. WT_NO_HARDLINK=1 forces byte copies instead.")]
+permission errors. WT_NO_HARDLINK=1 forces byte copies instead.
+
+Blobs are hash-verified once and then trusted while their size and mtime
+stay unchanged (a verified-blob ledger beside the store tracks this);
+WT_VERIFY=1 forces a full re-hash of every blob on every run for paranoid
+verification.")]
     Create {
         /// Branch name; also names the new worktree directory.
         name: String,
@@ -326,6 +331,12 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
             ),
         }
     }
+    // Persist the verified-blob ledger explicitly: the Drop below is
+    // a best-effort backup, but a clean run should leave its
+    // verifications behind even if something later fails hard.
+    store
+        .flush()
+        .map_err(|e| format!("cannot update verified-blob ledger: {e}"))?;
     println!(
         "hydration complete: {total_files} file{} through the store",
         {

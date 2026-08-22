@@ -105,25 +105,17 @@ impl FileMaterialize for CloneOut {
             return Err(io::Error::last_os_error());
         }
 
-        // fclonefileat clones the source's attributes, and store
-        // blobs are written through temp files carrying restrictive
-        // modes. Normalize to what a plain byte copy would have
-        // produced: normal writable permissions, umask applied.
-        let perms = fs::Permissions::from_mode(default_file_mode());
-        fs::set_permissions(dest, perms)
+        // fclonefileat clones the source's attributes, so the
+        // destination inherits the blob's permissions. Store blobs are
+        // normalized to `default_file_mode()` at put time
+        // (fast-hydration ticket 05), which is exactly what a plain
+        // byte copy would have produced — no per-file chmod here. A
+        // store written by an older version still holds 0600 blobs;
+        // their clones are owner-rw-only until those blobs are
+        // re-ingested. Accepted and documented: one syscall per NEW
+        // blob beats one per hydrated file.
+        Ok(())
     }
-}
-
-/// The mode `open(O_CREAT)` would give a new file: 0o666 minus the
-/// process umask. Read twice and restored immediately; wt runs
-/// single-threaded, so the window cannot race anything.
-#[cfg(unix)]
-fn default_file_mode() -> u32 {
-    // SAFETY: umask(2) has no failure mode; both calls only read and
-    // restore the process mask.
-    let mask = unsafe { libc::umask(0) };
-    unsafe { libc::umask(mask) };
-    0o666 & !(mask as u32)
 }
 
 /// Placement errors that mean "this filesystem cannot do that" and
