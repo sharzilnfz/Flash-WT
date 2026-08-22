@@ -1,6 +1,17 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "model": "opencode/ox-alpha-free",
+  "permissions": [
+    { "action": "*", "resource": "*", "effect": "allow" },
+    { "action": "shell", "resource": "git push*", "effect": "deny" },
+    { "action": "shell", "resource": "rm -rf /*", "effect": "deny" },
+    { "action": "shell", "resource": "rm -rf ~*", "effect": "deny" },
+    { "action": "external_directory", "resource": "/tmp/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "/private/tmp/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "/var/folders/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "/private/var/folders/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "~/.cache/*", "effect": "allow" }
+  ],
   "providers": {
     "opencode": {
       "models": {
