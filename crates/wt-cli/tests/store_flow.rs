@@ -132,6 +132,16 @@ fn hash_mismatch_during_materialize_fails_loudly() {
         .expect("store has objects");
     let mut bytes = fs::read(&blob).unwrap();
     bytes[0] ^= 0xff;
+    // Since ticket 07, linked-out blobs carry a read-only shared
+    // inode; disk-level corruption does not respect that, so neither
+    // does the simulation.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&blob).unwrap().permissions();
+        perms.set_mode(perms.mode() | 0o200);
+        fs::set_permissions(&blob, perms).unwrap();
+    }
     fs::write(&blob, &bytes).unwrap();
 
     let second = fx.wt_with_store(&["create", "bad"], &store);

@@ -252,30 +252,45 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
 
     let mut store = hydrate::open_store()?;
     let mut total_files = 0usize;
+    let mut total_copied = 0usize;
     for rel in &dirs {
         let src = root.join(rel);
         let ingested = ingest_dir(&mut store, &root, &src)?;
         claim_references(&mut store, &dest, &ingested)?;
         // Ingested paths are repo-relative (they include the heavy
         // directory itself), so materialize against the worktree root.
-        let count = materialize(&store, &ingested, &dest)
+        let report = materialize(&store, &ingested, &dest)
             .map_err(|e| format!("hydration of {} failed: {e}", rel.display()))?;
-        total_files += count;
+        total_files += report.files;
+        total_copied += report.copied;
         println!(
             "hydrated {} from {} via store ({} file{})",
             rel.display(),
             src.display(),
-            count,
-            if count == 1 { "" } else { "s" }
+            report.files,
+            if report.files == 1 { "" } else { "s" }
         );
     }
-    println!("hydration complete: {total_files} file{} through the store", {
-        if total_files == 1 {
-            ""
-        } else {
-            "s"
+    // Ticket 07: say plainly what happened to shared content.
+    if std::env::var_os("WT_NO_HARDLINK").is_some() {
+        println!(
+            "hardlink mode off (WT_NO_HARDLINK): wrote byte copies for all {total_files} file(s)"
+        );
+    } else if total_copied > 0 {
+        println!(
+            "hardlink unavailable on this filesystem: wrote byte copies for {total_copied} of {total_files} file(s)"
+        );
+    }
+    println!(
+        "hydration complete: {total_files} file{} through the store",
+        {
+            if total_files == 1 {
+                ""
+            } else {
+                "s"
+            }
         }
-    });
+    );
     Ok(())
 }
 

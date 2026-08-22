@@ -45,6 +45,7 @@ impl Fixture {
     }
 
     /// Run `wt <args>` inside the fixture repository.
+    #[allow(dead_code)] // each suite compiles this module; not all use both runners
     pub fn wt(&self, args: &[&str]) -> std::process::Output {
         Command::new(env!("CARGO_BIN_EXE_wt"))
             .args(args)
@@ -55,6 +56,7 @@ impl Fixture {
 
     /// Run `wt <args>` with `WT_STORE` pointed at an isolated store,
     /// so tests never touch the developer's machine-wide store.
+    #[allow(dead_code)] // each suite compiles this module; not all use both runners
     pub fn wt_with_store(&self, args: &[&str], store: &Path) -> std::process::Output {
         Command::new(env!("CARGO_BIN_EXE_wt"))
             .args(args)
