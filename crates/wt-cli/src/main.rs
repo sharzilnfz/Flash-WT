@@ -1,15 +1,11 @@
 //! Manifest-driven hydration for `wt create` (ticket 02).
 
-mod portable;
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::{Parser, Subcommand};
-use wt_copy::{CopyBackend, Safety, StubBackend};
-
-use portable::PortableDeepCopy;
+use wt_copy::{candidates, CopyBackend, Safety};
 
 #[derive(Parser)]
 #[command(
@@ -175,9 +171,11 @@ fn collect_matches(root: &Path, patterns: &[String]) -> Vec<PathBuf> {
 }
 
 /// Backends tried in order; the first safe backend whose `supports`
-/// accepts the source filesystem performs the copy.
+/// accepts the source filesystem performs the copy. Ticket 03's
+/// selection layer replaces the ticket-01 stub now that real
+/// strategies exist.
 fn backends() -> Vec<Box<dyn CopyBackend>> {
-    vec![Box::new(StubBackend), Box::new(PortableDeepCopy)]
+    candidates()
 }
 
 fn hydrate_one(
