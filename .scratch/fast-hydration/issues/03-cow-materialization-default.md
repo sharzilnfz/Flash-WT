@@ -8,14 +8,14 @@ One design seam needs real work: the copy-backend trait is directory-shaped (clo
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** ready-for-agent (implemented on `fleet/03-cow-materialize`)
 
-- [ ] Default hydration produces private, writable files with normal permissions on APFS
-- [ ] In-place rewrite of a hydrated file succeeds and stays private to that worktree
-- [ ] Before first write, hydrated trees share physical blocks with the store (measured, not asserted)
-- [ ] A second create against an unchanged store adds no new store content — dedup preserved
-- [ ] Corrupt store content still fails loudly before landing in a fresh tree
-- [ ] Filesystems refusing CoW fall back to byte copies without user-visible failure
-- [ ] Opt-in flag restores hardlink behavior; default path no longer links shared inodes
-- [ ] GC reference counting works unchanged: removal after `wt remove` releases what hydration claimed
-- [ ] e2e tests assert writability, privacy-after-write, dedup, corruption, and GC through the existing CLI seam
+- [x] Default hydration produces private, writable files with normal permissions on APFS
+- [x] In-place rewrite of a hydrated file succeeds and stays private to that worktree
+- [x] Before first write, hydrated trees share physical blocks with the store (measured, not asserted)
+- [x] A second create against an unchanged store adds no new store content — dedup preserved
+- [x] Corrupt store content still fails loudly before landing in a fresh tree
+- [x] Filesystems refusing CoW fall back to byte copies without user-visible failure
+- [x] Opt-in flag restores hardlink behavior; default path no longer links shared inodes
+- [x] GC reference counting works unchanged: removal after `wt remove` releases what hydration claimed
+- [x] e2e tests assert writability, privacy-after-write, dedup, corruption, and GC through the existing CLI seam

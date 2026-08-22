@@ -345,6 +345,7 @@ dependencies = [
  "clap",
  "libc",
  "tempfile",
+ "wt-copy",
  "wt-store",
 ]
 

@@ -11,10 +11,20 @@
 //! the worktree's git dir (`wt-hydrated.tsv`). Ticket 06's garbage
 //! collection releases those references when the worktree dies.
 //!
-//! Integrity: materialize goes through `Store::get`, which verifies
-//! each blob against its address. Corrupt store content fails loudly
+//! Integrity: materialize verifies each blob through `Store::get`
+//! BEFORE anything is placed, so corrupt store content fails loudly
 //! instead of landing bad bytes in a fresh tree (spec: silent
 //! corruption is detectable).
+//!
+//! Materialization strategy (fast-hydration ticket 03): the default
+//! places every blob as a per-file copy-on-write clone (`fclonefileat`
+//! on macOS) — a fresh private inode sharing the blob's physical
+//! blocks until first write, with normal writable permissions.
+//! Filesystems that refuse the clone fall back silently to byte
+//! copies; Linux gets byte copies until reflink is validated there.
+//! Hardlinked materialization survives behind `WT_HARDLINK=1` as an
+//! experimental mode (see below), and `WT_NO_HARDLINK=1` still forces
+//! plain byte copies.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -22,6 +32,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use wt_copy::{CloneOut, FileMaterialize, HardlinkOut, placement_refused};
 use wt_store::{ContentId, DiskStore, Store};
 
 /// Where the per-machine store lives. `$WT_STORE` wins (tests use it
@@ -104,36 +115,70 @@ fn rel_text(root: &Path, path: &Path) -> String {
 pub struct MaterializeReport {
     /// Total files placed.
     pub files: usize,
-    /// Files written as byte copies because hardlinking was disabled
-    /// or refused by the filesystem. Zero means everything was
-    /// hardlinked from the store (ticket 07).
+    /// Files written as plain byte copies because the selected
+    /// strategy was disabled or refused by the filesystem.
     pub copied: usize,
+    /// Strategy attempted for this directory: `"copy-on-write"`
+    /// (default), `"hardlink"` (`WT_HARDLINK=1`), or `"byte-copy"`
+    /// (forced by `WT_NO_HARDLINK`, and the answer on platforms with
+    /// no clone support yet). Check `copied` to see how much of it
+    /// actually happened.
+    pub strategy: &'static str,
+}
+
+/// Which placement strategy this run uses, from the environment:
+///
+/// - `WT_NO_HARDLINK` present: forced byte copies (the escape hatch).
+///   Kept for compatibility with the ticket 07 flag.
+/// - `WT_HARDLINK=1`: experimental hardlinked materialization —
+///   maximum space sharing, but linked inodes are made read-only, so
+///   tools that rewrite files in place fail loudly.
+/// - otherwise: per-file CoW clones on macOS; byte copies elsewhere
+///   until Linux reflink is validated for store materialization.
+fn select_strategy() -> Option<Box<dyn FileMaterialize>> {
+    if std::env::var_os("WT_NO_HARDLINK").is_some() {
+        return None;
+    }
+    if std::env::var_os("WT_HARDLINK").is_some() {
+        return Some(Box::new(HardlinkOut));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(Box::new(CloneOut))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
 }
 
 /// Recreate the ingested tree under `dest_root` from store content.
 ///
-/// Ticket 07: files are hard-linked out of the store instead of
-/// rewritten, so hydration costs near zero and two worktrees share
-/// one inode per blob. `link_out` verifies the blob's hash first and
-/// strips write bits from the shared inode, so a package manager's
-/// in-place rewrite fails loudly instead of poisoning every tree and
-/// the store; replacement-style writes break the share and stay
-/// private. Filesystems that refuse the link (or `WT_NO_HARDLINK=1`)
-/// fall back to byte copies, which are private and may stay writable.
+/// Per file: verify first (`Store::get` reads and hashes every byte
+/// and aborts loudly on mismatch), and only then place anything — a
+/// corrupt blob never lands in a fresh tree. Placement tries the
+/// selected strategy (CoW clone by default) against the verified
+/// blob; filesystem refusals fall back silently to a byte copy of
+/// those same verified bytes. Permission problems on the destination
+/// are real failures and stay loud.
 pub fn materialize(
     store: &DiskStore,
     ingested: &Ingested,
     dest_root: &Path,
 ) -> Result<MaterializeReport, String> {
-    let allow_hardlinks = std::env::var_os("WT_NO_HARDLINK").is_none();
+    let backend = select_strategy();
     let mut copied = 0usize;
     for rel in &ingested.dirs {
         fs::create_dir_all(dest_root.join(rel))
             .map_err(|e| format!("cannot prepare {}: {e}", dest_root.join(rel).display()))?;
     }
     for (rel, id) in &ingested.files {
-        // Hash verification happens here: a mismatch aborts loudly
-        // before anything is written into the fresh worktree.
+        // Hash verification happens here, before any placement: with
+        // fclonefileat the kernel copies bytes directly from the blob
+        // at clone time, so the blob must already be known-good or
+        // corruption would land. The TOCTOU window between this check
+        // and the kernel's read is the one the previous design had in
+        // reverse; nothing else guards it today either.
         let bytes = store
             .get(id)
             .map_err(|e| format!("materialize {rel}: {e}"))?;
@@ -144,15 +189,15 @@ pub fn materialize(
         fs::create_dir_all(parent)
             .map_err(|e| format!("cannot prepare {}: {e}", parent.display()))?;
 
-        let mut linked = false;
-        if allow_hardlinks {
-            match store.link_out(id, &dest) {
-                Ok(()) => linked = true,
-                Err(wt_store::Error::Io(e)) if link_refused(&e) => {}
+        let mut placed = false;
+        if let Some(backend) = &backend {
+            match backend.materialize_file(&store.blob_path(id), &dest) {
+                Ok(()) => placed = true,
+                Err(e) if placement_refused(&e) => {}
                 Err(e) => return Err(format!("materialize {rel}: {e}")),
             }
         }
-        if !linked {
+        if !placed {
             copied += 1;
             fs::write(&dest, &bytes)
                 .map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
@@ -161,30 +206,16 @@ pub fn materialize(
     Ok(MaterializeReport {
         files: ingested.files.len(),
         copied,
+        strategy: backend
+            .as_ref()
+            .map(|b| b.name())
+            .unwrap_or("byte-copy"),
     })
 }
 
-/// Link errors that mean "this filesystem cannot do it" and deserve a
-/// byte-copy fallback rather than a failure: cross-device links, no
-/// kernel/fs support, or link-count exhaustion. Permission problems
-/// on the destination are real failures and stay loud.
-#[cfg(unix)]
-fn link_refused(e: &std::io::Error) -> bool {
-    matches!(
-        e.raw_os_error(),
-        Some(code)
-            if code == libc::EPERM
-                || code == libc::EXDEV
-                || code == libc::EMLINK
-                || code == libc::EOPNOTSUPP
-                || code == libc::ENOSYS
-    )
-}
-
-#[cfg(not(unix))]
-fn link_refused(_e: &std::io::Error) -> bool {
-    true
-}
+// Placement refusals ("this filesystem cannot do that") are
+// classified by `wt_copy::placement_refused`; everything else is a
+// real failure.
 
 /// Give this worktree one reference on every distinct blob it uses,
 /// then record the mapping where ticket 06 can find it.

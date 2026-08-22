@@ -50,6 +50,16 @@ impl DiskStore {
         self.root.join("objects").join(&hex[..2]).join(&hex[2..])
     }
 
+    /// Path of the blob stored at `id`, whether or not it exists.
+    ///
+    /// Exposed for file-shaped materializers (fast-hydration ticket
+    /// 03): CoW clones and hardlinks need to hand the kernel the blob
+    /// itself, not a buffered copy of its bytes. Callers verify via
+    /// [`Store::get`] before trusting anything they read here.
+    pub fn blob_path(&self, id: &ContentId) -> PathBuf {
+        self.object_path(id)
+    }
+
     fn ref_path(&self, id: &ContentId) -> PathBuf {
         self.root.join("refs").join(id.to_string())
     }
