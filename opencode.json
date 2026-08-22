@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/ox-alpha-free",
+  "providers": {
+    "opencode": {
+      "models": {
+        "ox-alpha-free": {
+          "settings": {
+            "reasoningEffort": "high"
+          }
+        }
+      }
+    }
+  }
+}
