@@ -21,11 +21,10 @@ TICKET_PROMPT='Implement the ticket at %s exactly. Read AGENTS.md and follow it 
 
 say() { printf '\n=== %s ===\n' "$*"; }
 
-spawn() { # spawn <name> <ticket-file> [worktree-dir]
-  local name="$1" ticket="$2" wt="${3:-}" pane prompt
-  local args=(pane split --current --direction down --cwd "$REPO" --no-focus)
-  [ -n "$wt" ] && args+=(--cwd "$REPO/$wt")
-  pane=$(herdr pane split "${args[@]}" | jq -r '.result.pane.pane_id')
+spawn() { # spawn <name> <ticket-file> [worktree-subdir]
+  local name="$1" ticket="$2" wt="${3:-}" pane prompt cwd
+  cwd="$REPO"; [ -n "$wt" ] && cwd="$REPO/$wt"
+  pane=$(herdr pane split --current --direction down --cwd "$cwd" --no-focus | jq -r '.result.pane.pane_id')
   herdr agent start "$name" --kind "$KIND" --pane "$pane" >/dev/null
   prompt=$(printf "$TICKET_PROMPT" "$ticket")
   herdr agent prompt "$name" "$prompt" --wait --timeout 7200000 \
@@ -35,7 +34,6 @@ spawn() { # spawn <name> <ticket-file> [worktree-dir]
 
 gate() { # gate <label> — human checkpoint + test gate
   say "CHECKPOINT: $1"
-  herdr notification send "instant-worktrees: $1 — review before continuing" 2>/dev/null || true
   read -r -p "Tests green and work reviewed? Press Enter to continue, Ctrl+C to stop. " _
 }
 

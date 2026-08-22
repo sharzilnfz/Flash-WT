@@ -17,9 +17,7 @@ agent pointed at codebase-memory.
 
    ```
    ./orchestrate.sh
-   ```
-
-3. The script pauses between phases. Each pause asks you to review the work
+   ```3. The script pauses between phases. Each pause asks you to review the work
    and confirm tests are green before it spends more agent time. Nothing runs
    away unattended.
 
