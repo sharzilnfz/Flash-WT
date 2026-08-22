@@ -477,3 +477,253 @@ fn save_is_atomic_enough_to_round_trip() {
         "sub-second mtime precision must survive the round trip"
     );
 }
+
+// --- fast-hydration ticket 05: the verified-blob ledger ---
+
+use sha2::Digest;
+use std::fs::FileTimes;
+use wt_store::VerifiedLedger;
+
+/// Flip a blob's first byte in place, optionally restoring the file's
+/// original mtime exactly afterwards. Size never changes, so with the
+/// mtime restored no stat-visible property does either — only a real
+/// re-hash could catch the tampering.
+fn tamper_blob(store_root: &std::path::Path, id: &ContentId, restore_mtime: bool) {
+    let hex = id.to_string();
+    let path = store_root.join("objects").join(&hex[..2]).join(&hex[2..]);
+    let meta = fs::metadata(&path).expect("stat blob");
+    let mtime = meta.modified().expect("blob mtime");
+    let mut bytes = fs::read(&path).expect("read blob");
+    assert!(!bytes.is_empty(), "tampering an empty blob proves nothing");
+    bytes[0] ^= 0xff;
+    fs::write(&path, &bytes).expect("tamper");
+    if restore_mtime {
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("reopen blob");
+        f.set_times(FileTimes::new().set_modified(mtime))
+            .expect("restore mtime");
+    }
+}
+
+#[test]
+fn ensure_verified_hashes_once_then_trusts_the_fingerprint() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"verified once\n").expect("put");
+    drop(store); // Drop flushes the ledger to disk.
+
+    // A fresh handle has only the persisted ledger. Tampering that no
+    // stat can see must go unnoticed: the fingerprint still matches,
+    // so not a single byte is re-read.
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    tamper_blob(dir.path(), &id, true);
+    store
+        .ensure_verified(&id)
+        .expect("trust path must not re-hash");
+}
+
+#[test]
+fn ensure_verified_rehashes_when_the_fingerprint_moves() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"fingerprint me\n").expect("put");
+    drop(store);
+
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    tamper_blob(dir.path(), &id, false);
+    match store.ensure_verified(&id) {
+        Err(Error::Corrupted(c)) => assert_eq!(c, id),
+        other => panic!("expected Corrupted, got {other:?}"),
+    }
+}
+
+#[test]
+fn ensure_verified_records_nothing_on_a_mismatch() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"never trusted\n").expect("put");
+    drop(store);
+
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    tamper_blob(dir.path(), &id, false);
+    assert!(matches!(
+        store.ensure_verified(&id),
+        Err(Error::Corrupted(_))
+    ));
+    drop(store);
+
+    // The failed check recorded nothing, so the next run pays for a
+    // full hash again instead of trusting corrupt bytes.
+    let store = DiskStore::open(dir.path()).expect("re-reopen");
+    assert!(matches!(
+        store.ensure_verified(&id),
+        Err(Error::Corrupted(_))
+    ));
+}
+
+#[test]
+fn first_touch_of_a_never_verified_blob_verifies() {
+    let dir = temp_root();
+    // A blob at a well-formed address whose bytes were placed by hand:
+    // no put ever ran, so no ledger entry can exist.
+    let id = ContentId([0xab_u8; 32]);
+    let hex = id.to_string();
+    let path = dir.path().join("objects").join(&hex[..2]).join(&hex[2..]);
+    fs::create_dir_all(path.parent().unwrap()).expect("mkdir shard");
+    fs::write(&path, b"bytes nobody hashed\n").expect("place blob by hand");
+
+    let store = DiskStore::open(dir.path()).expect("open");
+    match store.ensure_verified(&id) {
+        Err(Error::Corrupted(_)) => {}
+        other => panic!("first touch must verify, got {other:?}"),
+    }
+
+    // And a genuinely matching hand-placed blob passes and is then
+    // trusted on the next call.
+    let content = b"honestly addressed\n";
+    let good = ContentId(sha2::Sha256::digest(content).into());
+    let hex = good.to_string();
+    let gpath = dir.path().join("objects").join(&hex[..2]).join(&hex[2..]);
+    fs::create_dir_all(gpath.parent().unwrap()).expect("mkdir shard");
+    fs::write(&gpath, content).expect("place honest blob");
+    store.ensure_verified(&good).expect("first touch verifies");
+    tamper_blob(dir.path(), &good, true);
+    store
+        .ensure_verified(&good)
+        .expect("verified once means trusted after");
+}
+
+#[test]
+fn put_records_a_fingerprint_verified_by_construction() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"addressed by hash\n").expect("put");
+    drop(store);
+
+    // No ensure_verified ever ran; the ledger entry came from put.
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    tamper_blob(dir.path(), &id, true);
+    store
+        .ensure_verified(&id)
+        .expect("put's fingerprint must be persisted with the ledger");
+}
+
+#[test]
+fn delete_drops_the_ledger_entry_best_effort() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"swept away\n").expect("put");
+    store.delete(&id).expect("delete");
+    drop(store);
+
+    // Someone reuses the freed address for different bytes. With the
+    // entry gone there is nothing to trust: full verification runs.
+    let hex = id.to_string();
+    let path = dir.path().join("objects").join(&hex[..2]).join(&hex[2..]);
+    fs::create_dir_all(path.parent().unwrap()).expect("mkdir shard");
+    fs::write(&path, b"different bytes\n").expect("reuse address");
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    match store.ensure_verified(&id) {
+        Err(Error::Corrupted(_)) => {}
+        other => panic!("stale trust must not survive deletion, got {other:?}"),
+    }
+}
+
+#[test]
+fn missing_or_corrupt_ledger_degrades_to_full_verification() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"no ledger survives\n").expect("put");
+    drop(store);
+    tamper_blob(dir.path(), &id, false); // fingerprint now stale
+
+    // Deleted ledger: the next open starts cold...
+    fs::remove_file(dir.path().join("verified.tsv")).expect("rm ledger");
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    assert!(matches!(
+        store.ensure_verified(&id),
+        Err(Error::Corrupted(_))
+    ));
+
+    // ...and a corrupt one parses to entries that match nothing, which
+    // is the same thing as starting cold.
+    fs::write(
+        dir.path().join("verified.tsv"),
+        "garbage\nzz\t5\t1\t1\nab\toops\n",
+    )
+    .expect("corrupt the ledger");
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    assert!(matches!(
+        store.ensure_verified(&id),
+        Err(Error::Corrupted(_))
+    ));
+}
+
+#[test]
+fn get_stays_always_hash_regardless_of_the_ledger() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"api contract\n").expect("put");
+    drop(store);
+
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    tamper_blob(dir.path(), &id, true);
+    // ensure_verified trusts; get never does. Both contracts hold at
+    // the same time on the same store.
+    store.ensure_verified(&id).expect("ledger hit");
+    assert!(matches!(store.get(&id), Err(Error::Corrupted(_))));
+}
+
+#[test]
+fn unknown_content_stays_unknown_through_ensure_verified() {
+    let dir = temp_root();
+    let store = DiskStore::open(dir.path()).expect("open");
+    let missing = ContentId([4u8; 32]);
+    assert!(matches!(
+        store.ensure_verified(&missing),
+        Err(Error::UnknownContent(m)) if m == missing
+    ));
+}
+
+#[test]
+fn ledger_round_trips_sub_second_mtimes_through_disk() {
+    let dir = temp_root();
+    let content = b"precision\n";
+    let id = ContentId(sha2::Sha256::digest(content).into());
+    {
+        let mut store = DiskStore::open(dir.path()).expect("open");
+        store.put(content).expect("put");
+        // Give the blob an exotic mtime, then record it through a real
+        // verification.
+        let hex = id.to_string();
+        let path = dir.path().join("objects").join(&hex[..2]).join(&hex[2..]);
+        let f = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_times(FileTimes::new().set_modified(
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(7),
+        ))
+        .unwrap();
+        store.ensure_verified(&id).expect("verify");
+    } // Drop persists the ledger.
+
+    // The round-tripped nanosecond mtime still matches on reopen.
+    let meta = {
+        let hex = id.to_string();
+        let path = dir.path().join("objects").join(&hex[..2]).join(&hex[2..]);
+        fs::metadata(&path).expect("blob survived")
+    };
+    let mtime = meta.modified().unwrap();
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    store
+        .ensure_verified(&id)
+        .expect("nanosecond precision must survive the save");
+
+    let ledger = VerifiedLedger::open(dir.path());
+    assert!(
+        ledger.matches(&id, meta.len(), mtime),
+        "the persisted entry must match a fresh stat"
+    );
+    assert!(!ledger.matches(&id, meta.len() + 1, mtime));
+    assert!(!ledger.matches(&id, meta.len(), mtime + Duration::from_nanos(1)));
+}
