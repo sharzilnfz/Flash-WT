@@ -195,7 +195,7 @@ fn before_first_write_hydrated_files_share_physical_blocks_with_the_blob() {
         .output()
         .expect("run wt binary");
     assert_created(&out);
-    let consumed = before - free_bytes();
+    let consumed = before.saturating_sub(free_bytes());
 
     // Measured, not asserted: hydration must not consume anything
     // close to the logical size of the heavy tree. A byte-copy

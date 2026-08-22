@@ -81,7 +81,7 @@ fn clone_out_makes_a_private_writable_clone() {
     CloneOut
         .materialize_file(&big, &dest_big)
         .expect("clone big");
-    let consumed = before - free_bytes(base.path());
+    let consumed = before.saturating_sub(free_bytes(base.path()));
     assert!(
         consumed < (4 << 20),
         "a pre-write clone must share blocks: {consumed} new bytes for 8 MiB"
