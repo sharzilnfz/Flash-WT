@@ -1,0 +1,76 @@
+//! APFS whole-directory `clonefile(2)` backend (macOS).
+//!
+//! One syscall clones the entire tree — metadata, permissions, and
+//! symlinks included — as copy-on-write blocks. This is the fastest
+//! safe mechanism in the project and the reason macOS is the primary
+//! target.
+
+use std::ffi::CString;
+use std::io;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+
+use crate::{ensure_dest_free, BackendKind, CopyBackend, Error, Result};
+
+#[derive(Debug, Default)]
+pub struct ClonefileBackend;
+
+impl CopyBackend for ClonefileBackend {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Clonefile
+    }
+
+    /// True when `dir` sits on APFS (`statfs(2)` reports the
+    /// `apfs` filesystem type). Cheap and side-effect free.
+    fn supports(&self, dir: &Path) -> bool {
+        fstype_is(dir, b"apfs")
+    }
+
+    fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()> {
+        ensure_dest_free(dest)?;
+        let c_src = c_path(src)?;
+        let c_dest = c_path(dest)?;
+
+        // SAFETY: both pointers are valid NUL-terminated paths that
+        // outlive the call; clonefile keeps none of them.
+        let rc = unsafe { libc::clonefile(c_src.as_ptr(), c_dest.as_ptr(), 0) };
+        if rc == 0 {
+            return Ok(());
+        }
+        match io::Error::last_os_error().raw_os_error() {
+            Some(libc::EEXIST) => Err(Error::DestinationExists),
+            Some(libc::ENOTSUP) | Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP) => {
+                Err(Error::Unsupported)
+            }
+            _ => Err(io::Error::last_os_error().into()),
+        }
+    }
+}
+
+/// True if the filesystem holding `path` has the given `statfs`
+/// type name (for example `apfs`).
+fn fstype_is(path: &Path, want: &[u8]) -> bool {
+    let Ok(c_path) = c_path(path) else {
+        return false;
+    };
+    // SAFETY: `c_path` is a valid NUL-terminated path; `st` is a
+    // correctly sized allocation owned by this call. macOS names the
+    // struct `statfs`; `f_fstypename` carries the type name.
+    let st = unsafe {
+        let mut st: libc::statfs = std::mem::zeroed();
+        if libc::statfs(c_path.as_ptr(), &mut st) != 0 {
+            return false;
+        }
+        st
+    };
+    let name: &[libc::c_char] = &st.f_fstypename;
+    name.get(want.len()) == Some(&0) && name.iter().zip(want).all(|(a, b)| *a as u8 == *b)
+}
+
+fn c_path(path: &Path) -> io::Result<CString> {
+    CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL byte"))
+}
+
+#[cfg(test)]
+mod tests;
