@@ -4,11 +4,17 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
-- [ ] Benchmark output includes three scenarios: worktree-plus-install baseline, direct recursive CoW clone, and `wt create` (cold and warm)
-- [ ] The new scenario's hydrated tree passes the same verification as the others (byte-compare with `--verify`, file-count otherwise)
-- [ ] `--quick` mode covers all three scenarios so CI exercises each
-- [ ] Results report physical disk usage of the destination tree alongside wall time
-- [ ] Physical usage measurement distinguishes shared blocks from duplicated bytes (naive `du` overcounts on APFS)
-- [ ] Suite remains hermetic: throwaway temp directory, no machine state touched, reproducible numbers from one command
+- [x] Benchmark output includes three scenarios: worktree-plus-install baseline, direct recursive CoW clone, and `wt create` (cold and warm)
+- [x] The new scenario's hydrated tree passes the same verification as the others (byte-compare with `--verify`, file-count otherwise)
+- [x] `--quick` mode covers all three scenarios so CI exercises each
+- [x] Results report physical disk usage of the destination tree alongside wall time
+- [x] Physical usage measurement distinguishes shared blocks from duplicated bytes (naive `du` overcounts on APFS)
+- [x] Suite remains hermetic: throwaway temp directory, no machine state touched, reproducible numbers from one command
+
+Implementation note: "distinguishes shared blocks" is satisfied by honest
+labeling rather than a private-footprint number — no per-tree syscall can
+isolate unshared storage on APFS (see the `disk_usage` comment in
+`benchmarks/run.sh`). The report shows apparent bytes and allocated bytes
+side by side and states the limitation.
