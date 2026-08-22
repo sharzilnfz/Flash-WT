@@ -78,22 +78,49 @@ pub fn grace_from_env() -> Result<Duration, String> {
 /// Content ids named by a worktree's hydration ledger, deduplicated:
 /// one ledger row per materialized file, but references are claimed
 /// once per distinct blob.
-fn read_ledger(git_dir: &Path) -> Result<BTreeSet<String>, String> {
+///
+/// Ticket 08: rows may be typed. `<rel>\t<id>` is the legacy blob row;
+/// `<rel>\tblob\t<id>` and `-\tsnapshot\t<id>` are the snapshot-era
+/// forms, so removal knows which ids are blobs (release refs) and
+/// which name snapshots (nothing to release).
+fn read_ledger(git_dir: &Path) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
     let path = git_dir.join("wt-hydrated.tsv");
     let text = fs::read_to_string(&path)
         .map_err(|e| format!("cannot read hydration ledger {}: {e}", path.display()))?;
-    let mut ids = BTreeSet::new();
+    let mut blobs = BTreeSet::new();
+    let mut snapshots = BTreeSet::new();
     for line in text.lines() {
         if line.is_empty() {
             continue;
         }
-        let id = line
-            .split('\t')
-            .nth(1)
-            .ok_or_else(|| format!("malformed ledger row in {}: {line:?}", path.display()))?;
-        ids.insert(id.to_owned());
+        let fields: Vec<&str> = line.split('\t').collect();
+        match fields.as_slice() {
+            [_, id] => {
+                blobs.insert(id.to_string());
+            }
+            [_, kind, id] => match *kind {
+                "blob" => {
+                    blobs.insert(id.to_string());
+                }
+                "snapshot" => {
+                    snapshots.insert(id.to_string());
+                }
+                other => {
+                    return Err(format!(
+                        "unknown ledger row type {other:?} in {}",
+                        path.display()
+                    ));
+                }
+            },
+            _ => {
+                return Err(format!(
+                    "malformed ledger row in {}: {line:?}",
+                    path.display()
+                ));
+            }
+        }
     }
-    Ok(ids)
+    Ok((blobs, snapshots))
 }
 
 pub fn remove(name: &str, dir: Option<&Path>) -> Result<(), String> {
@@ -127,11 +154,12 @@ pub fn remove(name: &str, dir: Option<&Path>) -> Result<(), String> {
     // the main repo's .git/worktrees/<name>.
     let git_dir_text = run_git(&dest, &["rev-parse", "--absolute-git-dir"])?;
     let git_dir = PathBuf::from(&git_dir_text);
-    let ledger = if git_dir.join("wt-hydrated.tsv").exists() {
+    let (ledger_blobs, ledger_snapshots) = if git_dir.join("wt-hydrated.tsv").exists() {
         read_ledger(&git_dir)?
     } else {
-        BTreeSet::new()
+        (BTreeSet::new(), BTreeSet::new())
     };
+    let ledger = &ledger_blobs;
 
     let mut store = open_store()?;
     let no_refs = store.gc_mode() == GcMode::MarkSweepNoRefs;
@@ -140,8 +168,10 @@ pub fn remove(name: &str, dir: Option<&Path>) -> Result<(), String> {
     // destructive happens. A missing mirror with a live sidecar is
     // repaired here ("the next wt create or wt remove rewrites the
     // mirror"), so even a crash right after this point leaves a
-    // correct root behind.
-    if !ledger.is_empty()
+    // correct root behind. Ticket 08: the repair carries BOTH record
+    // types — file records mark blobs directly, snapshot records mark
+    // through their manifests.
+    if (!ledger.is_empty() || !ledger_snapshots.is_empty())
         && store
             .mirror_is_missing(&dest, &git_dir)
             .map_err(|e| e.to_string())?
@@ -153,14 +183,21 @@ pub fn remove(name: &str, dir: Option<&Path>) -> Result<(), String> {
                     .ok_or_else(|| format!("malformed content id in ledger: {hex}"))
             })
             .collect::<Result<_, _>>()?;
+        let snaps: Vec<ContentId> = ledger_snapshots
+            .iter()
+            .map(|hex| {
+                ContentId::from_hex(hex)
+                    .ok_or_else(|| format!("malformed content id in ledger: {hex}"))
+            })
+            .collect::<Result<_, _>>()?;
         store
-            .publish_worktree_mirror(&dest, &git_dir, ids.iter())
+            .publish_worktree_mirror(&dest, &git_dir, ids.iter(), snaps.iter())
             .map_err(|e| e.to_string())?;
     }
 
     let mut released = 0usize;
-    if !ledger.is_empty() && !no_refs {
-        for hex in &ledger {
+    if !ledger_blobs.is_empty() && !no_refs {
+        for hex in &ledger_blobs {
             let id = ContentId::from_hex(hex)
                 .ok_or_else(|| format!("malformed content id in ledger: {hex}"))?;
             match Store::release_ref(&mut store, &id) {
@@ -171,7 +208,7 @@ pub fn remove(name: &str, dir: Option<&Path>) -> Result<(), String> {
         }
     }
 
-    if !ledger.is_empty() {
+    if !ledger_blobs.is_empty() || !ledger_snapshots.is_empty() {
         fs::remove_file(git_dir.join("wt-hydrated.tsv"))
             .map_err(|e| format!("cannot remove ledger: {e}"))?;
         // Retire the mirror now that both the sidecar and the

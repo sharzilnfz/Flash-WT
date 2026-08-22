@@ -3,6 +3,7 @@
 
 mod gc;
 mod hydrate;
+mod snapshots;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -12,7 +13,13 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 
-use hydrate::{claim_references, ingest_dir, materialize, publish_mirror, Ingested};
+use wt_store::ContentId;
+
+use hydrate::{
+    claim_references, claim_snapshot_references, ingest_dir, materialize, publish_mirror,
+    snapshots_enabled, Ingested,
+};
+use snapshots::Outcome as SnapshotOutcome;
 
 #[derive(Parser)]
 #[command(
@@ -48,7 +55,15 @@ verification.
 
 GC bookkeeping: each successful create publishes one store-local mirror
 (<store>/worktrees/) naming the blobs it hydrates from. WT_TIMING=1
-prints per-stage timings (`wt-stage ingest=...` and friends) to stderr.")]
+prints per-stage timings (`wt-stage ingest=...` and friends) to stderr.
+
+WT_SNAPSHOTS=1 (macOS/APFS, opt-in) hydrates each heavy directory by
+one recursive clonefile(2) from a whole-directory snapshot in the store
+when one matches: hits cost no per-file work. Misses build and publish
+a snapshot first. WT_VERIFY=1 bypasses snapshot hits entirely and
+rebuilds from freshly hashed blobs. Filesystems without clone support,
+and clone refusals like cross-device destinations, fall back to the
+per-file ladder above.")]
     Create {
         /// Branch name; also names the new worktree directory.
         name: String,
@@ -322,15 +337,26 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
     let mut ingest_ms = 0u128;
     let mut references_ms = 0u128;
     let mut materialize_ms = 0u128;
+    let mut snapshot_ms = 0u128;
+    let mut snapshot_engaged = false;
     // One line per stage on stderr (`wt-stage <name>=<ms>`, integer
     // milliseconds). total covers git-worktree-add through the end.
-    let emit = |ingest: u128, references: u128, materialize: u128| {
+    // The snapshot line appears only when the fast path did work, so
+    // pre-snapshot consumers see the same four lines as before.
+    let emit = |ingest: u128,
+                references: u128,
+                materialize: u128,
+                snapshot: u128,
+                engaged: bool| {
         if !timing {
             return;
         }
         eprintln!("wt-stage ingest={ingest}");
         eprintln!("wt-stage references={references}");
         eprintln!("wt-stage materialize={materialize}");
+        if engaged {
+            eprintln!("wt-stage snapshot={snapshot}");
+        }
         eprintln!("wt-stage total={}", started.elapsed().as_millis());
     };
 
@@ -338,24 +364,67 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
     let dirs = collect_matches(&root, &patterns);
     if dirs.is_empty() {
         println!("nothing to hydrate");
-        emit(0, 0, 0);
+        emit(0, 0, 0, 0, false);
         return Ok(());
     }
 
     let mut store = hydrate::open_store()?;
+    let paranoid = std::env::var_os("WT_VERIFY").is_some();
+    let snapshot_gate = snapshots_enabled();
     let mut total_files = 0usize;
     let mut total_copied = 0usize;
     let mut strategy = "byte-copy";
     let mut combined = Ingested {
         dirs: Vec::new(),
         files: BTreeMap::new(),
+        symlinks: BTreeMap::new(),
+        modes: BTreeMap::new(),
     };
+    // Ticket 08: heavy directories hydrated through snapshots record
+    // their manifest hashes here; the mirror names them, not the
+    // child blobs (the manifest marks those).
+    let mut snapshot_hashes: Vec<ContentId> = Vec::new();
     let mut git_dir = dest.clone(); // replaced by claim_references
     for rel in &dirs {
         let src = root.join(rel);
         let stage = Instant::now();
         let ingested = ingest_dir(&mut store, &root, &src)?;
         ingest_ms += stage.elapsed().as_millis();
+        let heavy = rel.to_string_lossy().into_owned();
+
+        if snapshot_gate {
+            let stage = Instant::now();
+            match snapshots::hydrate(&mut store, &ingested, &root, &heavy, &dest, paranoid) {
+                SnapshotOutcome::Hydrated(h) => {
+                    snapshot_ms += stage.elapsed().as_millis();
+                    snapshot_engaged = true;
+                    let refs = Instant::now();
+                    git_dir =
+                        claim_snapshot_references(&mut store, &dest, &ingested, h.hash)?;
+                    references_ms += refs.elapsed().as_millis();
+                    snapshot_hashes.push(h.hash);
+                    total_files += h.files;
+                    println!(
+                        "hydrated {heavy} from {} via snapshot {} (one clone, {} file{})",
+                        src.display(),
+                        &h.hash.to_string()[..12],
+                        h.files,
+                        if h.files == 1 { "" } else { "s" },
+                    );
+                    continue;
+                }
+                SnapshotOutcome::FellBack(Some(reason)) => {
+                    eprintln!("wt-snapshots: {heavy}: falling back to per-file placement ({reason})");
+                }
+                SnapshotOutcome::FellBack(None) => {}
+                SnapshotOutcome::Failed(msg) => {
+                    return Err(format!("hydration of {heavy} failed: {msg}"))
+                }
+            }
+            // Fell through to the per-file ladder below; its cost is
+            // counted by the stages it runs itself.
+        }
+
         let stage = Instant::now();
         git_dir = claim_references(&mut store, &dest, &ingested)?;
         references_ms += stage.elapsed().as_millis();
@@ -381,9 +450,10 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
         );
     }
     // Ticket 07: one atomic mirror write per successful create is
-    // the GC bookkeeping mark-and-sweep marks through.
+    // the GC bookkeeping mark-and-sweep marks through. Ticket 08:
+    // snapshot-hydrated dirs appear as `snapshot` records here.
     let stage = Instant::now();
-    publish_mirror(&mut store, &dest, &git_dir, &combined)?;
+    publish_mirror(&mut store, &dest, &git_dir, &combined, &snapshot_hashes)?;
     references_ms += stage.elapsed().as_millis();
     // Say plainly what happened to shared content.
     if std::env::var_os("WT_NO_HARDLINK").is_some() {
@@ -420,11 +490,7 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
             }
         }
     );
-    emit(
-        ingest_ms,
-        references_ms,
-        materialize_ms,
-    );
+    emit(ingest_ms, references_ms, materialize_ms, snapshot_ms, snapshot_engaged);
     Ok(())
 }
 

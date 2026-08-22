@@ -18,6 +18,7 @@ impl Fixture {
     /// Create a temp git repo with one initial commit and `files`
     /// small files spread across nested directories under
     /// `<repo>/heavy/` — the shape hydration has to move cheaply.
+    #[allow(dead_code)] // each suite compiles this module; not all need the heavy shape
     pub fn heavy_repo(files: usize) -> Fixture {
         let base = tempfile::tempdir().expect("tempdir");
         let repo = base.path().join("origin");
@@ -87,6 +88,7 @@ pub fn list_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+#[allow(dead_code)] // each suite compiles this module; not all create repos themselves
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
