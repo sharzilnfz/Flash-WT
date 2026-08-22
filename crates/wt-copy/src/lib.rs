@@ -5,9 +5,22 @@
 //! ask the selection layer (ticket 03) for the best backend for a
 //! given directory and call [`CopyBackend::copy_dir`].
 
-mod stub;
+#[cfg(target_os = "macos")]
+mod clonefile;
+mod copy_tree;
+mod deep_copy;
+mod hardlink;
+#[cfg(target_os = "linux")]
+mod reflink;
+mod selection;
 
-pub use stub::StubBackend;
+#[cfg(target_os = "macos")]
+pub use clonefile::ClonefileBackend;
+pub use deep_copy::DeepCopyBackend;
+pub use hardlink::HardlinkBackend;
+#[cfg(target_os = "linux")]
+pub use reflink::ReflinkBackend;
+pub use selection::{candidates, select_backend};
 
 use std::io;
 use std::path::Path;
@@ -124,4 +137,14 @@ pub trait CopyBackend {
     /// [`Error::UnsafeBackend`] when `safety()` is
     /// [`Safety::UnsafePending`], and [`Error::Io`] on failure.
     fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()>;
+}
+
+/// Refuse a destination that already exists (including as a dangling
+/// symlink), per the trait contract. Shared by every backend.
+pub(crate) fn ensure_dest_free(dest: &Path) -> Result<()> {
+    if dest.symlink_metadata().is_ok() {
+        Err(Error::DestinationExists)
+    } else {
+        Ok(())
+    }
 }

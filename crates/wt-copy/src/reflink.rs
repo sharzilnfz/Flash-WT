@@ -1,0 +1,83 @@
+//! Linux reflink backend (`FICLONE` ioctl on btrfs/XFS).
+//!
+//! Reflink is a per-file operation on Linux: the walker rebuilds the
+//! tree and asks the filesystem to clone each file's extents, so
+//! bytes stay shared copy-on-write. Permissions are applied
+//! explicitly because `FICLONE` clones only data.
+
+use std::fs;
+use std::io;
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
+
+use crate::copy_tree::copy_tree;
+use crate::{ensure_dest_free, BackendKind, CopyBackend, Error, Result};
+
+#[derive(Debug, Default)]
+pub struct ReflinkBackend;
+
+/// Filesystem magics whose `statfs` reports reflink support.
+const REFLINK_MAGICS: [libc::c_long; 2] = [
+    libc::BTRFS_SUPER_MAGIC as libc::c_long,
+    libc::XFS_SUPER_MAGIC as libc::c_long,
+];
+
+impl CopyBackend for ReflinkBackend {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Reflink
+    }
+
+    /// True when `dir` sits on btrfs or XFS, the two mainline
+    /// filesystems implementing `FICLONE`. Cheap and side-effect free.
+    fn supports(&self, dir: &Path) -> bool {
+        let Ok(c_dir) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: `c_dir` is a valid NUL-terminated path; `st` is a
+        // correctly sized allocation owned by this call. `f_type`
+        // carries the filesystem magic number.
+        let st = unsafe {
+            let mut st: libc::statfs = std::mem::zeroed();
+            if libc::statfs(c_dir.as_ptr(), &mut st) != 0 {
+                return false;
+            }
+            st
+        };
+        REFLINK_MAGICS.contains(&(st.f_type as libc::c_long))
+    }
+
+    fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()> {
+        ensure_dest_free(dest)?;
+        let mut clone_file = |from: &Path, to: &Path| reflink_file(from, to);
+        copy_tree(src, dest, &mut clone_file).map_err(Error::Io)
+    }
+}
+
+fn reflink_file(from: &Path, to: &Path) -> io::Result<()> {
+    let src = fs::File::open(from)?;
+    let mode = src.metadata()?.permissions().mode() & 0o7777;
+    let dest = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(to)?;
+    // SAFETY: both fds are open; FICLONE reads only from `src`.
+    let rc = unsafe {
+        libc::ioctl(
+            dest.as_raw_fd(),
+            libc::FICLONE as libc::c_ulong,
+            src.as_raw_fd(),
+        )
+    };
+    if rc != 0 {
+        let err = io::Error::last_os_error();
+        drop(fs::remove_file(to));
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

@@ -280,6 +280,10 @@ dependencies = [
 [[package]]
 name = "wt-copy"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+]
 
 [[package]]
 name = "wt-store"
