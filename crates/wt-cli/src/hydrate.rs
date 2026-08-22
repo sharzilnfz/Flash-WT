@@ -11,10 +11,14 @@
 //! the worktree's git dir (`wt-hydrated.tsv`). Ticket 06's garbage
 //! collection releases those references when the worktree dies.
 //!
-//! Integrity: materialize verifies each blob through `Store::get`
-//! BEFORE anything is placed, so corrupt store content fails loudly
-//! instead of landing bad bytes in a fresh tree (spec: silent
-//! corruption is detectable).
+//! Integrity: materialize proves each blob before anything is
+//! placed, so corrupt store content fails loudly instead of landing
+//! bad bytes in a fresh tree (spec: silent corruption is detectable).
+//! Fast-hydration ticket 05 makes that proof cost once per blob
+//! rather than once per run: `ensure_verified` re-hashes only blobs
+//! whose (size, mtime) fingerprint is not already recorded in the
+//! verified ledger beside the store. `WT_VERIFY=1` restores the old
+//! full-hash-every-blob-every-run paranoia.
 //!
 //! Materialization strategy (fast-hydration ticket 03): the default
 //! places every blob as a per-file copy-on-write clone (`fclonefileat`
@@ -75,9 +79,9 @@ pub struct Ingested {
 /// its recorded blob is reused (checked against the store first, in
 /// case a sweep reclaimed it). Every other file goes through the
 /// normal read-and-hash path. The cache can only make runs cheaper,
-/// never wronger: materialize still verifies every blob through
-/// `Store::get`, so lying cached metadata fails loudly instead of
-/// landing bad bytes in a fresh tree.
+/// never wronger: materialize proves every blob before placing it
+/// (`ensure_verified`, ticket 05), so lying cached metadata fails
+/// loudly instead of landing bad bytes in a fresh tree.
 pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<Ingested, String> {
     let mut ingested = Ingested {
         dirs: Vec::new(),
@@ -188,12 +192,21 @@ fn select_strategy() -> Option<Box<dyn FileMaterialize>> {
 
 /// Recreate the ingested tree under `dest_root` from store content.
 ///
-/// Per file: verify first (`Store::get` reads and hashes every byte
-/// and aborts loudly on mismatch), and only then place anything — a
-/// corrupt blob never lands in a fresh tree. Placement tries the
-/// selected strategy (CoW clone by default) against the verified
-/// blob; filesystem refusals fall back silently to a byte copy of
-/// those same verified bytes. Permission problems on the destination
+/// Per file: verify first, and only then place anything — a corrupt
+/// blob never lands in a fresh tree. Verification is
+/// `Store::get`'s read-and-hash when `WT_VERIFY` is set (env policy
+/// lives in the CLI layer, like `select_strategy`), and
+/// `DiskStore::ensure_verified` otherwise: a blob whose verified
+/// ledger fingerprint still matches its stat is trusted without
+/// reading a byte; everything else is hashed once and remembered.
+///
+/// Placement tries the selected strategy (CoW clone by default)
+/// against the verified blob; filesystem refusals fall back silently
+/// to a byte copy from the blob itself. Directories are pre-created
+/// once from the ingested dir list — there is no per-file
+/// `create_dir_all`; if placement still hits ENOENT (a directory the
+/// manifest's walk never saw), it recreates the parent and retries
+/// exactly once, EAFP-style. Permission problems on the destination
 /// are real failures and stay loud.
 pub fn materialize(
     store: &DiskStore,
@@ -201,6 +214,7 @@ pub fn materialize(
     dest_root: &Path,
 ) -> Result<MaterializeReport, String> {
     let backend = select_strategy();
+    let paranoid = std::env::var_os("WT_VERIFY").is_some();
     let mut copied = 0usize;
     for rel in &ingested.dirs {
         fs::create_dir_all(dest_root.join(rel))
@@ -213,38 +227,63 @@ pub fn materialize(
         // corruption would land. The TOCTOU window between this check
         // and the kernel's read is the one the previous design had in
         // reverse; nothing else guards it today either.
-        let bytes = store
-            .get(id)
-            .map_err(|e| format!("materialize {rel}: {e}"))?;
-        let dest = dest_root.join(rel);
-        let parent = dest
-            .parent()
-            .ok_or_else(|| format!("{rel} has no parent"))?;
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot prepare {}: {e}", parent.display()))?;
-
-        let mut placed = false;
-        if let Some(backend) = &backend {
-            match backend.materialize_file(&store.blob_path(id), &dest) {
-                Ok(()) => placed = true,
-                Err(e) if placement_refused(&e) => {}
-                Err(e) => return Err(format!("materialize {rel}: {e}")),
-            }
+        if paranoid {
+            store
+                .get(id)
+                .map_err(|e| format!("materialize {rel}: {e}"))?;
+        } else {
+            store
+                .ensure_verified(id)
+                .map_err(|e| format!("materialize {rel}: {e}"))?;
         }
-        if !placed {
-            copied += 1;
-            fs::write(&dest, &bytes)
-                .map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
+        let src = store.blob_path(id);
+        let dest = dest_root.join(rel);
+
+        match place(backend.as_deref(), &src, &dest) {
+            Ok(true) => {}
+            Ok(false) => copied += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // The heavy directories themselves were just
+                // recreated above; only an unexpected gap should ever
+                // land here. Recreate the parent once and retry.
+                let parent = dest
+                    .parent()
+                    .ok_or_else(|| format!("{rel} has no parent"))?;
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("cannot prepare {}: {e}", parent.display()))?;
+                match place(backend.as_deref(), &src, &dest) {
+                    Ok(true) => {}
+                    Ok(false) => copied += 1,
+                    Err(e) => return Err(format!("materialize {rel}: {e}")),
+                }
+            }
+            Err(e) => return Err(format!("materialize {rel}: {e}")),
         }
     }
     Ok(MaterializeReport {
         files: ingested.files.len(),
         copied,
-        strategy: backend
-            .as_ref()
-            .map(|b| b.name())
-            .unwrap_or("byte-copy"),
+        strategy: backend.as_ref().map(|b| b.name()).unwrap_or("byte-copy"),
     })
+}
+
+/// One placement attempt for one file. Returns whether the selected
+/// strategy placed it; `false` means the filesystem refused the
+/// strategy and the caller got a plain byte copy instead. Errors come
+/// back raw so the caller can distinguish ENOENT (retry after
+/// repairing directories) from real failures.
+fn place(backend: Option<&dyn FileMaterialize>, src: &Path, dest: &Path) -> std::io::Result<bool> {
+    if let Some(backend) = backend {
+        match backend.materialize_file(src, dest) {
+            Ok(()) => return Ok(true),
+            Err(e) if placement_refused(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    // Byte-copy fallback reads straight from the verified blob — no
+    // need to have held its bytes since verification.
+    fs::copy(src, dest)?;
+    Ok(false)
 }
 
 // Placement refusals ("this filesystem cannot do that") are

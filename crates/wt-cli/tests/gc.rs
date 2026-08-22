@@ -13,12 +13,16 @@ use std::thread;
 use common::{list_files, Fixture};
 
 /// Total file count under the store root — how much content it holds.
-/// The ingest validation cache beside the store is not content and is
-/// never swept, so it does not count.
+/// The ingest validation cache and the verified-blob ledger beside the
+/// store are not content and are never swept, so they do not count.
 fn store_files(store: &Path) -> usize {
     list_files(store)
         .into_iter()
-        .filter(|p| p.file_name() != Some(std::ffi::OsStr::new("ingest-cache.tsv")))
+        .filter(|p| {
+            let name = p.file_name();
+            name != Some(std::ffi::OsStr::new("ingest-cache.tsv"))
+                && name != Some(std::ffi::OsStr::new("verified.tsv"))
+        })
         .count()
 }
 

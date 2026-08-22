@@ -6,14 +6,14 @@ Correctness stance: a blob's hash is checked at least once before anything lands
 
 **Blocked by:** None (builds on merged tickets 02 and 03).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Warm second create skips blob reads and hashing entirely (externally provable: tamper with a blob while preserving size and mtime — e.g. rewrite bytes then restore mtime — and the next create succeeds, proving no re-hash happened)
-- [ ] Tampering WITHOUT preserving mtime still fails loudly before bad bytes land in a fresh tree
-- [ ] First-ever materialize of a never-verified blob still verifies (no trust without a prior check)
-- [ ] `WT_VERIFY=1` forces full hash verification of every blob regardless of ledger state
-- [ ] Deleted/swept blobs drop their ledger entries; a corrupt or deleted ledger degrades to full verification, never wrong output
-- [ ] No per-file `create_dir_all` on the placement path (directories pre-created once; EAFP fallback only on refusal)
-- [ ] No per-file chmod on the CoW clone path (blobs stored with normal writable permissions so clones inherit them)
-- [ ] Hydrated trees remain fully writable and dedup-preserving; existing corruption, GC, cache, and CoW tests stay green
-- [ ] Store unit tests cover the ledger hit/miss matrix; e2e covers the trust boundary through the CLI seam
+- [x] Warm second create skips blob reads and hashing entirely (externally provable: tamper with a blob while preserving size and mtime — e.g. rewrite bytes then restore mtime — and the next create succeeds, proving no re-hash happened)
+- [x] Tampering WITHOUT preserving mtime still fails loudly before bad bytes land in a fresh tree
+- [x] First-ever materialize of a never-verified blob still verifies (no trust without a prior check)
+- [x] `WT_VERIFY=1` forces full hash verification of every blob regardless of ledger state
+- [x] Deleted/swept blobs drop their ledger entries; a corrupt or deleted ledger degrades to full verification, never wrong output
+- [x] No per-file `create_dir_all` on the placement path (directories pre-created once; EAFP fallback only on refusal)
+- [x] No per-file chmod on the CoW clone path (blobs stored with normal writable permissions so clones inherit them)
+- [x] Hydrated trees remain fully writable and dedup-preserving; existing corruption, GC, cache, and CoW tests stay green
+- [x] Store unit tests cover the ledger hit/miss matrix; e2e covers the trust boundary through the CLI seam
