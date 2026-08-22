@@ -4,13 +4,15 @@
 mod gc;
 mod hydrate;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 
-use hydrate::{claim_references, ingest_dir, materialize};
+use hydrate::{claim_references, ingest_dir, materialize, publish_mirror, Ingested};
 
 #[derive(Parser)]
 #[command(
@@ -42,7 +44,11 @@ permission errors. WT_NO_HARDLINK=1 forces byte copies instead.
 Blobs are hash-verified once and then trusted while their size and mtime
 stay unchanged (a verified-blob ledger beside the store tracks this);
 WT_VERIFY=1 forces a full re-hash of every blob on every run for paranoid
-verification.")]
+verification.
+
+GC bookkeeping: each successful create publishes one store-local mirror
+(<store>/worktrees/) naming the blobs it hydrates from. WT_TIMING=1
+prints per-stage timings (`wt-stage ingest=...` and friends) to stderr.")]
     Create {
         /// Branch name; also names the new worktree directory.
         name: String,
@@ -66,15 +72,44 @@ verification.")]
         #[arg(long)]
         dir: Option<PathBuf>,
     },
-    /// Delete unreferenced store entries older than --age. Entries a
-    /// live worktree references are never touched.
+    /// Delete store entries no live worktree references and older
+    /// than --age. Entries a live worktree references are never
+    /// touched. In mark-sweep mode (see `wt store migrate`) liveness
+    /// comes from store mirrors plus the grace period instead of
+    /// refcounts.
     Sweep {
         /// Minimum age of an unreferenced entry before it may be
         /// deleted (e.g. 0s, 90s, 10m, 24h, 7d). The floor protects
         /// content that is mid-ingestion or awaiting its first
-        /// reference.
-        #[arg(long, default_value = "7d")]
-        age: String,
+        /// reference. Defaults to 7d in legacy mode, and to
+        /// WT_GC_GRACE (default 15m) in mark-sweep mode.
+        #[arg(long)]
+        age: Option<String>,
+    },
+    /// Store-level inspection and one-way migrations.
+    Store {
+        #[command(subcommand)]
+        action: StoreAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum StoreAction {
+    /// Migrate the store's garbage-collection scheme (one-way; see
+    /// ADR-0004). Until activated, sweep stays refcount-driven and
+    /// every sweep audits mirrors against refs for parity.
+    Migrate {
+        /// Sweep collects from live-mirror marks plus the grace
+        /// period (WT_GC_GRACE, default 15m) from now on. Legacy
+        /// refs/ files stay maintained by create/remove so pre-change
+        /// binaries remain safe, but are ignored for liveness.
+        #[arg(long)]
+        activate_mark_sweep: bool,
+        /// Drop ALL legacy refcount files and stop writing new ones.
+        /// Pre-cutover binaries must not use this store afterwards;
+        /// this is loud, explicit, and irreversible.
+        #[arg(long)]
+        drop_legacy_refs: bool,
     },
 }
 
@@ -282,10 +317,28 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
         root.display()
     );
 
+    let timing = std::env::var_os("WT_TIMING").is_some();
+    let started = Instant::now();
+    let mut ingest_ms = 0u128;
+    let mut references_ms = 0u128;
+    let mut materialize_ms = 0u128;
+    // One line per stage on stderr (`wt-stage <name>=<ms>`, integer
+    // milliseconds). total covers git-worktree-add through the end.
+    let emit = |ingest: u128, references: u128, materialize: u128| {
+        if !timing {
+            return;
+        }
+        eprintln!("wt-stage ingest={ingest}");
+        eprintln!("wt-stage references={references}");
+        eprintln!("wt-stage materialize={materialize}");
+        eprintln!("wt-stage total={}", started.elapsed().as_millis());
+    };
+
     let (patterns, _used_defaults) = load_patterns(&root, manifest)?;
     let dirs = collect_matches(&root, &patterns);
     if dirs.is_empty() {
         println!("nothing to hydrate");
+        emit(0, 0, 0);
         return Ok(());
     }
 
@@ -293,14 +346,29 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
     let mut total_files = 0usize;
     let mut total_copied = 0usize;
     let mut strategy = "byte-copy";
+    let mut combined = Ingested {
+        dirs: Vec::new(),
+        files: BTreeMap::new(),
+    };
+    let mut git_dir = dest.clone(); // replaced by claim_references
     for rel in &dirs {
         let src = root.join(rel);
+        let stage = Instant::now();
         let ingested = ingest_dir(&mut store, &root, &src)?;
-        claim_references(&mut store, &dest, &ingested)?;
+        ingest_ms += stage.elapsed().as_millis();
+        let stage = Instant::now();
+        git_dir = claim_references(&mut store, &dest, &ingested)?;
+        references_ms += stage.elapsed().as_millis();
         // Ingested paths are repo-relative (they include the heavy
         // directory itself), so materialize against the worktree root.
+        let stage = Instant::now();
         let report = materialize(&store, &ingested, &dest)
             .map_err(|e| format!("hydration of {} failed: {e}", rel.display()))?;
+        materialize_ms += stage.elapsed().as_millis();
+        combined.dirs.extend(ingested.dirs.iter().cloned());
+        for (rel, id) in &ingested.files {
+            combined.files.insert(rel.clone(), *id);
+        }
         total_files += report.files;
         total_copied += report.copied;
         strategy = report.strategy;
@@ -312,6 +380,11 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
             if report.files == 1 { "" } else { "s" }
         );
     }
+    // Ticket 07: one atomic mirror write per successful create is
+    // the GC bookkeeping mark-and-sweep marks through.
+    let stage = Instant::now();
+    publish_mirror(&mut store, &dest, &git_dir, &combined)?;
+    references_ms += stage.elapsed().as_millis();
     // Say plainly what happened to shared content.
     if std::env::var_os("WT_NO_HARDLINK").is_some() {
         println!(
@@ -347,6 +420,11 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
             }
         }
     );
+    emit(
+        ingest_ms,
+        references_ms,
+        materialize_ms,
+    );
     Ok(())
 }
 
@@ -359,7 +437,19 @@ fn main() {
             dir,
         } => create(&name, manifest.as_deref(), dir.as_deref()),
         WtCommand::Remove { name, dir } => gc::remove(&name, dir.as_deref()),
-        WtCommand::Sweep { age } => gc::sweep(&age),
+        WtCommand::Sweep { age } => gc::sweep(age.as_deref()),
+        WtCommand::Store { action } => match action {
+            StoreAction::Migrate {
+                activate_mark_sweep,
+                drop_legacy_refs,
+            } => {
+                if activate_mark_sweep == drop_legacy_refs {
+                    Err("choose exactly one of --activate-mark-sweep or --drop-legacy-refs".into())
+                } else {
+                    gc::migrate(activate_mark_sweep, drop_legacy_refs)
+                }
+            }
+        },
     };
     if let Err(msg) = result {
         eprintln!("wt: {msg}");
