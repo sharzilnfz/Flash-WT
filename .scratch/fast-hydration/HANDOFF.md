@@ -196,53 +196,61 @@ Environment knobs: `WT_STORE`, `WT_SNAPSHOTS=1`, `WT_SNAPSHOTS_V2=1`,
 
 ## 5. Known limitations
 
-- Snapshots are macOS/APFS only and opt-in. Linux has no recursive
-  reflink primitive, so the gate is a no-op there by design.
-- The per-file ladder's fidelity gaps above; use the gate when they matter.
+- Snapshots and v2 rebuilds are macOS/APFS only and opt-in
+  (`WT_SNAPSHOTS=1`, plus `WT_SNAPSHOTS_V2=1` for incremental
+  rebuilds). Linux has no recursive reflink primitive, so the gates
+  are no-ops there by design; the Linux CI job proves the rest of the
+  suite passes.
+- The per-file ladder's fidelity gaps above; use the snapshot gate
+  when they matter.
 - A same-size, same-mtime bit flip can slip past the verified ledger
-  between checks. That is the accepted trust model; `WT_VERIFY=1` exists
-  for paranoid runs. A scrub command is the future answer, not more
+  between checks. That is the accepted trust model; `WT_VERIFY=1`
+  exists for paranoid runs (and under v2 it hashes every staged file
+  before publish). A scrub command is the future answer, not more
   hashing on hot paths.
-- Cold snapshot builds are expensive (~24s at 40k scale) because APFS
-  serializes `link(2)`. Amortized over repeated creates this wins big,
-  but a first create after large dependency changes feels slower than
-  the ladder.
-- Reflink materialization on Linux is implemented but never exercised
-  by CI.
+- Cold full builds remain expensive (~15-19s at 40k scale) because
+  APFS serializes `link(2)`. v2 bounds this to once per materially
+  changed tree; small bumps land at ~5s loaded / ~2.5s clean. First
+  create after a large dependency change still pays the full train.
+- v2's selection index is best-effort: stale or missing entries just
+  force a full build, never wrong output.
 
 ## 6. What to do next, in order
 
-1. **Soak `WT_SNAPSHOTS=1` on real agent workloads.** Use it daily on
-   actual repositories. If hit/miss behavior, fidelity, and speed hold,
-   decide whether to flip the default on. Ticket 08 holds the numbers
-   this decision should rest on.
+1. **Soak both gates on real agent workloads**: `WT_SNAPSHOTS=1
+   WT_SNAPSHOTS_V2=1`. Watch for hit rates, post-bump behavior on
+   real dependency changes, and any fidelity surprises. Tickets 08
+   and 09 hold the numbers behind a default-on decision.
 2. **Run the GC cutover on your real store**, only after you are sure
    no pre-cutover binary will touch it again:
    ```sh
    wt store migrate --activate-mark-sweep
    wt store migrate --drop-legacy-refs   # loud warning; irreversible stance
    ```
-   Until then everything works in dual-write mode; it is safe, just not
-   yet faster at the references stage.
-3. **Finish distribution leftovers from original ticket 09**: push the
-   repo, tag v0.1.0 to exercise release CI, set signing secrets, verify
-   a fresh-machine install from a real release artifact.
-4. **Linux validation pass**: exercise the reflink backend and the
-   snapshot gate no-op path in CI, ideally with a Linux job running the
-   benchmark suite in `--quick --verify` mode.
-5. **v2 ideas, deliberately deferred**: per-subtree snapshots with
-   diff-based rebuilds, bounded LRU retention for unreferenced snapshots,
-   a scrub command for continuous corruption detection, faster cold
-   builds if Apple ever makes `link(2)` less serialized.
+   Until then everything works in dual-write mode. With the Step 0
+   fixes the references stage is already down to ~0.4-0.5s, so this
+   is now about hygiene more than speed.
+3. **Finish distribution leftovers**: push the repo, tag v0.1.0 to
+   exercise release CI, set signing secrets, verify a fresh-machine
+   install from a real release artifact.
+4. **Linux validation pass**: the CI job now covers fmt/clippy/test on
+   ubuntu; optionally add a Linux benchmark-suite run (`--quick
+   --verify`) to catch platform drift over time.
+5. **Deliberately deferred**: bounded LRU retention for unreferenced
+   snapshots, a scrub command for continuous corruption detection,
+   faster cold builds if Apple ever makes `link(2)` less serialized.
+   (Diff-based rebuilds shipped as v2; see ticket 09.)
 
 ## 7. Where everything lives
 
-- Specs and tickets: `.scratch/fast-hydration/issues/01..08`,
+- Specs and tickets: `.scratch/fast-hydration/issues/01..09`,
   `.scratch/fast-hydration/spec.md`, `perf-handoff.md` (the earlier
   problem brief that kicked this off).
-- Decision records: `docs/adr/0001..0005`.
+- Decision records: `docs/adr/0001..0006` (0006: external-library
+  evaluation that rejected snapdir/clonetree/pnpm-GC with evidence).
 - Glossary: `CONTEXT.md`.
 - Benchmarks: `benchmarks/run.sh --verify` (scenarios a,b,c,d),
-  fixture generators in `benchmarks/fixture.sh`.
+  `benchmarks/v2-bench.sh` (v1-vs-v2 bump/poisoning table), fixture
+  generators in `benchmarks/fixture.sh`.
 - Codebase-memory index: project `instant-worktrees`, current as of
-  HEAD (976 nodes / 4,094 edges).
+  HEAD (1,260 nodes / 5,434 edges).
