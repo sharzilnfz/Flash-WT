@@ -359,7 +359,11 @@ fn published_hashes(store: &Path) -> Vec<String> {
     };
     let mut out: Vec<String> = entries
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| n != "tmp" && n != "index.tsv")
+        // Publish addresses are exactly 64 lowercase hex chars. Anything
+        // else under snapshots/ is debris by construction (`tmp/`,
+        // `index.tsv`, index-save temp files killed mid-rename) and is
+        // swept elsewhere; only real addresses must pass validity here.
+        .filter(|n| n.len() == 64 && n.bytes().all(|b| b.is_ascii_hexdigit()))
         .collect();
     out.sort();
     out
