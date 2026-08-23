@@ -146,6 +146,10 @@ fn in_place_rewrite_succeeds_and_stays_private_to_its_worktree() {
 }
 
 #[test]
+/// Only meaningful where CoW clones exist (APFS): on filesystems
+/// without clone support wt correctly falls back to byte copies,
+/// which consume the full logical size and would fail this assert.
+#[cfg(target_os = "macos")]
 fn before_first_write_hydrated_files_share_physical_blocks_with_the_blob() {
     // Small files cannot show block sharing; build a repo whose heavy
     // directory holds several megabytes per file.
