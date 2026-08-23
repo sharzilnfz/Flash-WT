@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/OWNER/wt/main/install.sh | sh
 #
 # Environment:
-#   WT_REPO       GitHub repo as owner/name (default: sharzilnafis/wt)
+#   WT_REPO       GitHub repo as owner/name (default: sharzilnfz/wt)
 #   WT_VERSION    release tag to install (default: latest)
 #   WT_BIN_DIR    install directory (default: ~/.local/bin)
 #   WT_DIST_DIR   install from this local directory instead of downloading;
@@ -12,7 +12,7 @@
 #                 the release carries (used by scripts/smoke-install.sh)
 set -eu
 
-REPO=${WT_REPO:-sharzilnafis/wt}
+REPO=${WT_REPO:-sharzilnfz/wt}
 BIN_DIR=${WT_BIN_DIR:-$HOME/.local/bin}
 
 case "$(uname -s)/$(uname -m)" in

@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 env:
-  WT_REPO: sharzilnafis/wt
+  WT_REPO: sharzilnfz/wt
 
 jobs:
   setup-version:
