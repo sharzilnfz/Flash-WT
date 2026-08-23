@@ -71,6 +71,15 @@ quick=0
 verify=0
 scenarios="a,b,c,d"
 
+# First N lines of stdin without closing the pipe early. `head -n`
+# makes the upstream producer die of SIGPIPE once its output exceeds
+# the pipe buffer, and `set -o pipefail` turns that into a spurious
+# script failure — which is exactly what happened at 40k-file scale.
+# Consuming the whole input costs nothing that matters here.
+first_lines() { # n
+    awk -v n="$1" 'NR <= n { buf = buf (NR > 1 ? "\n" : "") $0 } END { if (NR) printf "%s\n", buf }'
+}
+
 die() {
     echo "benchmarks: $*" >&2
     exit 1
@@ -310,10 +319,10 @@ verify_tree() { # src dest
         if [ "$run_kind" = wt ] && [ "$mcount" -eq "$(printf '%s\n' "$mdiff" | grep -c '^>')" ]; then
             gap_modes=$((gap_modes + mcount))
             if [ -z "$gap_mode_example" ]; then
-                gap_mode_example=$(printf '%s\n' "$mdiff" | sed -n 's/^< //p' | head -1)
+                gap_mode_example=$(printf '%s\n' "$mdiff" | sed -n 's/^< //p' | first_lines 1)
             fi
         else
-            die "mode mismatch under $dest vs source $src: $(printf '%s\n' "$mdiff" | head -3 | tr '\n' '; ')"
+            die "mode mismatch under $dest vs source $src: $(printf '%s\n' "$mdiff" | first_lines 3 | tr '\n' '; ')"
         fi
     fi
 
@@ -326,7 +335,7 @@ verify_tree() { # src dest
         lcount=$(printf '%s\n' "$ldiff" | grep -c '^<') || true
         rcount=$(printf '%s\n' "$ldiff" | grep -c '^>') || true
         if [ "$rcount" -ne 0 ] || [ "$lcount" -ne "$run_links" ]; then
-            die "symlink mismatch under $dest vs source $src: $(printf '%s\n' "$ldiff" | head -3 | tr '\n' '; ')"
+            die "symlink mismatch under $dest vs source $src: $(printf '%s\n' "$ldiff" | first_lines 3 | tr '\n' '; ')"
         fi
     fi
 

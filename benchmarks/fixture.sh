@@ -22,12 +22,13 @@ FILES_PER_PKG=8
 # `--d-files 40000` lands on exactly 800 packages.
 FILES_PER_PKG_D=50
 
-# Write `total` small files into `$1/node_modules`, laid out as
+# Write `total` small files into `$1` (callers pass the heavy
+# directory itself, e.g. `<dest>/node_modules`), laid out as
 # `pkg-NNNNN/{lib,dist}/file`. Every file is created fresh with real
 # bytes, which is exactly what a dependency install does at the
 # filesystem level — that is what makes it a fair baseline.
 generate_tree() {
-    root="$1/node_modules"
+    root="$1"
     total=$2
     pkgs=$((total / FILES_PER_PKG))
 
@@ -61,7 +62,8 @@ generate_tree() {
     done
 }
 
-# Write `total` files into `$1/node_modules` as a realistic dependency
+# Write `total` files into `$1` (the heavy directory itself, e.g.
+# `<repo>/node_modules`) as a realistic dependency
 # tree (scenario D):
 #
 #   pkg-NNNNN/
@@ -88,7 +90,7 @@ generate_tree() {
 # for reasons that have nothing to do with what an installer spends
 # its time on. Unique files stay in plain shell.
 generate_tree_d() {
-    root="$1/node_modules"
+    root="$1"
     total=$2
     pkgs=$((total / FILES_PER_PKG_D))
 
