@@ -590,10 +590,24 @@ impl DiskStore {
                             )),
                         });
                     }
-                    fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode))
-                        .map_err(|e| {
-                            BuildError::Fatal(format!("cannot chmod {}: {e}", dest.display()))
-                        })?;
+                    // Chmod on a hardlink retargets the SHARED inode, so
+                    // this may rewrite the object blob's mode — but only
+                    // when it actually differs. Most blobs are born 0644
+                    // and most entries want 0644; skipping the no-op
+                    // chmod saves a measurable slice of build time at
+                    // 40k-file scale without changing any outcome.
+                    let meta = dest.symlink_metadata().map_err(|e| {
+                        BuildError::Fatal(format!("cannot stat {}: {e}", dest.display()))
+                    })?;
+                    if meta.permissions().mode() & 0o7777 != entry.mode {
+                        fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode))
+                            .map_err(|e| {
+                                BuildError::Fatal(format!(
+                                    "cannot chmod {}: {e}",
+                                    dest.display()
+                                ))
+                            })?;
+                    }
                 }
             }
         }
