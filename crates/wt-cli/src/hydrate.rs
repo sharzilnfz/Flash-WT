@@ -32,13 +32,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
 use wt_copy::{placement_refused, CloneOut, FileMaterialize, HardlinkOut};
+#[cfg(target_os = "macos")]
+use wt_store::bulkwalk;
 use wt_store::{ContentId, DiskStore, Entry as CacheEntry, GcMode, Store, ValidationCache};
 
 /// Where the per-machine store lives. `$WT_STORE` wins (tests use it
@@ -113,6 +115,105 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
         modes: BTreeMap::new(),
     };
     let mut cache = ValidationCache::open(store.root());
+
+    // macOS fast path (Step 0 follow-up): one getattrlistbulk per
+    // directory replaces readdir-plus-per-file-stat — at 40k files
+    // that is ~40k fewer syscalls. Only engaged with snapshots on,
+    // where every stat'd attribute is actually consumed; any failure
+    // silently falls back to the portable walk below.
+    #[cfg(target_os = "macos")]
+    let walked = if snapshots {
+        bulkwalk::walk(src).ok()
+    } else {
+        None
+    };
+    // Never constructed off macOS; the type exists only so the match
+    // below compiles unchanged.
+    #[cfg(not(target_os = "macos"))]
+    let walked: Option<std::convert::Infallible> = None;
+
+    match walked {
+        Some(entries) => {
+            // Bulk entries are relative to `src`; every consumer (and
+            // the legacy walk) speaks repo-relative paths, so prefix
+            // with the heavy directory's own repo-relative name.
+            let base = rel_text(src_root, src);
+            ingested.dirs.push(base.clone());
+            for entry in entries {
+                let rel = if base.is_empty() {
+                    entry.rel_path.clone()
+                } else {
+                    format!("{base}/{}", entry.rel_path)
+                };
+                let path = src.join(&entry.rel_path);
+                if entry.is_symlink {
+                    let target = fs::read_link(&path)
+                        .map_err(|e| format!("cannot read symlink {}: {e}", path.display()))?;
+                    ingested
+                        .symlinks
+                        .insert(rel.clone(), target.to_string_lossy().into_owned());
+                    continue;
+                }
+                if entry.is_dir {
+                    ingested.dirs.push(rel);
+                    continue;
+                }
+                if !entry.is_file {
+                    if snapshots {
+                        return Err(format!(
+                            "{} is not a regular file (fifos/sockets/devices are unsupported)",
+                            path.display()
+                        ));
+                    }
+                    continue;
+                }
+                if snapshots {
+                    ingested.modes.insert(rel.clone(), entry.mode & 0o7777);
+                }
+                let mtime = std::time::UNIX_EPOCH
+                    + std::time::Duration::new(entry.mtime_secs, entry.mtime_nanos);
+                let id = match cache.lookup(&rel, entry.size, mtime) {
+                    Some(id) if store.contains(&id) => id,
+                    _ => {
+                        let bytes = fs::read(&path)
+                            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                        let id = store.put(&bytes).map_err(|e| e.to_string())?;
+                        cache.record(
+                            rel.clone(),
+                            CacheEntry {
+                                size: entry.size,
+                                mtime,
+                                id,
+                            },
+                        );
+                        id
+                    }
+                };
+                ingested.files.insert(rel, id);
+            }
+        }
+        None => ingest_dir_walk(store, &mut cache, &mut ingested, src_root, src, snapshots)?,
+    }
+
+    ingested.dirs.sort();
+    ingested.dirs.dedup();
+    cache
+        .save()
+        .map_err(|e| format!("cannot update ingest cache: {e}"))?;
+    Ok(ingested)
+}
+
+/// The portable read_dir+metadata walk: one `fs::metadata` per regular
+/// file on top of each directory's readdir. Also the fallback for the
+/// macOS bulk walker.
+fn ingest_dir_walk(
+    store: &mut DiskStore,
+    cache: &mut ValidationCache,
+    ingested: &mut Ingested,
+    src_root: &Path,
+    src: &Path,
+    snapshots: bool,
+) -> Result<(), String> {
     let mut stack = vec![src.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries =
@@ -185,12 +286,7 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
             ingested.files.insert(rel, id);
         }
     }
-    ingested.dirs.sort();
-    ingested.dirs.dedup();
-    cache
-        .save()
-        .map_err(|e| format!("cannot update ingest cache: {e}"))?;
-    Ok(ingested)
+    Ok(())
 }
 
 fn rel_text(root: &Path, path: &Path) -> String {
@@ -395,14 +491,21 @@ pub fn claim_references(
     }
 
     let git_dir = worktree_git_dir(worktree)?;
-    let mut sidecar = fs::OpenOptions::new()
+    let sidecar_file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(git_dir.join("wt-hydrated.tsv"))
         .map_err(|e| format!("cannot open hydration ledger: {e}"))?;
+    // 40k one-line writes through an unbuffered handle cost 40k
+    // write(2) syscalls; a BufWriter turns that into a handful of
+    // large ones.
+    let mut sidecar = io::BufWriter::with_capacity(128 * 1024, sidecar_file);
     for (rel, id) in &ingested.files {
         writeln!(sidecar, "{rel}\t{id}").map_err(|e| format!("cannot write ledger: {e}"))?;
     }
+    sidecar
+        .flush()
+        .map_err(|e| format!("cannot write ledger: {e}"))?;
     Ok(git_dir)
 }
 
@@ -457,15 +560,20 @@ pub fn claim_snapshot_references(
     }
 
     let git_dir = worktree_git_dir(worktree)?;
-    let mut sidecar = fs::OpenOptions::new()
+    let sidecar_file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(git_dir.join("wt-hydrated.tsv"))
         .map_err(|e| format!("cannot open hydration ledger: {e}"))?;
+    // Same buffering rationale as claim_references.
+    let mut sidecar = io::BufWriter::with_capacity(128 * 1024, sidecar_file);
     for (rel, id) in &ingested.files {
         writeln!(sidecar, "{rel}\tblob\t{id}").map_err(|e| format!("cannot write ledger: {e}"))?;
     }
     writeln!(sidecar, "-\tsnapshot\t{snapshot}")
+        .map_err(|e| format!("cannot write ledger: {e}"))?;
+    sidecar
+        .flush()
         .map_err(|e| format!("cannot write ledger: {e}"))?;
     Ok(git_dir)
 }

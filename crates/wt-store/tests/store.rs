@@ -731,3 +731,36 @@ fn ledger_round_trips_sub_second_mtimes_through_disk() {
     assert!(!ledger.matches(&id, meta.len() + 1, mtime));
     assert!(!ledger.matches(&id, meta.len(), mtime + Duration::from_nanos(1)));
 }
+
+#[test]
+fn save_without_changes_is_a_noop_not_a_rewrite() {
+    let dir = temp_root();
+
+    // A freshly opened, untouched cache must not write anything.
+    let mut cache = ValidationCache::open(dir.path());
+    cache.save().expect("clean save");
+    assert!(
+        !dir.path().join("ingest-cache.tsv").exists(),
+        "a clean save must not create the cache file"
+    );
+
+    // After recording, the save persists — and a subsequent clean
+    // save on the reopened cache leaves it alone.
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "dirty tracking\n");
+    record_for(&mut cache, &mut store, &path);
+    cache.save().expect("dirty save");
+    let before = fs::metadata(dir.path().join("ingest-cache.tsv"))
+        .expect("cache exists after dirty save")
+        .modified()
+        .expect("mtime");
+
+    let mut reopened = ValidationCache::open(dir.path());
+    reopened.save().expect("clean save on reopened cache");
+    let after = fs::metadata(dir.path().join("ingest-cache.tsv"))
+        .expect("cache still there")
+        .modified()
+        .expect("mtime");
+    assert_eq!(before, after, "clean save must not rewrite the TSV");
+}

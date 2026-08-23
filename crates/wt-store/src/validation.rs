@@ -44,6 +44,10 @@ pub struct Entry {
 pub struct ValidationCache {
     path: PathBuf,
     entries: BTreeMap<String, Entry>,
+    /// Set by `record`, cleared by a successful `save`: a warm ingest
+    /// that changed nothing must not rewrite a 40k-line TSV for
+    /// nothing.
+    dirty: bool,
 }
 
 impl ValidationCache {
@@ -56,7 +60,11 @@ impl ValidationCache {
         let entries = fs::read_to_string(&path)
             .map(|text| parse(&text))
             .unwrap_or_default();
-        ValidationCache { path, entries }
+        ValidationCache {
+            path,
+            entries,
+            dirty: false,
+        }
     }
 
     /// The stored content id for `rel`, but only if both the recorded
@@ -70,6 +78,7 @@ impl ValidationCache {
     /// Record what this ingest learned about one file.
     pub fn record(&mut self, rel: String, entry: Entry) {
         self.entries.insert(rel, entry);
+        self.dirty = true;
     }
 
     /// Number of recorded paths.
@@ -82,11 +91,18 @@ impl ValidationCache {
         self.entries.is_empty()
     }
 
-    /// Rewrite the cache atomically: everything goes to a temp file in
+    /// Rewrite the cache atomically — but only when something was
+    /// recorded since open or the last save. A no-op save (nothing
+    /// changed) is a cheap `Ok(())`: warm ingests of an unchanged tree
+    /// must not pay a full temp-file-plus-rename rewrite of the whole
+    /// TSV. Everything goes to a temp file in
     /// the store root first, then one rename publishes it. A crash
     /// mid-write leaves either the previous cache or the full new one;
     /// whatever survives parses as a whole.
-    pub fn save(&self) -> io::Result<()> {
+    pub fn save(&mut self) -> io::Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
         let parent = self.path.parent().expect("cache lives beside a root");
         let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
         for (rel, entry) in &self.entries {
@@ -104,6 +120,7 @@ impl ValidationCache {
             )?;
         }
         tmp.persist(&self.path).map_err(|e| e.error)?;
+        self.dirty = false;
         Ok(())
     }
 }

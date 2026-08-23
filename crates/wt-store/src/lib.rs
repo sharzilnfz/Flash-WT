@@ -13,6 +13,9 @@ mod snapshot;
 mod validation;
 mod verified;
 
+#[cfg(target_os = "macos")]
+pub mod bulkwalk;
+
 pub use disk::DiskStore;
 pub use gc::{GcMode, MarkReport, MarkSwept};
 pub use mirror::{
