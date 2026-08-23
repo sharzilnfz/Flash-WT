@@ -12,6 +12,12 @@
 //! - WT_VERIFY=1 with both gates: exact tree regardless of which mode
 //!   served it
 
+// The whole-directory snapshot fast path is macOS/APFS-only (see
+// crates/wt-cli/src/snapshots.rs: on other platforms the gate is a
+// no-op and no wt-stage snapshot lines are ever printed, so these
+// tests would fail rather than skip).
+#![cfg(target_os = "macos")]
+
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};

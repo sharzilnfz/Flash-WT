@@ -17,6 +17,21 @@ jobs:
       - run: cargo build --locked
       - run: cargo test --locked
 
+  validate:
+    # Linux validation: formatting, lints, and the test suite on one
+    # runner. macOS-only tests skip themselves via #[cfg(target_os =
+    # "macos")] gates (crates/wt-cli/tests/snapshots.rs,
+    # crates/wt-cli/tests/snapshots_v2.rs, crates/wt-store/tests/bulkwalk.rs).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
   smoke-installers:
     strategy:
       matrix:
