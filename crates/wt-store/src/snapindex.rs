@@ -390,6 +390,22 @@ mod tests {
     }
 
     #[test]
+    fn record_publish_surfaces_io_errors_without_panicking_on_hostile_layouts() {
+        // index.tsv exists as a DIRECTORY: load cannot read it and
+        // save cannot rename over it. The error must come back as a
+        // plain Err for callers to ignore — the index is best-effort.
+        let base = tempfile::tempdir().unwrap();
+        fs::create_dir_all(base.path().join("snapshots/index.tsv")).unwrap();
+        assert!(super::record_publish(base.path(), ROOT_A, PAT, HEAVY, &id(7)).is_err());
+        assert!(super::select_old_snapshot(base.path(), ROOT_A, PAT, HEAVY).is_none());
+
+        // snapshots/ exists as a FILE: even create_dir_all fails.
+        let base = tempfile::tempdir().unwrap();
+        fs::write(base.path().join("snapshots"), "not a directory").unwrap();
+        assert!(super::record_publish(base.path(), ROOT_A, PAT, HEAVY, &id(8)).is_err());
+    }
+
+    #[test]
     fn select_walks_ring_newest_first_and_skips_invalid_candidates() {
         use crate::snapshot::{Manifest, SnapshotEntry};
         use crate::Store as _;

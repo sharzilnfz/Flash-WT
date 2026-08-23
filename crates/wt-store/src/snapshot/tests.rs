@@ -622,6 +622,77 @@ fn failed_unit_clone_falls_back_to_per_entry_placement() {
 }
 
 #[test]
+fn old_snapshot_evicted_before_cloning_falls_back_per_unit_and_lands_exactly() {
+    let (_base, mut store) = incremental_fixture();
+    use crate::Store as _;
+
+    let old_entries = v2_entries(&mut store);
+    let old_manifest = Manifest::new(old_entries.clone()).unwrap();
+    assert_eq!(
+        store.publish_snapshot(old_entries.clone(), false).unwrap(),
+        Ok(PublishOutcome::Published)
+    );
+
+    // Eviction race: selection already picked this old snapshot, then
+    // sweep took its whole directory before any unit cloned. Every
+    // clonefile must ENOENT into the per-unit fallback.
+    fs::remove_dir_all(snapshot_path(store.root(), &old_manifest.hash)).unwrap();
+
+    let extra = store.put(b"root.txt v2\n").unwrap();
+    let mut new_entries = old_entries.clone();
+    new_entries.retain(|e| e.rel != "root.txt");
+    new_entries.push(SnapshotEntry::file("root.txt", extra, 0o644));
+    let new_manifest = Manifest::new(new_entries.clone()).unwrap();
+    let units = crate::snapdiff::SnapshotDiff::unchanged_units(
+        &old_manifest.entries,
+        &new_manifest.entries,
+    );
+    assert_eq!(units, vec!["empty-dir".to_string(), "pkg00".to_string()]);
+
+    let mut timing = SnapshotBuildTiming::default();
+    assert_eq!(
+        store
+            .publish_snapshot_incremental(
+                new_entries,
+                &old_manifest.hash,
+                &units,
+                false,
+                Some(&mut timing)
+            )
+            .unwrap(),
+        Ok(PublishOutcome::Published)
+    );
+    assert_eq!(timing.clone_units, 0, "every clone attempt must fail");
+    assert_eq!(
+        timing.fallback_linked_files, 2,
+        "both pkg00 files must come back from blobs via the fallback"
+    );
+
+    // The published result is exact despite the mid-flight eviction.
+    assert_eq!(
+        store.find_snapshot(&new_manifest.hash).unwrap(),
+        new_manifest
+    );
+    let tree = snapshot_tree_path(store.root(), &new_manifest.hash);
+    assert_eq!(
+        fs::read_to_string(tree.join("pkg00/nested/a")).unwrap(),
+        "nested a\n"
+    );
+    assert_eq!(
+        fs::read_to_string(tree.join("pkg00/run.sh")).unwrap(),
+        "#!/bin/sh\necho hi\n"
+    );
+    assert_eq!(
+        fs::read_to_string(tree.join("root.txt")).unwrap(),
+        "root.txt v2\n"
+    );
+    assert!(tree.join("empty-dir").is_dir());
+    let md = fs::symlink_metadata(tree.join("pkg00/bin-link")).unwrap();
+    assert!(md.file_type().is_symlink());
+    store.flush().unwrap();
+}
+
+#[test]
 fn paranoid_incremental_rejects_rotted_blob_inside_a_cloned_unit() {
     let (_base, mut store) = incremental_fixture();
     use crate::Store as _;

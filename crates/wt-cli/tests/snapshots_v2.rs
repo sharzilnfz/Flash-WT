@@ -18,10 +18,13 @@
 // tests would fail rather than skip).
 #![cfg(target_os = "macos")]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::thread;
+use std::time::Duration;
 
 /// A throwaway git repo whose `heavy/` tree is big enough for the
 /// incremental heuristic to bite: 5 generated package dirs (~250
@@ -99,6 +102,21 @@ impl V2Fixture {
 
     fn worktree_path(&self, name: &str) -> PathBuf {
         self.repo.parent().unwrap().join(name)
+    }
+
+    /// Run `wt` with the isolated store but WITHOUT `--dir`, for
+    /// commands that resolve their own context (sweep, migrate,
+    /// remove).
+    fn wt_raw(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_wt"))
+            .args(args)
+            .env("WT_STORE", self.store_path())
+            .env_remove("WT_HARDLINK")
+            .env_remove("WT_NO_HARDLINK")
+            .env_remove("WT_GC_GRACE")
+            .current_dir(&self.repo)
+            .output()
+            .expect("run wt binary")
     }
 }
 
@@ -316,6 +334,339 @@ fn paranoid_verify_with_v2_gates_still_lands_an_exact_tree() {
     assert!(
         stderr.contains("wt-stage snapshot-mode="),
         "mode line must be emitted whenever the snapshot path engaged:\n{stderr}"
+    );
+    assert_tree_matches_source(&fx.heavy(), &fx.worktree_path("origin-two").join("heavy"));
+}
+
+// ---- crash safety, GC interaction, index resilience --------------------
+
+/// Hex-named directories under `<store>/snapshots/` — the published
+/// (or debris) snapshot addresses. tmp/ and the selection index are
+/// not addresses.
+fn published_hashes(store: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(store.join("snapshots")) else {
+        // Nothing published yet (an early kill may not have gotten
+        // as far as creating the snapshots directory).
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "tmp" && n != "index.tsv")
+        .collect();
+    out.sort();
+    out
+}
+
+fn manifest_of(store: &Path, hash: &str) -> wt_store::Manifest {
+    let id = wt_store::ContentId::from_hex(hash).expect("hex hash");
+    let text =
+        fs::read_to_string(wt_store::snapshot_path(store, &id).join("manifest.tsv")).unwrap();
+    wt_store::Manifest::parse(&text).expect("valid manifest")
+}
+
+fn blob_ids(manifest: &wt_store::Manifest) -> BTreeSet<wt_store::ContentId> {
+    manifest.entries.iter().filter_map(|e| e.blob).collect()
+}
+
+fn object_path(store: &Path, id: &wt_store::ContentId) -> PathBuf {
+    let hex = id.to_string();
+    store.join("objects").join(&hex[..2]).join(&hex[2..])
+}
+
+/// After every kill: anything sitting at a published address must
+/// pass THE shared validity check (`read_published` is what lookup,
+/// v2 selection, and GC all go through). A directory that looks
+/// published but lacks `.complete` or carries a torn manifest would
+/// mean a non-atomic publish escaped into the wild.
+fn assert_no_incomplete_published(store: &Path, iteration: usize) {
+    for name in published_hashes(store) {
+        let hash = wt_store::ContentId::from_hex(&name).expect("hex address");
+        assert!(
+            wt_store::read_published_snapshot(store, &hash).is_some(),
+            "kill iteration {iteration}: {name} sits at a published \
+             address but fails the shared validity check"
+        );
+    }
+}
+
+/// Kill delays swept across the phases of one create: ingest,
+/// verify/link, publish, clonefile-out, mirror/index bookkeeping.
+const KILL_DELAYS_MS: &[u64] = &[10, 60, 120, 180, 240, 300, 350, 400];
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sigkilled_creates_never_leave_a_half_published_snapshot_behind() {
+    let fx = V2Fixture::new();
+
+    for (i, delay_ms) in KILL_DELAYS_MS.iter().enumerate() {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_wt"))
+            .args(["create", &format!("killed-{i}")])
+            .arg("--dir")
+            .arg(fx.worktree_path(&format!("origin-killed-{i}")))
+            .env("WT_STORE", fx.store_path())
+            .envs(BOTH_GATES.iter().copied())
+            .env_remove("WT_HARDLINK")
+            .env_remove("WT_NO_HARDLINK")
+            .env_remove("WT_GC_GRACE")
+            .current_dir(&fx.repo)
+            .spawn()
+            .expect("spawn wt create");
+        thread::sleep(Duration::from_millis(*delay_ms));
+        // SIGKILL on Unix; a no-op when the create already finished.
+        let _ = child.kill();
+        let _ = child.wait();
+
+        // Invariant 1: no torn directory at any published address.
+        assert_no_incomplete_published(&fx.store_path(), i);
+
+        // Invariant 2: the next run treats whatever it finds as a hit
+        // or a miss, never as a usable half-snapshot, and lands an
+        // exactly-correct tree anyway.
+        let out = fx.wt(
+            &["create", &format!("after-{i}")],
+            BOTH_GATES,
+            &format!("origin-after-{i}"),
+        );
+        assert_created(&out);
+        assert_tree_matches_source(
+            &fx.heavy(),
+            &fx.worktree_path(&format!("origin-after-{i}")).join("heavy"),
+        );
+    }
+}
+
+/// Two generations sharing almost every blob. Only worktree two's
+/// mirror stays live, referencing ONLY B. Sweep may collect A's
+/// directory and A's exclusive blobs, but every blob SHARED with B
+/// survives because B's manifest marks them — and the selection
+/// index must come through untouched.
+#[test]
+fn sweep_evicts_unreferenced_old_generation_but_shared_blobs_survive() {
+    let fx = V2Fixture::new();
+    let store = fx.store_path();
+
+    assert_created(&fx.wt(&["create", "one"], BOTH_GATES, "origin-one"));
+    let before = published_hashes(&store);
+    assert_eq!(before.len(), 1);
+    let a_hash = before[0].clone();
+
+    bump_source(&fx.heavy());
+    assert_created(&fx.wt(&["create", "two"], BOTH_GATES, "origin-two"));
+    let after = published_hashes(&store);
+    assert_eq!(after.len(), 2);
+    let b_hash = after
+        .iter()
+        .find(|h| **h != a_hash)
+        .expect("the second generation published under a fresh hash");
+
+    let a_blobs = blob_ids(&manifest_of(&store, &a_hash));
+    let b_blobs = blob_ids(&manifest_of(&store, b_hash));
+    let shared: Vec<_> = a_blobs.intersection(&b_blobs).copied().collect();
+    let exclusive_a: Vec<_> = a_blobs.difference(&b_blobs).copied().collect();
+    let exclusive_b: Vec<_> = b_blobs.difference(&a_blobs).copied().collect();
+    assert!(!shared.is_empty(), "fixture must actually share blobs");
+    assert!(!exclusive_a.is_empty(), "the mutated file's old blob");
+    assert!(!exclusive_b.is_empty(), "the bump's new blobs");
+
+    // Only B stays live: removing worktree one retires its mirror.
+    let removed = fx.wt_raw(&["remove", "one"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+
+    assert!(fx
+        .wt_raw(&["store", "migrate", "--activate-mark-sweep"])
+        .status
+        .success());
+    let swept = fx.wt_raw(&["sweep", "--age", "0s"]);
+    assert!(
+        swept.status.success(),
+        "{}",
+        String::from_utf8_lossy(&swept.stderr)
+    );
+
+    assert!(
+        !wt_store::snapshot_path(&store, &wt_store::ContentId::from_hex(&a_hash).unwrap()).exists(),
+        "unreferenced old generation must be evicted"
+    );
+    assert!(
+        wt_store::snapshot_path(&store, &wt_store::ContentId::from_hex(b_hash).unwrap()).exists(),
+        "referenced current generation must survive"
+    );
+    for id in &exclusive_a {
+        assert!(
+            !object_path(&store, id).exists(),
+            "A-exclusive blob {id} should be collected"
+        );
+    }
+    for id in shared.iter().chain(exclusive_b.iter()) {
+        assert!(
+            object_path(&store, id).is_file(),
+            "blob {id} is marked by B's manifest and must survive"
+        );
+    }
+
+    // Regression: sweep_snapshots used to take the selection index
+    // with the rest of its non-hex debris, silently killing v2
+    // incremental selection store-wide.
+    assert!(
+        store.join("snapshots/index.tsv").is_file(),
+        "sweep deleted the v2 selection index"
+    );
+    let index = fs::read_to_string(store.join("snapshots/index.tsv")).unwrap();
+    assert!(
+        index.contains(b_hash),
+        "selection index lost the current generation's ring entry"
+    );
+}
+
+/// Mirror referencing A while B also exists; B's directory is then
+/// destroyed out-of-band. Sweep keeps A and every blob A's manifest
+/// marks; only B's exclusive content becomes collectable.
+#[test]
+fn sweep_keeps_old_generation_alive_when_newer_snapshot_dir_vanishes() {
+    let fx = V2Fixture::new();
+    let store = fx.store_path();
+
+    assert_created(&fx.wt(&["create", "one"], BOTH_GATES, "origin-one"));
+    let a_hash = published_hashes(&store)[0].clone();
+
+    bump_source(&fx.heavy());
+    assert_created(&fx.wt(&["create", "two"], BOTH_GATES, "origin-two"));
+    let b_hash = published_hashes(&store)
+        .into_iter()
+        .find(|h| *h != a_hash)
+        .unwrap();
+
+    let a_manifest = manifest_of(&store, &a_hash);
+    let b_manifest = manifest_of(&store, &b_hash);
+    let exclusive_b: Vec<_> = blob_ids(&b_manifest)
+        .difference(&blob_ids(&a_manifest))
+        .copied()
+        .collect();
+    assert!(!exclusive_b.is_empty());
+
+    // Both mirrors stay live (both worktrees exist). B's record is
+    // about to become unresolvable, which GC must treat as "marks
+    // nothing", never as fatal.
+    fs::remove_dir_all(wt_store::snapshot_path(
+        &store,
+        &wt_store::ContentId::from_hex(&b_hash).unwrap(),
+    ))
+    .unwrap();
+
+    assert!(fx
+        .wt_raw(&["store", "migrate", "--activate-mark-sweep"])
+        .status
+        .success());
+    let swept = fx.wt_raw(&["sweep", "--age", "0s"]);
+    assert!(
+        swept.status.success(),
+        "an unresolvable snapshot reference must not break sweep: {}",
+        String::from_utf8_lossy(&swept.stderr)
+    );
+
+    assert!(
+        wt_store::snapshot_path(&store, &wt_store::ContentId::from_hex(&a_hash).unwrap()).is_dir(),
+        "A is referenced by a live mirror and must survive"
+    );
+    for entry in &a_manifest.entries {
+        if let Some(id) = entry.blob {
+            assert!(
+                object_path(&store, &id).is_file(),
+                "blob {id} of referenced snapshot A was collected"
+            );
+        }
+    }
+    for id in &exclusive_b {
+        assert!(
+            !object_path(&store, id).exists(),
+            "B-exclusive blob {id} lost its only mark and should be collected"
+        );
+    }
+}
+
+/// The tree inside an incrementally published snapshot holds real
+/// bytes: unit-cloned files are private inodes with correct content,
+/// not references into the old generation.
+#[test]
+fn incremental_snapshot_tree_files_are_private_and_self_contained() {
+    let fx = V2Fixture::new();
+    let store = fx.store_path();
+
+    assert_created(&fx.wt(&["create", "one"], BOTH_GATES, "origin-one"));
+    let a_hash = published_hashes(&store)[0].clone();
+    bump_source(&fx.heavy());
+    assert_created(&fx.wt(&["create", "two"], BOTH_GATES, "origin-two"));
+    let b_hash = published_hashes(&store)
+        .into_iter()
+        .find(|h| *h != a_hash)
+        .unwrap();
+
+    // pkg01 stayed byte-identical across the bump, so its subtree
+    // arrived in B by one recursive clonefile out of A's tree.
+    let sample =
+        wt_store::snapshot_tree_path(&store, &wt_store::ContentId::from_hex(&b_hash).unwrap())
+            .join("pkg01/file-000.txt");
+    assert_eq!(
+        fs::read_to_string(&sample).unwrap(),
+        "package 1 file 0\n",
+        "cloned-unit content must be exact"
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        let md = fs::symlink_metadata(&sample).unwrap();
+        assert_eq!(
+            md.nlink(),
+            1,
+            "a cloned unit file must own a private inode, not a link \
+             into the old tree or the blob store"
+        );
+        assert!(md.is_file(), "must be a regular file, not a symlink");
+    }
+
+    // Not a dangling reference into the old generation: destroy A
+    // wholesale and B's bytes still read back.
+    fs::remove_dir_all(wt_store::snapshot_path(
+        &store,
+        &wt_store::ContentId::from_hex(&a_hash).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(&sample).unwrap(),
+        "package 1 file 0\n",
+        "B's cloned files must not depend on A's directory"
+    );
+}
+
+/// The selection index is pure optimization metadata. With it made
+/// permanently unusable (a DIRECTORY squatting on index.tsv defeats
+/// both load and save), a create must degrade to the plain full
+/// build and still land an exact tree.
+#[test]
+fn unusable_selection_index_never_fails_the_create() {
+    let fx = V2Fixture::new();
+
+    assert_created(&fx.wt(&["create", "one"], BOTH_GATES, "origin-one"));
+    let index = fx.store_path().join("snapshots/index.tsv");
+    assert!(index.is_file());
+    fs::remove_file(&index).unwrap();
+    fs::create_dir(&index).expect("squat a directory on index.tsv");
+
+    bump_source(&fx.heavy());
+    let out = fx.wt(
+        &["create", "two"],
+        &[BOTH_GATES, &[("WT_TIMING", "1")]].concat(),
+        "origin-two",
+    );
+    assert_created(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("wt-stage snapshot-mode=build"),
+        "no usable selection means the plain full build:\n{stderr}"
     );
     assert_tree_matches_source(&fx.heavy(), &fx.worktree_path("origin-two").join("heavy"));
 }

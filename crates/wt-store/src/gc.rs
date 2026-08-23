@@ -286,6 +286,13 @@ impl DiskStore {
                 }
                 continue;
             }
+            if name == "index.tsv" {
+                // Live selection metadata for v2 incremental
+                // rebuilds, not rebuildable cache: never collected.
+                // (Its own temp-file debris has a non-hex name and
+                // falls through to collection below.)
+                continue;
+            }
             let id = ContentId::from_hex(&name);
             match id {
                 Some(id) if referenced.contains(&id) => {}
