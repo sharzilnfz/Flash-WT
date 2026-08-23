@@ -112,6 +112,19 @@ existence, which survives out-of-band `rm -rf` of worktrees.
 - `25aac28` Benchmark fixes found at scale (SIGPIPE-safe line capture;
   honest single-level fixture nesting).
 - `fa1866f` Snapshot build skips no-op chmods; measured numbers recorded.
+- `5d34edc` Step 0: fine-grained WT_TIMING stage attribution.
+- `fdba0df` Step 0 follow-up: getattrlistbulk bulk walk, dirty-flag
+  cache saves, buffered ledgers (ingest -85%, references -86%).
+- `9f1f0e6` v2: diff-based incremental snapshot rebuilds behind
+  `WT_SNAPSHOTS_V2=1` (selection index, sorted-merge diff). Ticket 09.
+- `4053f07` v2 hardening: crash, eviction-race, GC-interaction tests;
+  fixed sweep collecting `snapshots/index.tsv` as debris.
+- `ed2c3ee` benchmarks: reproducible `v2-bench.sh`; Linux CI job.
+- `f92e112` v2: whole-tree clone plus in-place delta replaces per-unit
+  cloning (post-bump rebuild 3.4x faster than v1).
+
+External-library evaluation (snapdir, clonetree/parcopy, pnpm-style
+nlink GC) rejected with evidence: docs/adr/0006.
 
 Earlier context: tickets 01–09 built the original tool; fast-hydration
 tickets 02/03/05 added the ingest cache, CoW materialization, and the
@@ -126,35 +139,60 @@ no-op chmods got equivalent output for free. Rationale lives in ticket
 ## 4. Measured performance (release build, Darwin arm64, APFS)
 
 Large fixture: 40,000 files, 800 packages, 96% duplicate content
-(only 1,648 unique blobs).
+(only 1,648 unique blobs). Two measurement sessions: the first on an
+idle machine (5am), the second with desktop load present; ratios are
+consistent across both.
 
-| Warm create | time |
-|---|---|
-| fresh install baseline | 11.35s |
-| direct recursive CoW clone (`cp -Rc`) | 7.95s |
-| wt per-file ladder | 11.78s |
-| wt, mark-sweep cutover only | 11.7s |
-| **wt, WT_SNAPSHOTS=1** | **6.5s** |
-| **wt, snapshots + no-refs cutover** | **6.2s** |
+| Warm create | idle machine | loaded machine |
+|---|---|---|
+| fresh install baseline | 11.35s | — |
+| direct recursive CoW clone (`cp -Rc`) | 7.95s | — |
+| wt per-file ladder | 11.78s | ~13s |
+| **wt, WT_SNAPSHOTS=1** | **6.5s** | **~1.6s** |
+| wt, snapshots + no-refs cutover | 6.2s | ~1.5s |
 
-Snapshot cold build costs ~24s (once per unique tree content); hits are
-the common case afterward. Small fixture (4k files): snapshots do not pay
-yet, wt warm is ~2.2s vs baseline 1.9s.
+The warm-hit jump between sessions is the Step 0 follow-up work:
+ingest and references stages carried ~6s of syscall overhead that the
+bulk walk, dirty-flag cache saves, and buffered ledgers removed.
+Recursive clonefile was measured directly: ~0.45s for 40k files.
+
+### Cold builds and v2 incremental rebuilds
+
+Cold full build (first create after content change): ~15-19s of which
+the link train dominates (APFS serializes link(2) at ~300us/file).
+With `WT_SNAPSHOTS_V2=1`, a rebuild after small changes costs one
+whole-tree clonefile plus O(changed) delta work:
+
+| Scenario (loaded machine) | v1 rebuild | v2 incremental |
+|---|---|---|
+| dependency bump: 3 of 800 packages | 17.8s | **5.3s** |
+| hit-rate poison: one `.DS_Store` | 18.0s | **5.7s** |
+
+v2's residual cost is ingest (~3.3s loaded / ~0.6s warm-cache walk) +
+references + git worktree add. Reproduce: `WT_BENCH_SAMPLES=2
+./benchmarks/v2-bench.sh` (every hydrated tree diff -r'd against the
+donor; mismatch aborts).
+
+Small fixture (4k files): snapshots do not pay yet, wt warm is ~2.2s vs
+baseline 1.9s.
 
 Fidelity: snapshot-hydrated trees preserve symlinks, executable bits,
 and empty directories exactly. The per-file ladder drops exec bits and
 symlinks (counted and reported as known gaps by the suite's `--verify`;
 bytes and presence are exact everywhere and any mismatch fails the run).
+Under v2, `WT_VERIFY=1` hashes every staged file before publish.
 
 Reproduce anything with:
 
 ```sh
-cargo test                       # 135 tests
+cargo test                       # 167 tests
 ./benchmarks/run.sh --verify     # four scenarios, deep-verified
+./benchmarks/v2-bench.sh         # v1-vs-v2 bump/poisoning table
 ```
 
-Environment knobs: `WT_STORE`, `WT_SNAPSHOTS=1`, `WT_VERIFY=1`,
-`WT_HARDLINK=1`, `WT_NO_HARDLINK=1`, `WT_GC_GRACE` (e.g. 15m), `WT_TIMING=1`.
+Environment knobs: `WT_STORE`, `WT_SNAPSHOTS=1`, `WT_SNAPSHOTS_V2=1`,
+`WT_VERIFY=1`, `WT_HARDLINK=1`, `WT_NO_HARDLINK=1`, `WT_GC_GRACE`
+(e.g. 15m), `WT_TIMING=1`.
 
 ## 5. Known limitations
 
