@@ -377,6 +377,37 @@ pub fn snapshot_tree_path(root: &Path, hash: &ContentId) -> PathBuf {
 /// Where the tree lives inside a build temp directory.
 const TREE_SUBDIR: &str = "tree";
 
+/// One recursive `clonefile(2)` of `src` onto (not-yet-existing) `dst`
+/// — the v2 unit-copy primitive. APFS-only; other platforms report
+/// [`io::ErrorKind::Unsupported`] so callers take their per-unit
+/// fallback path unconditionally.
+fn clone_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+        let c_src = CString::new(src.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in source path"))?;
+        let c_dst = CString::new(dst.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in dest path"))?;
+        // SAFETY: both pointers are valid NUL-terminated C strings for
+        // the duration of the call; clonefile keeps neither.
+        let rc = unsafe { libc::clonefile(c_src.as_ptr(), c_dst.as_ptr(), 0) };
+        if rc == 0 {
+            return Ok(());
+        }
+        Err(io::Error::last_os_error())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (src, dst);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "recursive clonefile exists only on macOS/APFS",
+        ))
+    }
+}
+
 /// Load and fully validate the published snapshot for `hash`, if one
 /// exists. Valid means: parseable manifest whose header hash matches
 /// the directory name, plus a `.complete` marker carrying the same
@@ -415,6 +446,19 @@ pub struct SnapshotBuildTiming {
     pub link_train_ms: u64,
     /// Manifest serialization/hash, `.complete`, atomic renames.
     pub publish_ms: u64,
+    /// v2 incremental rebuilds only: milliseconds spent in per-unit
+    /// recursive `clonefile(2)` calls from the old snapshot's tree.
+    /// Zero for full builds.
+    pub clone_units_ms: u64,
+    /// v2 incremental rebuilds only: how many unchanged-subtree units
+    /// cloned successfully (fallback-linked units are NOT counted;
+    /// their links land in `link_train_ms`).
+    pub clone_units: usize,
+    /// v2 incremental rebuilds only: regular files placed by the
+    /// per-entry fallback for units whose clonefile refused. Lets the
+    /// caller report exactly how many files were hardlinked rather
+    /// than cloned.
+    pub fallback_linked_files: usize,
 }
 
 /// What [`DiskStore::publish_snapshot`] did with its temp tree.
@@ -566,6 +610,252 @@ impl DiskStore {
                 verify_ms,
                 link_train_ms,
                 publish_ms,
+                clone_units_ms: 0,
+                clone_units: 0,
+                fallback_linked_files: 0,
+            };
+        }
+        outcome
+    }
+
+    /// v2 incremental rebuild: build the same published snapshot as
+    /// [`Self::publish_snapshot`] would, but copy unchanged subtrees
+    /// from a previous snapshot with one recursive `clonefile(2)` per
+    /// unit instead of re-linking every file.
+    ///
+    /// # Arguments
+    ///
+    /// - `entries`: the FULL new entry list (the diff has already been
+    ///   computed by the caller; this method only needs to know what
+    ///   to place where). Validated and hashed here like any build.
+    /// - `old_hash`: the published snapshot whose tree supplies the
+    ///   cloned units. Its content for those units is identical by
+    ///   construction (same kind + mode + ref per manifest entry).
+    /// - `units`: maximal fully-unchanged directory relpaths
+    ///   ([`crate::snapdiff::SnapshotDiff::unchanged_units`]).
+    /// - `paranoid`, `timing`: as in [`Self::publish_snapshot_timed`];
+    ///   timing additionally fills `clone_units_ms` / `clone_units`.
+    ///
+    /// # Mechanics
+    ///
+    /// Staging works exactly like the full builder (temp dir under
+    /// `snapshots/tmp/`, `tree/` inside, atomic rename at the end).
+    /// All new-tree directories OUTSIDE unit interiors are created
+    /// first — boundary dirs of units included. Each maximal unit is
+    /// then cloned from `snapshots/<old>/tree/<unit>`; ANY clone
+    /// failure falls back for that unit alone to plain per-entry
+    /// placement (verify + hardlink + chmod / symlink), so the rebuild
+    /// never aborts on a refused clone. Added/modified/unchanged-non-
+    /// unit entries are placed through the same shared code path as
+    /// the full builder. Deleted entries need nothing: staging starts
+    /// empty. Publish semantics — winner-collision handling, temp
+    /// cleanup on error — mirror [`PublishOutcome`] exactly.
+    ///
+    /// # Trust model under `paranoid` (`WT_VERIFY=1`)
+    ///
+    /// Cloned unit files share inodes with the OLD snapshot's object
+    /// blobs via hardlink, so reading them IS reading the blobs: after
+    /// cloning, every file inside a cloned unit is read-and-hashed and
+    /// compared against its manifest blob id. A mismatch fails the
+    /// whole incremental publish with [`BuildError::Fatal`] BEFORE the
+    /// rename — the caller then falls back to a full paranoid rebuild,
+    /// which hashes everything it links. Non-paranoid runs trust the
+    /// old snapshot's verified-at-publish status for unit contents,
+    /// exactly like a v1 hit trusts a published snapshot.
+    pub fn publish_snapshot_incremental(
+        &self,
+        entries: Vec<SnapshotEntry>,
+        old_hash: &ContentId,
+        units: &[String],
+        paranoid: bool,
+        timing: Option<&mut SnapshotBuildTiming>,
+    ) -> std::result::Result<std::result::Result<PublishOutcome, BuildError>, Error> {
+        let mut verify_ms = 0u64;
+        let mut link_train_ms = 0u64;
+        let mut publish_ms = 0u64;
+        let mut clone_units_ms = 0u64;
+        let mut clone_units = 0usize;
+        let mut fallback_linked_files = 0usize;
+
+        let stage = Instant::now();
+        let manifest =
+            Manifest::new(entries).map_err(|e| Error::Io(io::Error::other(e.to_string())))?;
+        publish_ms += stage.elapsed().as_millis() as u64;
+
+        let stage = Instant::now();
+        let tmp_base = self.root().join("snapshots").join("tmp");
+        fs::create_dir_all(&tmp_base)?;
+        let tmp = tempfile::Builder::new()
+            .prefix("build-")
+            .tempdir_in(&tmp_base)?;
+        let tmp_path = tmp.path().to_path_buf();
+        fs::create_dir_all(tmp_path.join(TREE_SUBDIR))?;
+        link_train_ms += stage.elapsed().as_millis() as u64;
+
+        let tree_dir = tmp_path.join(TREE_SUBDIR);
+        let old_tree = snapshot_tree_path(self.root(), old_hash);
+        let covered = |rel: &str| {
+            units
+                .iter()
+                .any(|u| rel == u || rel.starts_with(&format!("{u}/")))
+        };
+
+        // 1. Every directory of the new tree except descendants INSIDE
+        //    units (unit boundaries must exist; their interiors arrive
+        //    wholesale by clone).
+        for entry in &manifest.entries {
+            if entry.kind == EntryKind::Dir && !covered(&entry.rel) {
+                if let Err(e) =
+                    self.place_entry(entry, &tree_dir, false, &mut verify_ms, &mut link_train_ms)
+                {
+                    drop(tmp);
+                    return Ok(Err(e));
+                }
+            }
+        }
+
+        // 2. Per maximal unit: one recursive clone out of the old
+        //    snapshot's tree. Any failure downgrades ONLY this unit to
+        //    per-entry placement.
+        for unit in units {
+            let src = old_tree.join(unit);
+            let dst = tree_dir.join(unit);
+            // The parent chain exists by step 1 for explicit dirs; a
+            // manifest may skip intermediates, so recreate any gap.
+            if let Some(parent) = dst.parent() {
+                if !parent.exists() {
+                    if let Err(e) = fs::create_dir_all(parent) {
+                        drop(tmp);
+                        return Ok(Err(BuildError::Fatal(format!(
+                            "cannot create {}: {e}",
+                            parent.display()
+                        ))));
+                    }
+                }
+            }
+            let stage = Instant::now();
+            let cloned = clone_dir_recursive(&src, &dst);
+            let spent = stage.elapsed().as_millis() as u64;
+            match cloned {
+                Ok(()) => {
+                    clone_units_ms += spent;
+                    clone_units += 1;
+                    continue;
+                }
+                Err(_) => {
+                    // Fallback links count as the link train, not as
+                    // cloning.
+                    link_train_ms += spent;
+                    // Materialize this unit's subtree entry by entry
+                    // from the store.
+                    let prefix = format!("{unit}/");
+                    for entry in manifest
+                        .entries
+                        .iter()
+                        .filter(|e| e.rel.as_str() == unit || e.rel.starts_with(&prefix))
+                    {
+                        if entry.kind == EntryKind::File {
+                            fallback_linked_files += 1;
+                        }
+                        if let Err(e) = self.place_entry(
+                            entry,
+                            &tree_dir,
+                            paranoid,
+                            &mut verify_ms,
+                            &mut link_train_ms,
+                        ) {
+                            drop(tmp);
+                            return Ok(Err(e));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Everything outside unit interiors except directories
+        //    (those were created in step 1): added, modified, and
+        //    unchanged non-unit content alike — staging starts empty.
+        for entry in manifest
+            .entries
+            .iter()
+            .filter(|e| !covered(&e.rel) && e.kind != EntryKind::Dir)
+        {
+            if let Err(e) = self.place_entry(
+                entry,
+                &tree_dir,
+                paranoid,
+                &mut verify_ms,
+                &mut link_train_ms,
+            ) {
+                drop(tmp);
+                return Ok(Err(e));
+            }
+        }
+
+        // 4. Paranoid proof pass over cloned units. See the trust
+        //    model in the doc comment above.
+        if paranoid {
+            for entry in manifest.entries.iter().filter(|e| covered(&e.rel)) {
+                if entry.kind != EntryKind::File {
+                    continue;
+                }
+                let blob = entry.blob.expect("validated file entry");
+                let bytes = match fs::read(tree_dir.join(&entry.rel)) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        drop(tmp);
+                        return Ok(Err(BuildError::Fatal(format!(
+                            "paranoid check cannot read cloned {}: {e}",
+                            entry.rel
+                        ))));
+                    }
+                };
+                if ContentId(Sha256::digest(&bytes).into()) != blob {
+                    drop(tmp);
+                    return Ok(Err(BuildError::Fatal(format!(
+                        "paranoid check failed: cloned file {} does not hash to its blob {}",
+                        entry.rel, blob
+                    ))));
+                }
+            }
+        }
+
+        let stage = Instant::now();
+        fs::write(tmp_path.join("manifest.tsv"), manifest.serialize())?;
+        fs::write(
+            tmp_path.join(".complete"),
+            format!("v1\t{}\n", manifest.hash),
+        )?;
+
+        let final_path = self.snapshot_path(&manifest.hash);
+        let outcome = match fs::rename(&tmp_path, &final_path) {
+            Ok(()) => {
+                drop(tmp);
+                Ok(Ok(PublishOutcome::Published))
+            }
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EEXIST) | Some(libc::ENOTEMPTY)) => {
+                drop(tmp);
+                if read_published(self.root(), &manifest.hash).is_some() {
+                    Ok(Ok(PublishOutcome::WinnerValid))
+                } else {
+                    Ok(Ok(PublishOutcome::WinnerInvalid))
+                }
+            }
+            Err(e) => {
+                drop(tmp);
+                Err(Error::Io(e))
+            }
+        };
+        publish_ms += stage.elapsed().as_millis() as u64;
+
+        if let Some(t) = timing {
+            *t = SnapshotBuildTiming {
+                verify_ms,
+                link_train_ms,
+                publish_ms,
+                clone_units_ms,
+                clone_units,
+                fallback_linked_files,
             };
         }
         outcome
@@ -591,102 +881,118 @@ impl DiskStore {
         let mut verify_ms = 0u64;
         let mut link_train_ms = 0u64;
         for entry in &manifest.entries {
-            let dest = dir.join(&entry.rel);
-            match entry.kind {
-                EntryKind::Dir => {
-                    let stage = Instant::now();
-                    fs::create_dir_all(&dest)
-                        .and_then(|()| {
-                            fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode))
-                        })
-                        .map_err(|e| {
-                            BuildError::Fatal(format!("cannot create {}: {e}", dest.display()))
-                        })?;
-                    link_train_ms += stage.elapsed().as_millis() as u64;
-                }
-                EntryKind::Symlink => {
-                    let target = entry.target.as_deref().expect("validated symlink entry");
-                    let stage = Instant::now();
-                    if let Some(parent) = dest.parent() {
-                        if !parent.exists() {
-                            fs::create_dir_all(parent).map_err(|e| {
-                                BuildError::Fatal(format!(
-                                    "cannot create {}: {e}",
-                                    parent.display()
-                                ))
-                            })?;
-                        }
-                    }
-                    #[cfg(unix)]
-                    std::os::unix::fs::symlink(target, &dest).map_err(|e| {
-                        BuildError::Fatal(format!("cannot link {}: {e}", dest.display()))
+            self.place_entry(entry, dir, paranoid, &mut verify_ms, &mut link_train_ms)?;
+        }
+        Ok((verify_ms, link_train_ms))
+    }
+
+    /// Place ONE entry under `dir`. Shared by the full builder
+    /// ([`Self::build_tree`]) and the v2 incremental rebuild (which
+    /// calls it for non-unit content and for units whose clonefile
+    /// fell back to per-entry placement). Semantics are identical:
+    /// verify-first policy (`paranoid` = full read-and-hash via
+    /// [`Store::get`], otherwise verified-ledger trust), hardlink +
+    /// skip-no-op-chmod for files, symlink recreation, mkdir + chmod
+    /// for dirs. Missing blobs surface as [`BuildError::MissingBlob`]
+    /// so callers can heal and retry once.
+    fn place_entry(
+        &self,
+        entry: &SnapshotEntry,
+        dir: &Path,
+        paranoid: bool,
+        verify_ms: &mut u64,
+        link_train_ms: &mut u64,
+    ) -> Result<(), BuildError> {
+        let dest = dir.join(&entry.rel);
+        match entry.kind {
+            EntryKind::Dir => {
+                let stage = Instant::now();
+                fs::create_dir_all(&dest)
+                    .and_then(|()| {
+                        fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode))
+                    })
+                    .map_err(|e| {
+                        BuildError::Fatal(format!("cannot create {}: {e}", dest.display()))
                     })?;
-                    link_train_ms += stage.elapsed().as_millis() as u64;
-                }
-                EntryKind::File => {
-                    let blob = entry.blob.expect("validated file entry");
-                    // Sorted order puts explicit dir entries ahead of
-                    // their children, but a manifest is not obliged
-                    // to name every intermediate: recreate any gap.
-                    let stage = Instant::now();
-                    if let Some(parent) = dest.parent() {
-                        if !parent.exists() {
-                            fs::create_dir_all(parent).map_err(|e| {
-                                BuildError::Fatal(format!(
-                                    "cannot create {}: {e}",
-                                    parent.display()
-                                ))
-                            })?;
-                        }
+                *link_train_ms += stage.elapsed().as_millis() as u64;
+                Ok(())
+            }
+            EntryKind::Symlink => {
+                let target = entry.target.as_deref().expect("validated symlink entry");
+                let stage = Instant::now();
+                if let Some(parent) = dest.parent() {
+                    if !parent.exists() {
+                        fs::create_dir_all(parent).map_err(|e| {
+                            BuildError::Fatal(format!("cannot create {}: {e}", parent.display()))
+                        })?;
                     }
-                    link_train_ms += stage.elapsed().as_millis() as u64;
-                    // Verify first: a corrupt or missing blob never
-                    // reaches placement.
-                    let stage = Instant::now();
-                    if paranoid {
-                        if let Err(e) = Store::get(self, &blob) {
-                            return Err(match e {
-                                Error::UnknownContent(_) => BuildError::MissingBlob(blob),
-                                other => BuildError::Fatal(other.to_string()),
-                            });
-                        }
-                    } else if let Err(e) = self.ensure_verified(&blob) {
+                }
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(target, &dest).map_err(|e| {
+                    BuildError::Fatal(format!("cannot link {}: {e}", dest.display()))
+                })?;
+                *link_train_ms += stage.elapsed().as_millis() as u64;
+                Ok(())
+            }
+            EntryKind::File => {
+                let blob = entry.blob.expect("validated file entry");
+                // Sorted order puts explicit dir entries ahead of
+                // their children, but a manifest is not obliged
+                // to name every intermediate: recreate any gap.
+                let stage = Instant::now();
+                if let Some(parent) = dest.parent() {
+                    if !parent.exists() {
+                        fs::create_dir_all(parent).map_err(|e| {
+                            BuildError::Fatal(format!("cannot create {}: {e}", parent.display()))
+                        })?;
+                    }
+                }
+                *link_train_ms += stage.elapsed().as_millis() as u64;
+                // Verify first: a corrupt or missing blob never
+                // reaches placement.
+                let stage = Instant::now();
+                if paranoid {
+                    if let Err(e) = Store::get(self, &blob) {
                         return Err(match e {
                             Error::UnknownContent(_) => BuildError::MissingBlob(blob),
                             other => BuildError::Fatal(other.to_string()),
                         });
                     }
-                    verify_ms += stage.elapsed().as_millis() as u64;
-                    let stage = Instant::now();
-                    if let Err(e) = fs::hard_link(self.blob_path(&blob), &dest) {
-                        return Err(match e.kind() {
-                            io::ErrorKind::NotFound => BuildError::MissingBlob(blob),
-                            _ => BuildError::Fatal(format!(
-                                "cannot link blob {blob} to {}: {e}",
-                                dest.display()
-                            )),
-                        });
-                    }
-                    // Chmod on a hardlink retargets the SHARED inode, so
-                    // this may rewrite the object blob's mode — but only
-                    // when it actually differs. Most blobs are born 0644
-                    // and most entries want 0644; skipping the no-op
-                    // chmod saves a measurable slice of build time at
-                    // 40k-file scale without changing any outcome.
-                    let meta = dest.symlink_metadata().map_err(|e| {
-                        BuildError::Fatal(format!("cannot stat {}: {e}", dest.display()))
-                    })?;
-                    if meta.permissions().mode() & 0o7777 != entry.mode {
-                        fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode))
-                            .map_err(|e| {
-                                BuildError::Fatal(format!("cannot chmod {}: {e}", dest.display()))
-                            })?;
-                    }
-                    link_train_ms += stage.elapsed().as_millis() as u64;
+                } else if let Err(e) = self.ensure_verified(&blob) {
+                    return Err(match e {
+                        Error::UnknownContent(_) => BuildError::MissingBlob(blob),
+                        other => BuildError::Fatal(other.to_string()),
+                    });
                 }
+                *verify_ms += stage.elapsed().as_millis() as u64;
+                let stage = Instant::now();
+                if let Err(e) = fs::hard_link(self.blob_path(&blob), &dest) {
+                    return Err(match e.kind() {
+                        io::ErrorKind::NotFound => BuildError::MissingBlob(blob),
+                        _ => BuildError::Fatal(format!(
+                            "cannot link blob {blob} to {}: {e}",
+                            dest.display()
+                        )),
+                    });
+                }
+                // Chmod on a hardlink retargets the SHARED inode, so
+                // this may rewrite the object blob's mode — but only
+                // when it actually differs. Most blobs are born 0644
+                // and most entries want 0644; skipping the no-op
+                // chmod saves a measurable slice of build time at
+                // 40k-file scale without changing any outcome.
+                let meta = dest.symlink_metadata().map_err(|e| {
+                    BuildError::Fatal(format!("cannot stat {}: {e}", dest.display()))
+                })?;
+                if meta.permissions().mode() & 0o7777 != entry.mode {
+                    fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode)).map_err(
+                        |e| BuildError::Fatal(format!("cannot chmod {}: {e}", dest.display())),
+                    )?;
+                }
+                *link_train_ms += stage.elapsed().as_millis() as u64;
+                Ok(())
             }
         }
-        Ok((verify_ms, link_train_ms))
     }
 }
 

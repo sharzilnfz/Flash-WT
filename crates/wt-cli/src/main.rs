@@ -351,6 +351,11 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
     let mut build_link_train_ms = 0u64;
     let mut build_publish_ms = 0u64;
     let mut snapshot_built = false;
+    // v2 incremental reporting: the mode line shows the LAST heavy
+    // directory's serving mode (hit/build/v2); the counters sum.
+    let mut snapshot_mode = "build";
+    let mut snapshot_v2_cloned = 0usize;
+    let mut snapshot_v2_linked = 0usize;
     // One line per stage on stderr (`wt-stage <name>=<ms>`, integer
     // milliseconds). total covers git-worktree-add through the end.
     // The snapshot line appears only when the fast path did work, so
@@ -367,7 +372,10 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
                 engaged: bool,
                 lookup: u128,
                 clonefile: u128,
-                built: Option<(u64, u64, u64)>| {
+                built: Option<(u64, u64, u64)>,
+                mode: &str,
+                v2_cloned: usize,
+                v2_linked: usize| {
         if !timing {
             return;
         }
@@ -383,6 +391,9 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
             eprintln!("wt-stage snapshot={snapshot}");
             eprintln!("wt-stage snapshot-lookup={lookup}");
             eprintln!("wt-stage snapshot-clonefile={clonefile}");
+            eprintln!("wt-stage snapshot-mode={mode}");
+            eprintln!("wt-stage snapshot-v2-cloned={v2_cloned}");
+            eprintln!("wt-stage snapshot-v2-linked={v2_linked}");
             if let Some((bv, blt, bp)) = built {
                 eprintln!("wt-stage snapshot-build-verify={bv}");
                 eprintln!("wt-stage snapshot-build-link-train={blt}");
@@ -396,7 +407,22 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
     let dirs = collect_matches(&root, &patterns);
     if dirs.is_empty() {
         println!("nothing to hydrate");
-        emit(git_worktree_ms, 0, 0, 0, 0, 0, 0, false, 0, 0, None);
+        emit(
+            git_worktree_ms,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            false,
+            0,
+            0,
+            None,
+            "build",
+            0,
+            0,
+        );
         return Ok(());
     }
 
@@ -426,12 +452,25 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
 
         if snapshot_gate {
             let stage = Instant::now();
-            match snapshots::hydrate(&mut store, &ingested, &root, &heavy, &dest, paranoid) {
+            // v2 selection-index key: the first manifest pattern that
+            // matched this heavy directory. Only stability across
+            // runs matters, not uniqueness.
+            let pattern = patterns
+                .iter()
+                .find(|p| pattern_matches(p, rel))
+                .map(String::as_str)
+                .unwrap_or("");
+            match snapshots::hydrate(
+                &mut store, &ingested, &root, pattern, &src, &heavy, &dest, paranoid,
+            ) {
                 SnapshotOutcome::Hydrated(h) => {
                     snapshot_ms += stage.elapsed().as_millis();
                     snapshot_engaged = true;
                     snapshot_lookup_ms += h.lookup_ms;
                     snapshot_clonefile_ms += h.clonefile_ms;
+                    snapshot_mode = h.mode;
+                    snapshot_v2_cloned += h.cloned_units;
+                    snapshot_v2_linked += h.linked_files;
                     if let Some(b) = h.build {
                         snapshot_built = true;
                         build_verify_ms += b.verify_ms;
@@ -545,6 +584,9 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
         snapshot_lookup_ms,
         snapshot_clonefile_ms,
         snapshot_built.then_some((build_verify_ms, build_link_train_ms, build_publish_ms)),
+        snapshot_mode,
+        snapshot_v2_cloned,
+        snapshot_v2_linked,
     );
     Ok(())
 }

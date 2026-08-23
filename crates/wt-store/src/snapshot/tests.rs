@@ -446,3 +446,261 @@ fn failed_publish_leaves_only_temp_debris_behind() {
     let _ = Duration::from_secs(0); // keep imports honest if cfgs shift
     store.flush().unwrap();
 }
+
+// ---- v2 incremental rebuilds ------------------------------------------
+
+fn incremental_fixture() -> (tempfile::TempDir, DiskStore) {
+    let base = tempfile::tempdir().unwrap();
+    let store = DiskStore::open(base.path().join("store")).unwrap();
+    (base, store)
+}
+
+/// A small tree with everything the unit rule can bite on: one
+/// package dir with a nested subdir, an empty dir, an exec file, a
+/// symlink, and a root-level plain file. Blobs are REALLY stored so
+/// placement can verify them.
+fn v2_entries(store: &mut DiskStore) -> Vec<SnapshotEntry> {
+    use crate::Store as _;
+    let a = store.put(b"nested a\n").unwrap();
+    let run = store.put(b"#!/bin/sh\necho hi\n").unwrap();
+    let root = store.put(b"root.txt v1\n").unwrap();
+    vec![
+        SnapshotEntry::dir("pkg00"),
+        SnapshotEntry::dir("pkg00/nested"),
+        SnapshotEntry::dir("empty-dir"),
+        SnapshotEntry::symlink("pkg00/bin-link", "../run.sh"),
+        SnapshotEntry::file("pkg00/nested/a", a, 0o644),
+        SnapshotEntry::file("pkg00/run.sh", run, 0o755),
+        SnapshotEntry::file("root.txt", root, 0o644),
+    ]
+}
+
+#[test]
+fn incremental_publish_matches_full_build_semantics() {
+    let (_base, mut store) = incremental_fixture();
+    use crate::Store as _;
+
+    let old_entries = v2_entries(&mut store);
+    let old_manifest = Manifest::new(old_entries.clone()).unwrap();
+    assert_eq!(
+        store.publish_snapshot(old_entries.clone(), false).unwrap(),
+        Ok(PublishOutcome::Published)
+    );
+
+    // Bump ONE root-level file; pkg00 stays fully unchanged -> the
+    // single maximal unit.
+    let extra = store.put(b"root.txt v2\n").unwrap();
+    let mut new_entries = old_entries.clone();
+    new_entries.retain(|e| e.rel != "root.txt");
+    new_entries.push(SnapshotEntry::file("root.txt", extra, 0o644));
+    let new_manifest = Manifest::new(new_entries.clone()).unwrap();
+    assert_ne!(new_manifest.hash, old_manifest.hash);
+    let units = crate::snapdiff::SnapshotDiff::unchanged_units(
+        &old_manifest.entries,
+        &new_manifest.entries,
+    );
+    // Both top-level dirs survive untouched; each is a unit.
+    assert_eq!(units, vec!["empty-dir".to_string(), "pkg00".to_string()]);
+
+    let mut timing = SnapshotBuildTiming::default();
+    let outcome = store
+        .publish_snapshot_incremental(
+            new_entries,
+            &old_manifest.hash,
+            &units,
+            false,
+            Some(&mut timing),
+        )
+        .unwrap();
+    assert_eq!(outcome, Ok(PublishOutcome::Published));
+    // The whole point: the package unit cloned on APFS; elsewhere
+    // every clone refuses and falls back to per-entry links.
+    if cfg!(target_os = "macos") {
+        // Sub-millisecond clones truncate to 0 ms; only counts lie.
+        assert_eq!(timing.clone_units, 2);
+    } else {
+        assert_eq!(timing.clone_units, 0);
+    }
+
+    // The published result validates and its tree carries EXACTLY the
+    // new content: bumped file, untouched package, symlink, empty dir.
+    assert_eq!(
+        store.find_snapshot(&new_manifest.hash).unwrap(),
+        new_manifest
+    );
+    let tree = snapshot_tree_path(store.root(), &new_manifest.hash);
+    assert_eq!(
+        fs::read_to_string(tree.join("root.txt")).unwrap(),
+        "root.txt v2\n"
+    );
+    assert_eq!(
+        fs::read_to_string(tree.join("pkg00/nested/a")).unwrap(),
+        "nested a\n"
+    );
+    assert!(tree.join("empty-dir").is_dir());
+    let md = fs::symlink_metadata(tree.join("pkg00/bin-link")).unwrap();
+    assert!(md.file_type().is_symlink());
+    assert_eq!(
+        fs::read_link(tree.join("pkg00/bin-link")).unwrap(),
+        Path::new("../run.sh")
+    );
+    let run_mode = fs::metadata(tree.join("pkg00/run.sh"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(run_mode & 0o777, EXEC_FILE_MODE);
+    store.flush().unwrap();
+}
+
+#[test]
+fn deleted_subtree_and_unitless_rebuild_still_land_exactly() {
+    let (_base, mut store) = incremental_fixture();
+
+    let old_entries = v2_entries(&mut store);
+    let old_manifest = Manifest::new(old_entries.clone()).unwrap();
+    assert_eq!(
+        store.publish_snapshot(old_entries.clone(), false).unwrap(),
+        Ok(PublishOutcome::Published)
+    );
+
+    // New manifest drops pkg00 entirely and keeps only the empty dir
+    // plus bumped root file. No units at all; deletions need nothing.
+    use crate::Store as _;
+    let extra = store.put(b"root.txt v2\n").unwrap();
+    let gone_entries = vec![
+        SnapshotEntry::dir("empty-dir"),
+        SnapshotEntry::file("root.txt", extra, 0o644),
+    ];
+    let gone_manifest = Manifest::new(gone_entries.clone()).unwrap();
+    assert_eq!(
+        store
+            .publish_snapshot_incremental(gone_entries, &old_manifest.hash, &[], false, None)
+            .unwrap(),
+        Ok(PublishOutcome::Published)
+    );
+    let tree = snapshot_tree_path(store.root(), &gone_manifest.hash);
+    assert!(!tree.join("pkg00").exists(), "deleted subtree must vanish");
+    assert!(tree.join("empty-dir").is_dir());
+    store.flush().unwrap();
+}
+
+#[test]
+fn failed_unit_clone_falls_back_to_per_entry_placement() {
+    let (_base, mut store) = incremental_fixture();
+
+    let entries = v2_entries(&mut store);
+    let manifest_hash = Manifest::new(entries.clone()).unwrap().hash;
+
+    // A ghost old hash: no snapshot carries these units, so EVERY
+    // clone attempt fails and every unit falls back to hardlinks —
+    // yet the rebuild must still land exactly right.
+    let ghost = ContentId([0xAA; 32]);
+    let mut timing = SnapshotBuildTiming::default();
+    assert_eq!(
+        store
+            .publish_snapshot_incremental(
+                entries,
+                &ghost,
+                &["pkg00".to_string()],
+                false,
+                Some(&mut timing)
+            )
+            .unwrap(),
+        Ok(PublishOutcome::Published)
+    );
+    assert_eq!(timing.clone_units, 0, "nothing could have cloned");
+
+    let tree = snapshot_tree_path(store.root(), &manifest_hash);
+    assert!(tree.join("empty-dir").is_dir());
+    let md = fs::symlink_metadata(tree.join("pkg00/bin-link")).unwrap();
+    assert!(md.file_type().is_symlink());
+    assert_eq!(
+        fs::read_link(tree.join("pkg00/bin-link")).unwrap(),
+        Path::new("../run.sh")
+    );
+    store.flush().unwrap();
+}
+
+#[test]
+fn paranoid_incremental_rejects_rotted_blob_inside_a_cloned_unit() {
+    let (_base, mut store) = incremental_fixture();
+    use crate::Store as _;
+
+    let old_entries = v2_entries(&mut store);
+    let old_manifest = Manifest::new(old_entries.clone()).unwrap();
+    let inner_blob = {
+        let entry = old_entries
+            .iter()
+            .find(|e| e.rel == "pkg00/nested/a")
+            .unwrap()
+            .clone();
+        entry.blob.unwrap()
+    };
+    assert_eq!(
+        store.publish_snapshot(old_entries.clone(), false).unwrap(),
+        Ok(PublishOutcome::Published)
+    );
+
+    // Tamper with a blob INSIDE the unit, preserving size AND mtime so
+    // ledger trust cannot see it. The paranoid pass over cloned files
+    // must catch it before the rename.
+    let target = store.blob_path(&inner_blob);
+    let mtime = fs::metadata(&target).unwrap().modified().unwrap();
+    let original = fs::read(&target).unwrap();
+    let mut rotted = original.clone();
+    rotted[0] = rotted[0].wrapping_add(1);
+    fs::write(&target, &rotted).unwrap();
+    let f = fs::OpenOptions::new().write(true).open(&target).unwrap();
+    f.set_times(std::fs::FileTimes::new().set_modified(mtime))
+        .unwrap();
+
+    // Bump the root file too, so the rebuild targets a NEW address:
+    // proving failure leaves that address empty is meaningful (the
+    // old snapshot still exists at its own).
+    let extra = store.put(b"root.txt v2\n").unwrap();
+    let mut new_entries = old_entries.clone();
+    new_entries.retain(|e| e.rel != "root.txt");
+    new_entries.push(SnapshotEntry::file("root.txt", extra, 0o644));
+    let new_hash = Manifest::new(new_entries.clone()).unwrap().hash;
+
+    let err = store
+        .publish_snapshot_incremental(
+            new_entries,
+            &old_manifest.hash,
+            &["pkg00".to_string(), "empty-dir".to_string()],
+            true,
+            None,
+        )
+        .unwrap();
+    match err {
+        Err(BuildError::Fatal(msg)) => {
+            assert!(msg.contains("paranoid check"), "{msg}");
+        }
+        other => panic!("paranoid incremental must fail loudly, got {other:?}"),
+    }
+    // Nothing was published from rotted content.
+    assert!(store.find_snapshot(&new_hash).is_none());
+
+    // Restore the bytes: the same call now succeeds and publishes.
+    fs::write(&target, &original).unwrap();
+    let f = fs::OpenOptions::new().write(true).open(&target).unwrap();
+    f.set_times(std::fs::FileTimes::new().set_modified(mtime))
+        .unwrap();
+    let restored = v2_entries(&mut store);
+    let mut restored = restored;
+    restored.retain(|e| e.rel != "root.txt");
+    restored.push(SnapshotEntry::file("root.txt", extra, 0o644));
+    assert_eq!(
+        store
+            .publish_snapshot_incremental(
+                restored,
+                &old_manifest.hash,
+                &["pkg00".to_string(), "empty-dir".to_string()],
+                true,
+                None
+            )
+            .unwrap(),
+        Ok(PublishOutcome::Published)
+    );
+    store.flush().unwrap();
+}

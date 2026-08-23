@@ -9,6 +9,8 @@
 mod disk;
 mod gc;
 mod mirror;
+mod snapdiff;
+mod snapindex;
 mod snapshot;
 mod validation;
 mod verified;
@@ -21,6 +23,11 @@ pub use gc::{GcMode, MarkReport, MarkSwept};
 pub use mirror::{
     escape, mirror_path, publish as publish_mirror, read_all as read_mirrors, unescape,
     worktree_key, ReadMirror, StoreMirror,
+};
+pub use snapdiff::SnapshotDiff;
+pub use snapindex::{
+    record_hit as record_snapshot_hit, record_publish as record_snapshot_publish,
+    select_old_snapshot, SelectionIndex, SelectionRecord, MAX_RING,
 };
 pub use snapshot::{
     read_published as read_published_snapshot, snapshot_path, snapshot_tree_path, BuildError,
