@@ -57,11 +57,7 @@ fn clone_out_makes_a_private_writable_clone() {
     assert_eq!(fs::read(&dest).unwrap(), b"cloned bytes\n");
 
     let meta = fs::metadata(&dest).unwrap();
-    assert_eq!(
-        meta.nlink(),
-        1,
-        "the clone owns a fresh inode, not a link"
-    );
+    assert_eq!(meta.nlink(), 1, "the clone owns a fresh inode, not a link");
     assert!(
         !meta.permissions().readonly(),
         "hydrated files must be writable"

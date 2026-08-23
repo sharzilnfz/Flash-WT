@@ -290,14 +290,15 @@ fn write_source(root: &TempDir, text: &str) -> std::path::PathBuf {
     path
 }
 
-fn record_for(cache: &mut ValidationCache, store: &mut DiskStore, path: &std::path::Path) -> ContentId {
+fn record_for(
+    cache: &mut ValidationCache,
+    store: &mut DiskStore,
+    path: &std::path::Path,
+) -> ContentId {
     let bytes = fs::read(path).expect("read source");
     let id = store.put(&bytes).expect("put");
     let (size, mtime) = entry_for(path);
-    cache.record(
-        "heavy/file.txt".to_string(),
-        CacheEntry { size, mtime, id },
-    );
+    cache.record("heavy/file.txt".to_string(), CacheEntry { size, mtime, id });
     id
 }
 
@@ -421,7 +422,10 @@ fn deleted_cache_degrades_to_empty_not_error() {
 
     let reopened = ValidationCache::open(dir.path());
     assert!(reopened.is_empty(), "deleted cache must fall back to cold");
-    assert_eq!(reopened.lookup("heavy/file.txt", 0, SystemTime::UNIX_EPOCH), None);
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", 0, SystemTime::UNIX_EPOCH),
+        None
+    );
 }
 
 #[test]

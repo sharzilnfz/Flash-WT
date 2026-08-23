@@ -21,10 +21,11 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 
 #[cfg(target_os = "macos")]
 use wt_copy::{ClonefileBackend, CopyBackend};
-use wt_store::{BuildError, ContentId, DiskStore};
+use wt_store::{BuildError, ContentId, DiskStore, SnapshotBuildTiming};
 
 #[cfg(target_os = "macos")]
 use wt_store::{Manifest, PublishOutcome, SnapshotEntry};
@@ -37,6 +38,15 @@ pub struct SnapshotHydration {
     pub hash: ContentId,
     /// Regular files the snapshot carried (for run reporting).
     pub files: usize,
+    /// Step 0 instrumentation: milliseconds spent looking up a
+    /// published snapshot (all attempts, hit or miss).
+    pub lookup_ms: u128,
+    /// Step 0 instrumentation: milliseconds spent clonefile-ing the
+    /// tree out (hit clone and/or post-build clone).
+    pub clonefile_ms: u128,
+    /// Step 0 instrumentation: internal build-phase timings, present
+    /// only when this run built and published the snapshot.
+    pub build: Option<SnapshotBuildTiming>,
 }
 
 /// Result of attempting the snapshot path for one heavy directory.
@@ -104,29 +114,44 @@ fn hydrate_impl(
 
     let dest_heavy = dest_root.join(heavy_rel);
 
+    let mut lookup_ms = 0u128;
+    let mut clonefile_ms = 0u128;
+    let mut build: Option<SnapshotBuildTiming> = None;
+
     // Two attempts total: a sweep may evict the published snapshot
     // between lookup and clone (ENOENT); the retry rebuilds it.
     for attempt in 0..2u8 {
-        if !paranoid && attempt == 0 && store.find_snapshot(&manifest.hash).is_some() {
-            // HIT: trust verified-at-publish, zero blob reads.
-            let tree = wt_store::snapshot_tree_path(store.root(), &manifest.hash);
-            match finish_clone(&backend, &tree, &dest_heavy) {
-                Ok(()) => {
-                    return Outcome::Hydrated(SnapshotHydration {
-                        hash: manifest.hash,
-                        files: ingested.files.len(),
-                    })
+        if !paranoid && attempt == 0 {
+            let stage = Instant::now();
+            let published = store.find_snapshot(&manifest.hash);
+            lookup_ms += stage.elapsed().as_millis();
+            if published.is_some() {
+                // HIT: trust verified-at-publish, zero blob reads.
+                let tree = wt_store::snapshot_tree_path(store.root(), &manifest.hash);
+                let stage = Instant::now();
+                let cloned = finish_clone(&backend, &tree, &dest_heavy);
+                clonefile_ms += stage.elapsed().as_millis();
+                match cloned {
+                    Ok(()) => {
+                        return Outcome::Hydrated(SnapshotHydration {
+                            hash: manifest.hash,
+                            files: ingested.files.len(),
+                            lookup_ms,
+                            clonefile_ms,
+                            build,
+                        })
+                    }
+                    // Snapshot evicted mid-flight: rebuild and try again.
+                    Err(CloneFailure::SnapshotVanished) => continue,
+                    Err(CloneFailure::Refused(diag)) => return Outcome::FellBack(diag),
+                    Err(CloneFailure::Fatal(msg)) => return Outcome::Failed(msg),
                 }
-                // Snapshot evicted mid-flight: rebuild and try again.
-                Err(CloneFailure::SnapshotVanished) => continue,
-                Err(CloneFailure::Refused(diag)) => return Outcome::FellBack(diag),
-                Err(CloneFailure::Fatal(msg)) => return Outcome::Failed(msg),
             }
         }
 
         // MISS (or paranoid rebuild): build + publish, healing at most
         // one swept-away blob per plan's link(2)-ENOENT backstop.
-        match ensure_published(store, ingested, src_root, &manifest, paranoid) {
+        match ensure_published(store, ingested, src_root, &manifest, paranoid, &mut build) {
             Ok(PublishOutcome::Published | PublishOutcome::WinnerValid) => {}
             Ok(PublishOutcome::WinnerInvalid) => {
                 // Debris sits on our final name; never overwrite what
@@ -139,15 +164,21 @@ fn hydrate_impl(
             Err(msg) => return Outcome::Failed(msg),
         }
 
-        match finish_clone(
+        let stage = Instant::now();
+        let cloned = finish_clone(
             &backend,
             &wt_store::snapshot_tree_path(store.root(), &manifest.hash),
             &dest_heavy,
-        ) {
+        );
+        clonefile_ms += stage.elapsed().as_millis();
+        match cloned {
             Ok(()) => {
                 return Outcome::Hydrated(SnapshotHydration {
                     hash: manifest.hash,
                     files: ingested.files.len(),
+                    lookup_ms,
+                    clonefile_ms,
+                    build,
                 })
             }
             // Snapshot evicted mid-flight: rebuild and try again.
@@ -188,11 +219,9 @@ fn finish_clone(
     let mut restore_empty_dir = false;
     match fs::symlink_metadata(dest_heavy) {
         Ok(md) if md.is_dir() => {
-            let mut contents = fs::read_dir(dest_heavy)
-                .map_err(|e| CloneFailure::Fatal(format!(
-                    "cannot inspect {}: {e}",
-                    dest_heavy.display()
-                )))?;
+            let mut contents = fs::read_dir(dest_heavy).map_err(|e| {
+                CloneFailure::Fatal(format!("cannot inspect {}: {e}", dest_heavy.display()))
+            })?;
             if contents.next().is_some() {
                 // Non-empty: existing per-file merge behavior owns this
                 // case; the snapshot path never merges.
@@ -201,10 +230,9 @@ fn finish_clone(
             // Empty directory created before hydration (git checkout
             // of tracked paths): remove so clonefile can land, then
             // recreate if anything below refuses.
-            fs::remove_dir(dest_heavy).map_err(|e| CloneFailure::Fatal(format!(
-                "cannot clear empty {}: {e}",
-                dest_heavy.display()
-            )))?;
+            fs::remove_dir(dest_heavy).map_err(|e| {
+                CloneFailure::Fatal(format!("cannot clear empty {}: {e}", dest_heavy.display()))
+            })?;
             restore_empty_dir = true;
         }
         Ok(_) => {
@@ -224,9 +252,7 @@ fn finish_clone(
 
     match backend.copy_dir(tree, dest_heavy) {
         Ok(()) => Ok(()),
-        Err(wt_copy::Error::Io(e))
-            if e.raw_os_error() == Some(libc::ENOENT) =>
-        {
+        Err(wt_copy::Error::Io(e)) if e.raw_os_error() == Some(libc::ENOENT) => {
             // Source snapshot vanished mid-flight (eviction race).
             cleanup_partial(dest_heavy, restore_empty_dir)?;
             Err(CloneFailure::SnapshotVanished)
@@ -289,10 +315,7 @@ fn cleanup_partial(dest_heavy: &Path, restore_empty_dir: bool) -> Result<(), Clo
 /// heavy directory itself (the snapshot tree REPLACES that directory,
 /// so its root carries no name).
 #[cfg(target_os = "macos")]
-fn manifest_entries(
-    ingested: &Ingested,
-    heavy_rel: &str,
-) -> Result<Vec<SnapshotEntry>, String> {
+fn manifest_entries(ingested: &Ingested, heavy_rel: &str) -> Result<Vec<SnapshotEntry>, String> {
     let prefix = format!("{heavy_rel}/");
     let strip = |path: &str| -> Result<String, String> {
         path.strip_prefix(&prefix)
@@ -324,17 +347,24 @@ fn manifest_entries(
 /// building and publishing it when missing. Verifies every file blob
 /// per policy inside [`DiskStore::publish_snapshot`]; heals one
 /// sweep-race ENOENT by re-running put() from the source file.
+/// On success, fills `build` with the winning attempt's internal
+/// phase timings (Step 0 instrumentation).
 fn ensure_published(
     store: &mut DiskStore,
     ingested: &Ingested,
     src_root: &Path,
     manifest: &Manifest,
     paranoid: bool,
+    build: &mut Option<SnapshotBuildTiming>,
 ) -> Result<PublishOutcome, String> {
     let mut healed = false;
     loop {
-        match store.publish_snapshot(manifest.entries.clone(), paranoid) {
-            Ok(Ok(outcome)) => return Ok(outcome),
+        let mut phase = SnapshotBuildTiming::default();
+        match store.publish_snapshot_timed(manifest.entries.clone(), paranoid, Some(&mut phase)) {
+            Ok(Ok(outcome)) => {
+                *build = Some(phase);
+                return Ok(outcome);
+            }
             Ok(Err(BuildError::MissingBlob(blob))) if !healed => {
                 // Sweep raced us: re-run put() for the source content,
                 // then retry ONCE. put re-records the fingerprint, so
@@ -343,9 +373,7 @@ fn ensure_published(
                 heal_blob(store, ingested, src_root, blob)?;
             }
             Ok(Err(BuildError::MissingBlob(blob))) => {
-                return Err(format!(
-                    "blob {blob} vanished twice during snapshot build"
-                ));
+                return Err(format!("blob {blob} vanished twice during snapshot build"));
             }
             Ok(Err(BuildError::Fatal(msg))) => return Err(msg),
             Err(e) => return Err(e.to_string()),

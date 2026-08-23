@@ -226,8 +226,7 @@ pub fn publish(root: &Path, mirror: &StoreMirror) -> io::Result<PathBuf> {
     let mut tmp = tempfile::NamedTempFile::new_in(dir.join("tmp"))?;
     tmp.write_all(mirror.serialize().as_bytes())?;
     let final_path = mirror_path(root, &mirror.worktree, &mirror.gitdir);
-    tmp.persist(&final_path)
-        .map_err(|e| e.error)?;
+    tmp.persist(&final_path).map_err(|e| e.error)?;
     Ok(final_path)
 }
 
@@ -266,10 +265,7 @@ pub fn read_all(root: &Path) -> Vec<ReadMirror> {
             continue;
         }
         let (modified, text) = match (fs::metadata(&path), fs::read_to_string(&path)) {
-            (Ok(meta), Ok(text)) => (
-                meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                text,
-            ),
+            (Ok(meta), Ok(text)) => (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), text),
             _ => continue,
         };
         let mirror = StoreMirror::parse(&text);
@@ -385,11 +381,7 @@ mod tests {
         let path = publish(&root, &m).expect("publish");
         assert_eq!(
             path,
-            mirror_path(
-                &root,
-                &m.worktree,
-                &m.gitdir
-            ),
+            mirror_path(&root, &m.worktree, &m.gitdir),
             "published at the derived key"
         );
         let text = fs::read_to_string(&path).expect("read mirror");

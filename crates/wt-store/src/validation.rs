@@ -114,14 +114,21 @@ fn parse(text: &str) -> BTreeMap<String, Entry> {
     let mut out = BTreeMap::new();
     for line in text.lines() {
         let mut parts = line.splitn(6, '\t');
-        let (Some(rel), Some(size), Some(secs), Some(nanos), Some(hex), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next(), parts.next(), parts.next())
-        else {
+        let (Some(rel), Some(size), Some(secs), Some(nanos), Some(hex), None) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
             continue;
         };
-        let (Ok(size), Ok(secs), Ok(nanos)) =
-            (size.parse::<u64>(), secs.parse::<u64>(), nanos.parse::<u32>())
-        else {
+        let (Ok(size), Ok(secs), Ok(nanos)) = (
+            size.parse::<u64>(),
+            secs.parse::<u64>(),
+            nanos.parse::<u32>(),
+        ) else {
             continue;
         };
         let Some(id) = ContentId::from_hex(hex) else {

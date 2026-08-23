@@ -36,8 +36,9 @@ use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
-use wt_copy::{CloneOut, FileMaterialize, HardlinkOut, placement_refused};
+use wt_copy::{placement_refused, CloneOut, FileMaterialize, HardlinkOut};
 use wt_store::{ContentId, DiskStore, Entry as CacheEntry, GcMode, Store, ValidationCache};
 
 /// Where the per-machine store lives. `$WT_STORE` wins (tests use it
@@ -130,9 +131,10 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
                 if snapshots {
                     let target = fs::read_link(&path)
                         .map_err(|e| format!("cannot read symlink {}: {e}", path.display()))?;
-                    ingested
-                        .symlinks
-                        .insert(rel_text(src_root, &path), target.to_string_lossy().into_owned());
+                    ingested.symlinks.insert(
+                        rel_text(src_root, &path),
+                        target.to_string_lossy().into_owned(),
+                    );
                 }
                 continue;
             }
@@ -156,12 +158,12 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
             let meta =
                 fs::metadata(&path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
             if snapshots {
-                ingested
-                    .modes
-                    .insert(rel.clone(), meta.mode() & 0o7777);
+                ingested.modes.insert(rel.clone(), meta.mode() & 0o7777);
             }
             let size = meta.len();
-            let mtime = meta.modified().map_err(|e| format!("cannot stat {}: {e}", rel))?;
+            let mtime = meta
+                .modified()
+                .map_err(|e| format!("cannot stat {}: {e}", rel))?;
             let id = match cache.lookup(&rel, size, mtime) {
                 // Cache hit: same size and same mtime as last time.
                 // Trust it only while the blob is actually still here.
@@ -211,6 +213,14 @@ pub struct MaterializeReport {
     /// no clone support yet). Check `copied` to see how much of it
     /// actually happened.
     pub strategy: &'static str,
+    /// Step 0 instrumentation: milliseconds spent proving blobs
+    /// before placement (`Store::get` under `WT_VERIFY`, else
+    /// `DiskStore::ensure_verified`).
+    pub verify_ms: u128,
+    /// Step 0 instrumentation: milliseconds spent placing files —
+    /// the selected strategy, byte-copy fallbacks, and the ENOENT
+    /// parent-repair retry included.
+    pub place_ms: u128,
 }
 
 /// Which placement strategy this run uses, from the environment:
@@ -265,6 +275,8 @@ pub fn materialize(
     let backend = select_strategy();
     let paranoid = std::env::var_os("WT_VERIFY").is_some();
     let mut copied = 0usize;
+    let mut verify_ms = 0u128;
+    let mut place_ms = 0u128;
     for rel in &ingested.dirs {
         fs::create_dir_all(dest_root.join(rel))
             .map_err(|e| format!("cannot prepare {}: {e}", dest_root.join(rel).display()))?;
@@ -277,17 +289,23 @@ pub fn materialize(
         // and the kernel's read is the one the previous design had in
         // reverse; nothing else guards it today either.
         if paranoid {
+            let stage = Instant::now();
             store
                 .get(id)
                 .map_err(|e| format!("materialize {rel}: {e}"))?;
+            verify_ms += stage.elapsed().as_millis();
         } else {
+            let stage = Instant::now();
             store
                 .ensure_verified(id)
                 .map_err(|e| format!("materialize {rel}: {e}"))?;
+            verify_ms += stage.elapsed().as_millis();
         }
         let src = store.blob_path(id);
         let dest = dest_root.join(rel);
 
+        // The ENOENT parent-repair retry is part of placement cost.
+        let stage = Instant::now();
         match place(backend.as_deref(), &src, &dest) {
             Ok(true) => {}
             Ok(false) => copied += 1,
@@ -308,11 +326,14 @@ pub fn materialize(
             }
             Err(e) => return Err(format!("materialize {rel}: {e}")),
         }
+        place_ms += stage.elapsed().as_millis();
     }
     Ok(MaterializeReport {
         files: ingested.files.len(),
         copied,
         strategy: backend.as_ref().map(|b| b.name()).unwrap_or("byte-copy"),
+        verify_ms,
+        place_ms,
     })
 }
 
@@ -349,7 +370,9 @@ fn worktree_git_dir(worktree: &Path) -> Result<PathBuf, String> {
     if !git_dir.status.success() {
         return Err("newly created worktree is not a git worktree".into());
     }
-    Ok(PathBuf::from(String::from_utf8_lossy(&git_dir.stdout).trim()))
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&git_dir.stdout).trim(),
+    ))
 }
 
 /// Give this worktree one reference on every distinct blob it uses,

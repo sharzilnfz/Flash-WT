@@ -62,10 +62,7 @@ impl RichFixture {
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "--quiet", "-m", "init"]);
 
-        RichFixture {
-            repo,
-            _base: base,
-        }
+        RichFixture { repo, _base: base }
     }
 
     /// Run `wt` with full environment control.
@@ -78,7 +75,10 @@ impl RichFixture {
             .env_remove("WT_GC_GRACE")
             .envs(env.iter().copied())
             .current_dir(&self.repo)
-            .args(["--dir", &self.worktree_path(worktree_name).to_string_lossy()])
+            .args([
+                "--dir",
+                &self.worktree_path(worktree_name).to_string_lossy(),
+            ])
             .output()
             .expect("run wt binary")
     }
@@ -93,7 +93,11 @@ impl RichFixture {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git").args(args).current_dir(dir).status().expect("run git");
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .expect("run git");
     assert!(status.success(), "git {args:?} failed");
 }
 
@@ -134,7 +138,11 @@ fn assert_tree_matches_source(source: &Path, hydrated_heavy: &Path) {
         let src_meta = src_path.symlink_metadata().unwrap();
         if src_meta.file_type().is_symlink() {
             let md = dest_path.symlink_metadata().expect("symlink survived");
-            assert!(md.file_type().is_symlink(), "{} must stay a symlink", rel.display());
+            assert!(
+                md.file_type().is_symlink(),
+                "{} must stay a symlink",
+                rel.display()
+            );
             assert_eq!(
                 fs::read_link(&dest_path).unwrap(),
                 fs::read_link(src_path).unwrap(),
@@ -156,6 +164,49 @@ fn assert_tree_matches_source(source: &Path, hydrated_heavy: &Path) {
 }
 
 const SNAPSHOTS_ON: &[(&str, &str)] = &[("WT_SNAPSHOTS", "1")];
+
+#[test]
+fn timing_lines_attribute_snapshot_lookup_build_and_clone() {
+    let fx = RichFixture::new();
+    let env: &[(&str, &str)] = &[("WT_SNAPSHOTS", "1"), ("WT_TIMING", "1")];
+
+    // COLD: miss -> build + publish. The three snapshot-build-*
+    // lines must appear alongside the coarse snapshot stage and the
+    // lookup/clonefile sub-stages.
+    let out = fx.wt(&["create", "one"], env, "origin-one");
+    assert_created(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for line in [
+        "wt-stage snapshot=",
+        "wt-stage snapshot-lookup=",
+        "wt-stage snapshot-clonefile=",
+        "wt-stage snapshot-build-verify=",
+        "wt-stage snapshot-build-link-train=",
+        "wt-stage snapshot-build-publish=",
+    ] {
+        assert!(
+            stderr.contains(line),
+            "cold run missing `{line}`:\n{stderr}"
+        );
+    }
+
+    // WARM: hit -> lookup + clonefile only; no build phases ran.
+    let out = fx.wt(&["create", "two"], env, "origin-two");
+    assert_created(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("wt-stage snapshot-lookup="),
+        "warm run must report snapshot-lookup:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("wt-stage snapshot-clonefile="),
+        "warm run must report snapshot-clonefile:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("snapshot-build"),
+        "a warm hit builds nothing, so no build phases may be reported:\n{stderr}"
+    );
+}
 
 #[test]
 fn miss_builds_publishes_and_second_create_hits_with_private_files() {
@@ -227,7 +278,11 @@ fn miss_builds_publishes_and_second_create_hits_with_private_files() {
         let meta = fs::metadata(&plain).unwrap();
         assert_eq!(meta.nlink(), 1, "{} must own a private inode", name);
         assert_ne!(meta.mode() & 0o777, 0o444);
-        assert_eq!(meta.mode() & 0o200, 0o200, "{name} file must be owner-writable");
+        assert_eq!(
+            meta.mode() & 0o200,
+            0o200,
+            "{name} file must be owner-writable"
+        );
 
         let exec = heavy_root.join("exec.sh");
         let meta = fs::metadata(&exec).unwrap();
@@ -284,7 +339,8 @@ fn wt_verify_bypasses_hits_and_hashes_every_blob() {
                 let mtime = meta.modified().unwrap();
                 fs::write(&path, b"FILE ZERO").unwrap(); // same length
                 let f = fs::OpenOptions::new().write(true).open(&path).unwrap();
-                f.set_times(std::fs::FileTimes::new().set_modified(mtime)).unwrap();
+                f.set_times(std::fs::FileTimes::new().set_modified(mtime))
+                    .unwrap();
                 tampered = Some(path);
             }
         }
@@ -362,7 +418,11 @@ fn concurrent_identical_creates_one_publish_wins_loser_consumes_winner() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|n| n != "tmp")
         .collect();
-    assert_eq!(published.len(), 1, "identical content must converge on one snapshot");
+    assert_eq!(
+        published.len(),
+        1,
+        "identical content must converge on one snapshot"
+    );
 
     assert_tree_matches_source(
         &fx.repo.join("heavy"),
@@ -400,7 +460,10 @@ fn evicted_snapshot_referenced_by_mirror_rebuilds_on_next_create() {
         .compute_marks(std::time::SystemTime::now(), Duration::from_secs(900))
         .unwrap();
     assert_eq!(report.unresolved_snapshots, 1);
-    assert!(report.marked.is_empty(), "no blobs may be marked through a missing snapshot");
+    assert!(
+        report.marked.is_empty(),
+        "no blobs may be marked through a missing snapshot"
+    );
 
     // The next create treats it as a miss and REBUILDS rather than
     // failing or corrupting anything.
@@ -410,7 +473,10 @@ fn evicted_snapshot_referenced_by_mirror_rebuilds_on_next_create() {
         &fx.repo.join("heavy"),
         &fx.worktree_path("origin-two").join("heavy"),
     );
-    assert!(snapshots_dir.join(&hash).exists(), "snapshot rebuilt at the same address");
+    assert!(
+        snapshots_dir.join(&hash).exists(),
+        "snapshot rebuilt at the same address"
+    );
 }
 
 #[test]
@@ -423,7 +489,10 @@ fn fifo_fails_loudly_under_gate_and_is_skipped_without_it() {
 
     // Gate ON: loud error BEFORE any placement happens.
     let out = fx.wt(&["create", "one"], SNAPSHOTS_ON, "origin-one");
-    assert!(!out.status.success(), "fifos must fail loudly under the gate");
+    assert!(
+        !out.status.success(),
+        "fifos must fail loudly under the gate"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("not a regular file"),
@@ -438,11 +507,10 @@ fn fifo_fails_loudly_under_gate_and_is_skipped_without_it() {
     // succeeds exactly as it always did.
     let out = fx.wt(&["create", "two"], &[], "origin-two");
     assert_created(&out);
-    assert!(
-        fx.worktree_path("origin-two")
-            .join("heavy/pkg00/nested/file-0.txt")
-            .exists()
-    );
+    assert!(fx
+        .worktree_path("origin-two")
+        .join("heavy/pkg00/nested/file-0.txt")
+        .exists());
 }
 
 unsafe fn c_fifo(path: &Path) -> *const std::ffi::c_char {
@@ -550,7 +618,9 @@ fn gc_marks_through_valid_manifests_only() {
     let report = store.compute_marks(now, grace).unwrap();
     assert_eq!(
         report.referenced_snapshots,
-        [m.hash].into_iter().collect::<std::collections::BTreeSet<_>>()
+        [m.hash]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
     );
     assert!(
         report.marked.contains(&b1) && report.marked.contains(&b2),

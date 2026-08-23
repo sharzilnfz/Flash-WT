@@ -98,9 +98,7 @@ impl FileMaterialize for CloneOut {
         // SAFETY: both descriptors are open for the duration of the
         // call; `name` is a valid NUL-terminated buffer that outlives
         // it. fclonefileat keeps none of the pointers.
-        let rc = unsafe {
-            libc::fclonefileat(blob.as_raw_fd(), dir.as_raw_fd(), name.as_ptr(), 0)
-        };
+        let rc = unsafe { libc::fclonefileat(blob.as_raw_fd(), dir.as_raw_fd(), name.as_ptr(), 0) };
         if rc != 0 {
             return Err(io::Error::last_os_error());
         }

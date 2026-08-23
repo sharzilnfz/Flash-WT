@@ -60,6 +60,7 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 
@@ -248,7 +249,9 @@ impl Manifest {
         // record. Everything UP TO AND INCLUDING that newline is the
         // manifest — and exactly those entry bytes are what got
         // hashed at construction.
-        let end = text.rfind('\n').ok_or("manifest has no complete header line")?;
+        let end = text
+            .rfind('\n')
+            .ok_or("manifest has no complete header line")?;
         let complete = &text[..=end];
         let (header, body) = complete
             .split_once('\n')
@@ -400,6 +403,20 @@ pub fn read_published(root: &Path, hash: &ContentId) -> Option<Manifest> {
     Some(manifest)
 }
 
+/// Internal phase timings of one [`DiskStore::publish_snapshot`]
+/// build. Milliseconds, best-effort: observation only, never a behavior
+/// input. Step 0 instrumentation feeds these straight into
+/// `wt-stage snapshot-build-*` lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SnapshotBuildTiming {
+    /// Blob verification (hash/stat) before linking into staging.
+    pub verify_ms: u64,
+    /// Staging-tree construction: mkdirs, hardlinks, chmods, symlinks.
+    pub link_train_ms: u64,
+    /// Manifest serialization/hash, `.complete`, atomic renames.
+    pub publish_ms: u64,
+}
+
 /// What [`DiskStore::publish_snapshot`] did with its temp tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishOutcome {
@@ -462,9 +479,32 @@ impl DiskStore {
         entries: Vec<SnapshotEntry>,
         paranoid: bool,
     ) -> std::result::Result<std::result::Result<PublishOutcome, BuildError>, Error> {
+        self.publish_snapshot_timed(entries, paranoid, None)
+    }
+
+    /// [`Self::publish_snapshot`] with optional internal phase
+    /// timings (Step 0 instrumentation). Identical behavior; when
+    /// `timing` is `Some`, the three buckets are filled on success:
+    /// verify = all ensure_verified/get hashing+stat work; link_train
+    /// = staging mkdirs + hardlinks + chmods + symlinks; publish =
+    /// manifest serialization/hash, `.complete`, renames.
+    pub fn publish_snapshot_timed(
+        &self,
+        entries: Vec<SnapshotEntry>,
+        paranoid: bool,
+        timing: Option<&mut SnapshotBuildTiming>,
+    ) -> std::result::Result<std::result::Result<PublishOutcome, BuildError>, Error> {
+        let mut verify_ms = 0u64;
+        let mut link_train_ms = 0u64;
+        let mut publish_ms = 0u64;
+
+        let stage = Instant::now();
         let manifest =
             Manifest::new(entries).map_err(|e| Error::Io(io::Error::other(e.to_string())))?;
+        publish_ms += stage.elapsed().as_millis() as u64;
 
+        // Staging prep counts as the start of the link train.
+        let stage = Instant::now();
         let tmp_base = self.root().join("snapshots").join("tmp");
         fs::create_dir_all(&tmp_base)?;
         let tmp = tempfile::Builder::new()
@@ -474,9 +514,13 @@ impl DiskStore {
         // The clonable tree lives under tree/ so metadata files never
         // leak into a cloned worktree.
         fs::create_dir_all(tmp_path.join(TREE_SUBDIR))?;
+        link_train_ms += stage.elapsed().as_millis() as u64;
 
         match self.build_tree(&tmp_path.join(TREE_SUBDIR), &manifest, paranoid) {
-            Ok(()) => {}
+            Ok((verify, train)) => {
+                verify_ms += verify;
+                link_train_ms += train;
+            }
             Err(e) => {
                 // Drop removes our partial temp tree; only ever cache
                 // debris, never a published name.
@@ -485,6 +529,7 @@ impl DiskStore {
             }
         }
 
+        let stage = Instant::now();
         fs::write(tmp_path.join("manifest.tsv"), manifest.serialize())?;
         fs::write(
             tmp_path.join(".complete"),
@@ -492,7 +537,7 @@ impl DiskStore {
         )?;
 
         let final_path = self.snapshot_path(&manifest.hash);
-        match fs::rename(&tmp_path, &final_path) {
+        let outcome = match fs::rename(&tmp_path, &final_path) {
             Ok(()) => {
                 // Dropping the TempDir handle now tries to remove the
                 // OLD temp path, which no longer exists: a harmless
@@ -513,7 +558,17 @@ impl DiskStore {
                 drop(tmp);
                 Err(Error::Io(e))
             }
+        };
+        publish_ms += stage.elapsed().as_millis() as u64;
+
+        if let Some(t) = timing {
+            *t = SnapshotBuildTiming {
+                verify_ms,
+                link_train_ms,
+                publish_ms,
+            };
         }
+        outcome
     }
 
     /// Materialize the manifest inside `dir`: dirs first (sorted
@@ -527,15 +582,31 @@ impl DiskStore {
     /// or adds/removes the x-bits consistently for one content id, and
     /// chmod does not touch mtime, so verified-ledger fingerprints
     /// stay valid.
-    fn build_tree(&self, dir: &Path, manifest: &Manifest, paranoid: bool) -> Result<(), BuildError> {
+    fn build_tree(
+        &self,
+        dir: &Path,
+        manifest: &Manifest,
+        paranoid: bool,
+    ) -> Result<(u64, u64), BuildError> {
+        let mut verify_ms = 0u64;
+        let mut link_train_ms = 0u64;
         for entry in &manifest.entries {
             let dest = dir.join(&entry.rel);
             match entry.kind {
-                EntryKind::Dir => fs::create_dir_all(&dest)
-                    .and_then(|()| fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode)))
-                    .map_err(|e| BuildError::Fatal(format!("cannot create {}: {e}", dest.display())))?,
+                EntryKind::Dir => {
+                    let stage = Instant::now();
+                    fs::create_dir_all(&dest)
+                        .and_then(|()| {
+                            fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode))
+                        })
+                        .map_err(|e| {
+                            BuildError::Fatal(format!("cannot create {}: {e}", dest.display()))
+                        })?;
+                    link_train_ms += stage.elapsed().as_millis() as u64;
+                }
                 EntryKind::Symlink => {
                     let target = entry.target.as_deref().expect("validated symlink entry");
+                    let stage = Instant::now();
                     if let Some(parent) = dest.parent() {
                         if !parent.exists() {
                             fs::create_dir_all(parent).map_err(|e| {
@@ -550,12 +621,14 @@ impl DiskStore {
                     std::os::unix::fs::symlink(target, &dest).map_err(|e| {
                         BuildError::Fatal(format!("cannot link {}: {e}", dest.display()))
                     })?;
+                    link_train_ms += stage.elapsed().as_millis() as u64;
                 }
                 EntryKind::File => {
                     let blob = entry.blob.expect("validated file entry");
                     // Sorted order puts explicit dir entries ahead of
                     // their children, but a manifest is not obliged
                     // to name every intermediate: recreate any gap.
+                    let stage = Instant::now();
                     if let Some(parent) = dest.parent() {
                         if !parent.exists() {
                             fs::create_dir_all(parent).map_err(|e| {
@@ -566,8 +639,10 @@ impl DiskStore {
                             })?;
                         }
                     }
+                    link_train_ms += stage.elapsed().as_millis() as u64;
                     // Verify first: a corrupt or missing blob never
                     // reaches placement.
+                    let stage = Instant::now();
                     if paranoid {
                         if let Err(e) = Store::get(self, &blob) {
                             return Err(match e {
@@ -581,6 +656,8 @@ impl DiskStore {
                             other => BuildError::Fatal(other.to_string()),
                         });
                     }
+                    verify_ms += stage.elapsed().as_millis() as u64;
+                    let stage = Instant::now();
                     if let Err(e) = fs::hard_link(self.blob_path(&blob), &dest) {
                         return Err(match e.kind() {
                             io::ErrorKind::NotFound => BuildError::MissingBlob(blob),
@@ -602,16 +679,14 @@ impl DiskStore {
                     if meta.permissions().mode() & 0o7777 != entry.mode {
                         fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode))
                             .map_err(|e| {
-                                BuildError::Fatal(format!(
-                                    "cannot chmod {}: {e}",
-                                    dest.display()
-                                ))
+                                BuildError::Fatal(format!("cannot chmod {}: {e}", dest.display()))
                             })?;
                     }
+                    link_train_ms += stage.elapsed().as_millis() as u64;
                 }
             }
         }
-        Ok(())
+        Ok((verify_ms, link_train_ms))
     }
 }
 

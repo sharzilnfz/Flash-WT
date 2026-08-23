@@ -51,7 +51,12 @@ fn ledger_ids(wt_root: &Path) -> Vec<String> {
     ledger
         .lines()
         .filter(|l| !l.is_empty())
-        .map(|line| line.split('\t').nth(1).expect("ledger row has id").to_owned())
+        .map(|line| {
+            line.split('\t')
+                .nth(1)
+                .expect("ledger row has id")
+                .to_owned()
+        })
         .collect()
 }
 
@@ -63,7 +68,10 @@ fn object_path(store: &Path, id: &str) -> std::path::PathBuf {
 /// sweeps treat them as aged out.
 fn age_objects(store: &Path) {
     for path in list_files(&store.join("objects")) {
-        let f = fs::OpenOptions::new().append(true).open(&path).expect("open blob");
+        let f = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open blob");
         f.set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1000)))
             .expect("age blob mtime");
     }
@@ -102,10 +110,7 @@ fn live_worktree_blobs_survive_mark_sweep_past_any_age() {
         "create failed: {}",
         String::from_utf8_lossy(&created.stderr)
     );
-    let activated = fx.wt_with_store(
-        &["store", "migrate", "--activate-mark-sweep"],
-        &store,
-    );
+    let activated = fx.wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store);
     assert!(activated.status.success());
 
     // Every blob is ancient now; only the mirror keeps them alive.
@@ -151,10 +156,7 @@ fn rm_rf_worktree_without_prune_becomes_collectable_after_grace() {
     // Out-of-band deletion: no `git worktree prune` ever runs.
     fs::remove_dir_all(&wt_root).expect("rm -rf the worktree");
 
-    let activated = fx.wt_with_store(
-        &["store", "migrate", "--activate-mark-sweep"],
-        &store,
-    );
+    let activated = fx.wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store);
     assert!(activated.status.success());
 
     // Within the grace period nothing goes, no matter how old the
@@ -163,7 +165,10 @@ fn rm_rf_worktree_without_prune_becomes_collectable_after_grace() {
     let swept = fx.wt_with_store(&["sweep", "--age", "1h"], &store);
     assert!(swept.status.success());
     for id in &ids {
-        assert!(object_path(&store, id).is_file(), "{id} collected inside grace");
+        assert!(
+            object_path(&store, id).is_file(),
+            "{id} collected inside grace"
+        );
     }
 
     // Past the grace period the dead root stops protecting anything,
@@ -188,7 +193,10 @@ fn rm_rf_worktree_without_prune_becomes_collectable_after_grace() {
             "{id} survived the death of its only root"
         );
     }
-    assert!(content_files(&store).is_empty(), "nothing else should remain");
+    assert!(
+        content_files(&store).is_empty(),
+        "nothing else should remain"
+    );
 }
 
 // --- mirror damage handling ---
@@ -200,7 +208,10 @@ fn torn_final_line_is_ignored_and_live_content_survives() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx.wt_with_store(&["create", "one"], &store).status.success());
+    assert!(fx
+        .wt_with_store(&["create", "one"], &store)
+        .status
+        .success());
     let ids = ledger_ids(&fx.repo.parent().unwrap().join("origin-one"));
 
     let mirror = &mirror_files(&store)[0];
@@ -210,17 +221,23 @@ fn torn_final_line_is_ignored_and_live_content_survives() {
     fs::write(mirror, text).expect("tear the mirror");
     let _ = mirror;
 
-    assert!(
-        fx.wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
-            .status
-            .success()
-    );
+    assert!(fx
+        .wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
+        .status
+        .success());
     age_objects(&store);
 
     let swept = fx.wt_with_store(&["sweep", "--age", "0s"], &store);
-    assert!(swept.status.success(), "{}", String::from_utf8_lossy(&swept.stderr));
+    assert!(
+        swept.status.success(),
+        "{}",
+        String::from_utf8_lossy(&swept.stderr)
+    );
     for id in &ids {
-        assert!(object_path(&store, id).is_file(), "torn line cost us blob {id}");
+        assert!(
+            object_path(&store, id).is_file(),
+            "torn line cost us blob {id}"
+        );
     }
 }
 
@@ -231,7 +248,10 @@ fn malformed_young_mirror_defers_deletion_and_is_reported() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx.wt_with_store(&["create", "one"], &store).status.success());
+    assert!(fx
+        .wt_with_store(&["create", "one"], &store)
+        .status
+        .success());
     let ids = ledger_ids(&fx.repo.parent().unwrap().join("origin-one"));
 
     // A corrupted mirror: garbage where the v1 header should be. Its
@@ -242,11 +262,10 @@ fn malformed_young_mirror_defers_deletion_and_is_reported() {
     let mirror = mirrors.remove(0);
     fs::write(&mirror, "not a mirror at all\n").expect("corrupt mirror");
 
-    assert!(
-        fx.wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
-            .status
-            .success()
-    );
+    assert!(fx
+        .wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
+        .status
+        .success());
     age_objects(&store);
 
     let swept = fx.wt_with_store(&["sweep", "--age", "1h"], &store);
@@ -277,7 +296,10 @@ fn missing_mirror_still_allows_remove_and_leaves_no_mirror_behind() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx.wt_with_store(&["create", "one"], &store).status.success());
+    assert!(fx
+        .wt_with_store(&["create", "one"], &store)
+        .status
+        .success());
     let wt_root = fx.repo.parent().unwrap().join("origin-one");
     let refs_before = ledger_ids(&wt_root);
 
@@ -292,7 +314,10 @@ fn missing_mirror_still_allows_remove_and_leaves_no_mirror_behind() {
         String::from_utf8_lossy(&removed.stderr)
     );
     assert!(!wt_root.exists());
-    assert!(mirror_files(&store).is_empty(), "no mirror may survive remove");
+    assert!(
+        mirror_files(&store).is_empty(),
+        "no mirror may survive remove"
+    );
 
     // Legacy refs were still released through the sidecar fallback.
     for id in refs_before {
@@ -311,12 +336,14 @@ fn interrupted_mark_sweep_state_reconciles_on_the_next_sweep() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx.wt_with_store(&["create", "one"], &store).status.success());
-    assert!(
-        fx.wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
-            .status
-            .success()
-    );
+    assert!(fx
+        .wt_with_store(&["create", "one"], &store)
+        .status
+        .success());
+    assert!(fx
+        .wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
+        .status
+        .success());
 
     // Kill mid-sweep, simulated: one blob already unlinked, its
     // siblings not yet. The next sweep reconciles without touching
@@ -326,15 +353,26 @@ fn interrupted_mark_sweep_state_reconciles_on_the_next_sweep() {
     fs::remove_file(object_path(&store, &ids[0])).expect("simulate partial sweep");
 
     let swept = fx.wt_with_store(&["sweep", "--age", "1h"], &store);
-    assert!(swept.status.success(), "{}", String::from_utf8_lossy(&swept.stderr));
+    assert!(
+        swept.status.success(),
+        "{}",
+        String::from_utf8_lossy(&swept.stderr)
+    );
     for id in &ids[1..] {
-        assert!(object_path(&store, id).is_file(), "{id} lost to a partial sweep");
+        assert!(
+            object_path(&store, id).is_file(),
+            "{id} lost to a partial sweep"
+        );
     }
     assert!(!object_path(&store, &ids[0]).exists());
 
     // The store remains fully usable afterwards.
     let again = fx.wt_with_store(&["create", "two"], &store);
-    assert!(again.status.success(), "{}", String::from_utf8_lossy(&again.stderr));
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
 }
 
 // --- WT_TIMING=1 stage timings ---
@@ -374,15 +412,28 @@ fn timing_env_emits_wt_stage_lines_to_stderr_and_stays_silent_without_it() {
         .iter()
         .map(|l| l.split('=').nth(1).and_then(|v| v.parse().ok()))
         .collect();
-    assert_eq!(
-        names,
-        vec!["wt-stage ingest", "wt-stage references", "wt-stage materialize", "wt-stage total"],
-        "exactly the four stages, in order:\n{stderr}"
-    );
     assert!(
         ms.iter().all(|v| v.is_some()),
         "stage values must be integer milliseconds:\n{stderr}"
     );
+    // Step 0 added finer-grained stage lines (git-worktree,
+    // verify/place, snapshot sub-stages). The legacy four must still
+    // be present, in their original relative order; the set is now a
+    // superset, so no exact-match assertion.
+    let legacy = [
+        "wt-stage ingest",
+        "wt-stage references",
+        "wt-stage materialize",
+        "wt-stage total",
+    ];
+    let mut cursor = 0usize;
+    for want in legacy {
+        let found = names[cursor..]
+            .iter()
+            .position(|n| *n == want)
+            .unwrap_or_else(|| panic!("legacy stage {want} missing or reordered:\n{stderr}"));
+        cursor += found + 1;
+    }
 }
 
 // --- legacy mode: audit parity + unchanged behavior ---
@@ -410,7 +461,10 @@ fn legacy_sweep_audit_reports_zero_disagreements_on_normal_fixtures() {
         !stderr.contains("wt-gc-audit"),
         "audit disagreement on a healthy fixture:\n{stderr}"
     );
-    assert!(!content_files(&store).is_empty(), "live content was collected");
+    assert!(
+        !content_files(&store).is_empty(),
+        "live content was collected"
+    );
 }
 
 #[test]
@@ -420,17 +474,19 @@ fn dual_write_keeps_refs_maintained_until_explicit_cutover() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(
-        fx.wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
-            .status
-            .success()
-    );
+    assert!(fx
+        .wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
+        .status
+        .success());
     assert_eq!(
         fs::read_to_string(store.join("gc-mode")).unwrap().trim(),
         "mark-sweep"
     );
 
-    assert!(fx.wt_with_store(&["create", "one"], &store).status.success());
+    assert!(fx
+        .wt_with_store(&["create", "one"], &store)
+        .status
+        .success());
     let ids = ledger_ids(&fx.repo.parent().unwrap().join("origin-one"));
     for id in &ids {
         assert!(
@@ -457,7 +513,10 @@ fn drop_legacy_refs_warns_loudly_purges_refs_and_creates_stop_writing_them() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx.wt_with_store(&["create", "one"], &store).status.success());
+    assert!(fx
+        .wt_with_store(&["create", "one"], &store)
+        .status
+        .success());
     let dropped = fx.wt_with_store(&["store", "migrate", "--drop-legacy-refs"], &store);
     assert!(
         dropped.status.success(),
@@ -491,7 +550,10 @@ fn drop_legacy_refs_warns_loudly_purges_refs_and_creates_stop_writing_them() {
     }
 
     // New creates stop touching refs/ entirely.
-    assert!(fx.wt_with_store(&["create", "two"], &store).status.success());
+    assert!(fx
+        .wt_with_store(&["create", "two"], &store)
+        .status
+        .success());
     assert!(
         fs::read_dir(store.join("refs")).unwrap().next().is_none(),
         "create wrote ref files after --drop-legacy-refs"

@@ -256,9 +256,8 @@ pub fn sweep(age: Option<&str>) -> Result<(), String> {
         }
         GcMode::MarkSweep | GcMode::MarkSweepNoRefs => {
             let grace = match age {
-                Some(explicit) => parse_age(explicit).ok_or_else(|| {
-                    format!("invalid --age {explicit:?} (try 0s, 10m, 1h, 7d)")
-                })?,
+                Some(explicit) => parse_age(explicit)
+                    .ok_or_else(|| format!("invalid --age {explicit:?} (try 0s, 10m, 1h, 7d)"))?,
                 None => grace_from_env()?,
             };
             let swept = store.sweep_mark_sweep(grace).map_err(|e| e.to_string())?;

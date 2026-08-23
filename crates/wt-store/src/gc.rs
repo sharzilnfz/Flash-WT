@@ -132,17 +132,15 @@ impl DiskStore {
         let worktree =
             fs::canonicalize(worktree).map_err(|e| Error::Io(path_error("worktree", e)))?;
         let gitdir = fs::canonicalize(gitdir).map_err(|e| Error::Io(path_error("gitdir", e)))?;
-        mirror::remove(self.root(), &worktree, &gitdir).map_err(Error::Io).map(|_| ())
+        mirror::remove(self.root(), &worktree, &gitdir)
+            .map_err(Error::Io)
+            .map(|_| ())
     }
 
     /// True when the mirror for this identity is missing but the
     /// sidecar still exists — the state the plan says the next
     /// create/remove repairs by rewriting the mirror.
-    pub fn mirror_is_missing(
-        &self,
-        worktree: &Path,
-        gitdir: &Path,
-    ) -> Result<bool> {
+    pub fn mirror_is_missing(&self, worktree: &Path, gitdir: &Path) -> Result<bool> {
         let worktree =
             fs::canonicalize(worktree).map_err(|e| Error::Io(path_error("worktree", e)))?;
         let gitdir = fs::canonicalize(gitdir).map_err(|e| Error::Io(path_error("gitdir", e)))?;
@@ -254,7 +252,8 @@ impl DiskStore {
             outcome.reclaimed += 1;
         }
 
-        outcome.snapshot_dirs_removed = self.sweep_snapshots(&marks.referenced_snapshots, cutoff)?;
+        outcome.snapshot_dirs_removed =
+            self.sweep_snapshots(&marks.referenced_snapshots, cutoff)?;
         Ok(outcome)
     }
 
@@ -263,11 +262,7 @@ impl DiskStore {
     /// that is either unreferenced by a live mirror or debris, and
     /// older than the cutoff, goes. Phase 1 stores have no snapshots
     /// directory, so this is normally a no-op scan.
-    fn sweep_snapshots(
-        &self,
-        referenced: &BTreeSet<ContentId>,
-        cutoff: SystemTime,
-    ) -> Result<u64> {
+    fn sweep_snapshots(&self, referenced: &BTreeSet<ContentId>, cutoff: SystemTime) -> Result<u64> {
         let mut removed = 0u64;
         let dir = self.root().join("snapshots");
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -296,8 +291,8 @@ impl DiskStore {
                 Some(id) if referenced.contains(&id) => {}
                 _ => {
                     // Referenced-but-unresolvable snapshots stay:
-                // their blobs' fate follows blob marks alone, and the
-                // directory may still be mid-publish.
+                    // their blobs' fate follows blob marks alone, and the
+                    // directory may still be mid-publish.
                     if remove_tree(&path) {
                         removed += 1;
                     }

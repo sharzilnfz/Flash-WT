@@ -75,7 +75,12 @@ fn default_hydration_produces_private_writable_files() {
     let two = hydrated_file(&parent.join("origin-two"));
     for path in [&one, &two] {
         let meta = fs::metadata(path).unwrap();
-        assert_eq!(meta.nlink(), 1, "{} must own a private inode", path.display());
+        assert_eq!(
+            meta.nlink(),
+            1,
+            "{} must own a private inode",
+            path.display()
+        );
         assert_eq!(
             meta.mode() & 0o200,
             0o200,
@@ -218,8 +223,7 @@ fn before_first_write_hydrated_files_share_physical_blocks_with_the_blob() {
         for blob in fs::read_dir(&shard).unwrap().flatten() {
             let bytes = fs::read(blob.path()).unwrap();
             assert_eq!(
-                bytes,
-                big,
+                bytes, big,
                 "store blob was mutated by writing to a hydrated file"
             );
         }

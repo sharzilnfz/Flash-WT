@@ -19,7 +19,7 @@ mod selection;
 pub use clonefile::ClonefileBackend;
 pub use deep_copy::DeepCopyBackend;
 pub use hardlink::HardlinkBackend;
-pub use materialize::{CloneOut, FileMaterialize, HardlinkOut, placement_refused};
+pub use materialize::{placement_refused, CloneOut, FileMaterialize, HardlinkOut};
 #[cfg(target_os = "linux")]
 pub use reflink::ReflinkBackend;
 pub use selection::{candidates, select_backend};

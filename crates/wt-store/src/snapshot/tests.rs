@@ -46,7 +46,10 @@ fn list_tree(dir: &Path) -> Vec<String> {
 fn manifest_text_for_body(body: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(body.as_bytes());
-    format!("v1\tmanifest-sha256\t{}\n{body}", ContentId(hasher.finalize().into()))
+    format!(
+        "v1\tmanifest-sha256\t{}\n{body}",
+        ContentId(hasher.finalize().into())
+    )
 }
 
 #[test]
@@ -241,7 +244,10 @@ fn publish_builds_tree_with_modes_links_and_empty_dirs() {
     );
     // The clonable subtree holds exactly the hydrated content — no
     // metadata files leak into a cloned worktree.
-    assert_eq!(list_tree(&tree), ["empty-dir", "pkg/a.txt", "pkg/bin-link", "pkg/run.sh"]);
+    assert_eq!(
+        list_tree(&tree),
+        ["empty-dir", "pkg/a.txt", "pkg/bin-link", "pkg/run.sh"]
+    );
     // Empty dir exists explicitly.
     assert!(tree.join("empty-dir").is_dir());
     // File content flows from the blob through the hardlink.
@@ -299,8 +305,10 @@ fn concurrent_publish_loser_consumes_valid_winner() {
         SnapshotEntry::file("f.txt", blob, 0o644),
         SnapshotEntry::dir("sub"),
     ];
-    let other_path =
-        snapshot_path(base.path().join("store").as_path(), &Manifest::new(other_entries.clone()).unwrap().hash);
+    let other_path = snapshot_path(
+        base.path().join("store").as_path(),
+        &Manifest::new(other_entries.clone()).unwrap().hash,
+    );
     fs::create_dir_all(&other_path).unwrap();
     fs::write(other_path.join("manifest.tsv"), "garbage\n").unwrap();
 
@@ -349,7 +357,8 @@ fn missing_blob_reports_missing_for_healing_retry() {
     );
     let m = Manifest::new(vec![SnapshotEntry::file("gone.txt", ghost, 0o644)]).unwrap();
     assert_eq!(
-        fs::read(snapshot_tree_path(base.path().join("store").as_path(), &m.hash).join("gone.txt")).unwrap(),
+        fs::read(snapshot_tree_path(base.path().join("store").as_path(), &m.hash).join("gone.txt"))
+            .unwrap(),
         b"lost bytes"
     );
     store.flush().unwrap();
@@ -431,7 +440,9 @@ fn failed_publish_leaves_only_temp_debris_behind() {
     assert_eq!(names, vec!["tmp".to_string()]);
     // Simulate a kill mid-build: junk in tmp is inert debris.
     fs::write(snapshots.join("tmp/build-junk"), b"half").unwrap();
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap();
     let _ = Duration::from_secs(0); // keep imports honest if cfgs shift
     store.flush().unwrap();
 }
