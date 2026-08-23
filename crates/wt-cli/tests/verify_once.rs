@@ -43,6 +43,19 @@ fn tamper_blob(store: &Path, restore_mtime: bool) {
             .expect("reopen blob");
         f.set_times(fs::FileTimes::new().set_modified(mtime))
             .expect("restore mtime");
+    } else {
+        // Inode timestamps use the kernel's coarse clock (up to ~4ms
+        // granularity); a tamper landing in the same tick as the put
+        // would keep the old mtime and legitimately escape the trust
+        // model. Force an unambiguous mtime change so this test never
+        // depends on tick luck.
+        let shifted = mtime + std::time::Duration::from_secs(60);
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(&blob)
+            .expect("reopen blob");
+        f.set_times(fs::FileTimes::new().set_modified(shifted))
+            .expect("shift mtime");
     }
 }
 

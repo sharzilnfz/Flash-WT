@@ -508,6 +508,21 @@ fn tamper_blob(store_root: &std::path::Path, id: &ContentId, restore_mtime: bool
             .expect("reopen blob");
         f.set_times(FileTimes::new().set_modified(mtime))
             .expect("restore mtime");
+    } else {
+        // Inode timestamps come from the kernel's COARSE clock (up to
+        // ~4ms granularity with HZ=250). A tamper that lands in the
+        // same tick as the put would keep the old mtime, and the
+        // ledger's trust hit is then legitimate under the documented
+        // trust model ("bit rot preserving size AND mtime between
+        // checks"). Tests must not depend on tick luck: force an
+        // unambiguous mtime change.
+        let shifted = mtime + std::time::Duration::from_secs(60);
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("reopen blob");
+        f.set_times(FileTimes::new().set_modified(shifted))
+            .expect("shift mtime");
     }
 }
 
