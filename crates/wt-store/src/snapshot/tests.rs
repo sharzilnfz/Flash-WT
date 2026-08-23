@@ -474,11 +474,46 @@ fn v2_entries(store: &mut DiskStore) -> Vec<SnapshotEntry> {
         SnapshotEntry::file("root.txt", root, 0o644),
     ]
 }
+/// Fingerprint a hydrated tree for exactness comparisons: every path
+/// (files, symlinks, AND dirs — empty dirs matter) as
+/// `(rel, kind, mode & 0o7777, bytes or target)`, sorted.
+fn tree_fingerprint(dir: &Path) -> Vec<(String, char, u32, Vec<u8>)> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, char, u32, Vec<u8>)>) {
+        for entry in fs::read_dir(dir).expect("read_dir") {
+            let entry = entry.expect("dir entry");
+            let file_type = entry.file_type().expect("file_type");
+            let rel = format!("{prefix}{}", entry.file_name().to_string_lossy());
+            if file_type.is_symlink() {
+                let target = fs::read_link(entry.path()).expect("read_link");
+                out.push((
+                    rel,
+                    'l',
+                    0o777,
+                    target.as_os_str().as_encoded_bytes().to_vec(),
+                ));
+            } else if file_type.is_dir() {
+                let mode = entry.metadata().expect("stat").permissions().mode() & 0o7777;
+                out.push((rel.clone(), 'd', mode, Vec::new()));
+                walk(&entry.path(), &format!("{rel}/"), out);
+            } else {
+                let mode = entry.metadata().expect("stat").permissions().mode() & 0o7777;
+                let bytes = fs::read(entry.path()).expect("read");
+                out.push((rel, 'f', mode, bytes));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(dir, "", &mut out);
+    out.sort();
+    out
+}
 
 #[test]
 fn incremental_publish_matches_full_build_semantics() {
     let (_base, mut store) = incremental_fixture();
-    use crate::Store as _;
 
     let old_entries = v2_entries(&mut store);
     let old_manifest = Manifest::new(old_entries.clone()).unwrap();
@@ -487,73 +522,74 @@ fn incremental_publish_matches_full_build_semantics() {
         Ok(PublishOutcome::Published)
     );
 
-    // Bump ONE root-level file; pkg00 stays fully unchanged -> the
-    // single maximal unit.
+    // Bump ONE root-level file; everything else is unchanged content
+    // the whole-tree clone carries over.
+    use crate::Store as _;
     let extra = store.put(b"root.txt v2\n").unwrap();
     let mut new_entries = old_entries.clone();
     new_entries.retain(|e| e.rel != "root.txt");
     new_entries.push(SnapshotEntry::file("root.txt", extra, 0o644));
     let new_manifest = Manifest::new(new_entries.clone()).unwrap();
     assert_ne!(new_manifest.hash, old_manifest.hash);
-    let units = crate::snapdiff::SnapshotDiff::unchanged_units(
-        &old_manifest.entries,
-        &new_manifest.entries,
-    );
-    // Both top-level dirs survive untouched; each is a unit.
-    assert_eq!(units, vec!["empty-dir".to_string(), "pkg00".to_string()]);
 
     let mut timing = SnapshotBuildTiming::default();
     let outcome = store
-        .publish_snapshot_incremental(
-            new_entries,
-            &old_manifest.hash,
-            &units,
-            false,
-            Some(&mut timing),
-        )
+        .publish_snapshot_incremental(new_entries, &old_manifest.hash, false, Some(&mut timing))
         .unwrap();
-    assert_eq!(outcome, Ok(PublishOutcome::Published));
-    // The whole point: the package unit cloned on APFS; elsewhere
-    // every clone refuses and falls back to per-entry links.
-    if cfg!(target_os = "macos") {
-        // Sub-millisecond clones truncate to 0 ms; only counts lie.
-        assert_eq!(timing.clone_units, 2);
-    } else {
-        assert_eq!(timing.clone_units, 0);
-    }
 
-    // The published result validates and its tree carries EXACTLY the
-    // new content: bumped file, untouched package, symlink, empty dir.
-    assert_eq!(
-        store.find_snapshot(&new_manifest.hash).unwrap(),
-        new_manifest
-    );
-    let tree = snapshot_tree_path(store.root(), &new_manifest.hash);
-    assert_eq!(
-        fs::read_to_string(tree.join("root.txt")).unwrap(),
-        "root.txt v2\n"
-    );
-    assert_eq!(
-        fs::read_to_string(tree.join("pkg00/nested/a")).unwrap(),
-        "nested a\n"
-    );
-    assert!(tree.join("empty-dir").is_dir());
-    let md = fs::symlink_metadata(tree.join("pkg00/bin-link")).unwrap();
-    assert!(md.file_type().is_symlink());
-    assert_eq!(
-        fs::read_link(tree.join("pkg00/bin-link")).unwrap(),
-        Path::new("../run.sh")
-    );
-    let run_mode = fs::metadata(tree.join("pkg00/run.sh"))
-        .unwrap()
-        .permissions()
-        .mode();
-    assert_eq!(run_mode & 0o777, EXEC_FILE_MODE);
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(outcome, Ok(PublishOutcome::Published));
+        // The whole point: the ENTIRE old tree is one clone unit now.
+        // Sub-millisecond clones truncate to 0 ms; only counts lie.
+        assert_eq!(timing.clone_units, 1);
+        assert_eq!(
+            timing.linked_files, 1,
+            "only the bumped root file is freshly linked"
+        );
+
+        // The published result validates and its tree carries EXACTLY
+        // the new content: bumped file, untouched package, symlink,
+        // empty dir.
+        assert_eq!(
+            store.find_snapshot(&new_manifest.hash).unwrap(),
+            new_manifest
+        );
+        let tree = snapshot_tree_path(store.root(), &new_manifest.hash);
+        assert_eq!(
+            fs::read_to_string(tree.join("root.txt")).unwrap(),
+            "root.txt v2\n"
+        );
+        assert_eq!(
+            fs::read_to_string(tree.join("pkg00/nested/a")).unwrap(),
+            "nested a\n"
+        );
+        assert!(tree.join("empty-dir").is_dir());
+        let md = fs::symlink_metadata(tree.join("pkg00/bin-link")).unwrap();
+        assert!(md.file_type().is_symlink());
+        assert_eq!(
+            fs::read_link(tree.join("pkg00/bin-link")).unwrap(),
+            Path::new("../run.sh")
+        );
+        let run_mode = fs::metadata(tree.join("pkg00/run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(run_mode & 0o777, EXEC_FILE_MODE);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // No recursive clone primitive: the attempt aborts so the
+        // caller falls back to a full build. Nothing is published.
+        assert!(matches!(outcome, Err(BuildError::Fatal(_))));
+        assert_eq!(timing.clone_units, 0);
+        assert!(store.find_snapshot(&new_manifest.hash).is_none());
+    }
     store.flush().unwrap();
 }
 
 #[test]
-fn deleted_subtree_and_unitless_rebuild_still_land_exactly() {
+fn deleted_subtree_delta_lands_exactly() {
     let (_base, mut store) = incremental_fixture();
 
     let old_entries = v2_entries(&mut store);
@@ -564,65 +600,89 @@ fn deleted_subtree_and_unitless_rebuild_still_land_exactly() {
     );
 
     // New manifest drops pkg00 entirely and keeps only the empty dir
-    // plus bumped root file. No units at all; deletions need nothing.
+    // plus bumped root file. Deletions are pure unlinks inside the
+    // cloned copy; the bumped file is the only relink.
     use crate::Store as _;
     let extra = store.put(b"root.txt v2\n").unwrap();
     let gone_entries = vec![
         SnapshotEntry::dir("empty-dir"),
         SnapshotEntry::file("root.txt", extra, 0o644),
     ];
-    let gone_manifest = Manifest::new(gone_entries.clone()).unwrap();
-    assert_eq!(
-        store
-            .publish_snapshot_incremental(gone_entries, &old_manifest.hash, &[], false, None)
-            .unwrap(),
-        Ok(PublishOutcome::Published)
-    );
-    let tree = snapshot_tree_path(store.root(), &gone_manifest.hash);
-    assert!(!tree.join("pkg00").exists(), "deleted subtree must vanish");
-    assert!(tree.join("empty-dir").is_dir());
+    let gone_manifest = Manifest::new(gone_entries).unwrap();
+
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(
+            store
+                .publish_snapshot_incremental(
+                    gone_manifest.entries.clone(),
+                    &old_manifest.hash,
+                    false,
+                    None
+                )
+                .unwrap(),
+            Ok(PublishOutcome::Published)
+        );
+        let tree = snapshot_tree_path(store.root(), &gone_manifest.hash);
+        assert!(!tree.join("pkg00").exists(), "deleted subtree must vanish");
+        assert!(tree.join("empty-dir").is_dir());
+        assert_eq!(
+            fs::read_to_string(tree.join("root.txt")).unwrap(),
+            "root.txt v2\n"
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(matches!(
+            store
+                .publish_snapshot_incremental(
+                    gone_manifest.entries.clone(),
+                    &old_manifest.hash,
+                    false,
+                    None
+                )
+                .unwrap(),
+            Err(BuildError::Fatal(_))
+        ));
+    }
     store.flush().unwrap();
 }
 
 #[test]
-fn failed_unit_clone_falls_back_to_per_entry_placement() {
+fn unusable_old_snapshot_aborts_the_incremental_attempt() {
     let (_base, mut store) = incremental_fixture();
 
     let entries = v2_entries(&mut store);
     let manifest_hash = Manifest::new(entries.clone()).unwrap().hash;
 
-    // A ghost old hash: no snapshot carries these units, so EVERY
-    // clone attempt fails and every unit falls back to hardlinks —
-    // yet the rebuild must still land exactly right.
+    // A ghost old hash: nothing to clone from. There is NO per-unit
+    // fallback anymore — the whole attempt aborts and the CALLER is
+    // responsible for the full build.
     let ghost = ContentId([0xAA; 32]);
     let mut timing = SnapshotBuildTiming::default();
-    assert_eq!(
-        store
-            .publish_snapshot_incremental(
-                entries,
-                &ghost,
-                &["pkg00".to_string()],
-                false,
-                Some(&mut timing)
-            )
-            .unwrap(),
-        Ok(PublishOutcome::Published)
+    let outcome = store
+        .publish_snapshot_incremental(entries, &ghost, false, Some(&mut timing))
+        .unwrap();
+    assert!(
+        matches!(outcome, Err(BuildError::Fatal(_))),
+        "a refused whole-tree clone must abort the attempt"
     );
     assert_eq!(timing.clone_units, 0, "nothing could have cloned");
-
-    let tree = snapshot_tree_path(store.root(), &manifest_hash);
-    assert!(tree.join("empty-dir").is_dir());
-    let md = fs::symlink_metadata(tree.join("pkg00/bin-link")).unwrap();
-    assert!(md.file_type().is_symlink());
-    assert_eq!(
-        fs::read_link(tree.join("pkg00/bin-link")).unwrap(),
-        Path::new("../run.sh")
+    assert!(
+        store.find_snapshot(&manifest_hash).is_none(),
+        "an aborted attempt publishes nothing"
     );
+
+    // No stray temp dirs either.
+    let tmp = store.root().join("snapshots/tmp");
+    if let Ok(found) = fs::read_dir(&tmp) {
+        assert_eq!(found.count(), 0, "aborted build leaves no temp debris");
+    }
     store.flush().unwrap();
 }
 
 #[test]
-fn old_snapshot_evicted_before_cloning_falls_back_per_unit_and_lands_exactly() {
+fn old_snapshot_evicted_midflight_yields_to_a_full_build() {
     let (_base, mut store) = incremental_fixture();
     use crate::Store as _;
 
@@ -634,8 +694,10 @@ fn old_snapshot_evicted_before_cloning_falls_back_per_unit_and_lands_exactly() {
     );
 
     // Eviction race: selection already picked this old snapshot, then
-    // sweep took its whole directory before any unit cloned. Every
-    // clonefile must ENOENT into the per-unit fallback.
+    // sweep took its whole directory before the ONE whole-tree clone.
+    // That single clone ENOENTs, the attempt aborts with an error, and
+    // the CLI's full-build fallback lands the tree instead (the old
+    // per-unit-fallback behavior is gone).
     fs::remove_dir_all(snapshot_path(store.root(), &old_manifest.hash)).unwrap();
 
     let extra = store.put(b"root.txt v2\n").unwrap();
@@ -643,57 +705,26 @@ fn old_snapshot_evicted_before_cloning_falls_back_per_unit_and_lands_exactly() {
     new_entries.retain(|e| e.rel != "root.txt");
     new_entries.push(SnapshotEntry::file("root.txt", extra, 0o644));
     let new_manifest = Manifest::new(new_entries.clone()).unwrap();
-    let units = crate::snapdiff::SnapshotDiff::unchanged_units(
-        &old_manifest.entries,
-        &new_manifest.entries,
-    );
-    assert_eq!(units, vec!["empty-dir".to_string(), "pkg00".to_string()]);
 
     let mut timing = SnapshotBuildTiming::default();
-    assert_eq!(
-        store
-            .publish_snapshot_incremental(
-                new_entries,
-                &old_manifest.hash,
-                &units,
-                false,
-                Some(&mut timing)
-            )
-            .unwrap(),
-        Ok(PublishOutcome::Published)
+    let outcome = store
+        .publish_snapshot_incremental(new_entries, &old_manifest.hash, false, Some(&mut timing))
+        .unwrap();
+    assert!(
+        matches!(outcome, Err(BuildError::Fatal(_))),
+        "the evicted old tree must abort the incremental attempt"
     );
-    assert_eq!(timing.clone_units, 0, "every clone attempt must fail");
-    assert_eq!(
-        timing.fallback_linked_files, 2,
-        "both pkg00 files must come back from blobs via the fallback"
+    assert_eq!(timing.clone_units, 0);
+    assert!(
+        store.find_snapshot(&new_manifest.hash).is_none(),
+        "nothing published from a vanished source; the full build owns this address now"
     );
-
-    // The published result is exact despite the mid-flight eviction.
-    assert_eq!(
-        store.find_snapshot(&new_manifest.hash).unwrap(),
-        new_manifest
-    );
-    let tree = snapshot_tree_path(store.root(), &new_manifest.hash);
-    assert_eq!(
-        fs::read_to_string(tree.join("pkg00/nested/a")).unwrap(),
-        "nested a\n"
-    );
-    assert_eq!(
-        fs::read_to_string(tree.join("pkg00/run.sh")).unwrap(),
-        "#!/bin/sh\necho hi\n"
-    );
-    assert_eq!(
-        fs::read_to_string(tree.join("root.txt")).unwrap(),
-        "root.txt v2\n"
-    );
-    assert!(tree.join("empty-dir").is_dir());
-    let md = fs::symlink_metadata(tree.join("pkg00/bin-link")).unwrap();
-    assert!(md.file_type().is_symlink());
     store.flush().unwrap();
 }
 
+#[cfg(target_os = "macos")]
 #[test]
-fn paranoid_incremental_rejects_rotted_blob_inside_a_cloned_unit() {
+fn paranoid_incremental_rejects_rotted_blob_inside_the_cloned_tree() {
     let (_base, mut store) = incremental_fixture();
     use crate::Store as _;
 
@@ -712,9 +743,10 @@ fn paranoid_incremental_rejects_rotted_blob_inside_a_cloned_unit() {
         Ok(PublishOutcome::Published)
     );
 
-    // Tamper with a blob INSIDE the unit, preserving size AND mtime so
-    // ledger trust cannot see it. The paranoid pass over cloned files
-    // must catch it before the rename.
+    // Tamper with a blob INSIDE the cloned region, preserving size AND
+    // mtime so ledger trust cannot see it. The paranoid pass over the
+    // WHOLE staged tree (cloned bulk included) must catch it before
+    // the rename.
     let target = store.blob_path(&inner_blob);
     let mtime = fs::metadata(&target).unwrap().modified().unwrap();
     let original = fs::read(&target).unwrap();
@@ -735,13 +767,7 @@ fn paranoid_incremental_rejects_rotted_blob_inside_a_cloned_unit() {
     let new_hash = Manifest::new(new_entries.clone()).unwrap().hash;
 
     let err = store
-        .publish_snapshot_incremental(
-            new_entries,
-            &old_manifest.hash,
-            &["pkg00".to_string(), "empty-dir".to_string()],
-            true,
-            None,
-        )
+        .publish_snapshot_incremental(new_entries, &old_manifest.hash, true, None)
         .unwrap();
     match err {
         Err(BuildError::Fatal(msg)) => {
@@ -763,15 +789,189 @@ fn paranoid_incremental_rejects_rotted_blob_inside_a_cloned_unit() {
     restored.push(SnapshotEntry::file("root.txt", extra, 0o644));
     assert_eq!(
         store
+            .publish_snapshot_incremental(restored, &old_manifest.hash, true, None)
+            .unwrap(),
+        Ok(PublishOutcome::Published)
+    );
+    store.flush().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn delta_matrix_matches_a_full_build_of_the_same_target_exactly() {
+    let base = tempfile::tempdir().unwrap();
+    // Two independent stores; identical bytes give identical blob ids,
+    // so both can manifest the same entries.
+    let mut inc_store = DiskStore::open(base.path().join("inc")).unwrap();
+    let mut full_store = DiskStore::open(base.path().join("full")).unwrap();
+
+    use crate::Store as _;
+    // Generation 1 material, stored in BOTH stores where generation 2
+    // still needs it (unchanged pkg/b).
+    let f1 = inc_store.put(b"file one\n").unwrap();
+    let f2 = inc_store.put(b"file two\n").unwrap();
+    let f3 = inc_store.put(b"file three\n").unwrap();
+    let deep = inc_store.put(b"deep content\n").unwrap();
+    let rootv1 = inc_store.put(b"root v1\n").unwrap();
+
+    let gen1 = vec![
+        SnapshotEntry::dir("pkg"),
+        SnapshotEntry::dir("pkg/sub"),
+        SnapshotEntry::dir("stale-empty"),
+        SnapshotEntry::symlink("pkg/ln", "../root.txt"),
+        SnapshotEntry::file("pkg/a", f1, 0o644),
+        SnapshotEntry::file("pkg/b", f2, 0o644),
+        SnapshotEntry::file("pkg/c", f3, 0o755),
+        SnapshotEntry::dir("doomed"),
+        SnapshotEntry::file("doomed/x", deep, 0o644),
+        SnapshotEntry::file("doomed/deeper/y", deep, 0o755),
+        SnapshotEntry::file("root.txt", rootv1, 0o644),
+        SnapshotEntry::symlink("doomed-link", "pkg/a"),
+    ];
+    assert_eq!(
+        inc_store.publish_snapshot(gen1.clone(), false).unwrap(),
+        Ok(PublishOutcome::Published)
+    );
+
+    // Generation 2 exercises EVERY mutation kind in ONE publish:
+    // file delete (pkg/a), symlink delete (doomed-link), dir delete
+    // with children (doomed), empty-dir delete (stale-empty), file add
+    // (added-dir/new), dir add (added-dir), empty-dir add
+    // (added-empty), content modify (pkg/c, root.txt), symlink
+    // retarget (pkg/ln), mode-only flip on a same-ref file (pkg/b).
+    // pkg/sub survives untouched through the bulk clone.
+    let fc = inc_store.put(b"file three EDITED\n").unwrap();
+    let fnew = inc_store.put(b"brand new\n").unwrap();
+    let rootv2 = inc_store.put(b"root v2\n").unwrap();
+    let gen2 = vec![
+        SnapshotEntry::dir("added-dir"),
+        SnapshotEntry::file("added-dir/new", fnew, 0o644),
+        SnapshotEntry::dir("added-empty"),
+        SnapshotEntry::dir("pkg"),
+        SnapshotEntry::dir("pkg/sub"),
+        SnapshotEntry::symlink("pkg/ln", "b"),
+        SnapshotEntry::file("pkg/b", f2, 0o755),
+        SnapshotEntry::file("pkg/c", fc, 0o755),
+        SnapshotEntry::file("root.txt", rootv2, 0o644),
+    ];
+
+    let gen1_manifest = Manifest::new(gen1).unwrap();
+    let gen2_manifest = Manifest::new(gen2.clone()).unwrap();
+
+    // Sanity: the diff really classifies all of these as changed.
+    let diff =
+        crate::snapdiff::SnapshotDiff::compute(&gen1_manifest.entries, &gen2_manifest.entries);
+    assert!(!diff.added.is_empty());
+    assert!(!diff.modified.is_empty());
+    assert!(!diff.deleted.is_empty());
+
+    let mut timing = SnapshotBuildTiming::default();
+    assert_eq!(
+        inc_store
             .publish_snapshot_incremental(
-                restored,
-                &old_manifest.hash,
-                &["pkg00".to_string(), "empty-dir".to_string()],
-                true,
-                None
+                gen2.clone(),
+                &gen1_manifest.hash,
+                false,
+                Some(&mut timing)
             )
             .unwrap(),
         Ok(PublishOutcome::Published)
+    );
+    assert_eq!(timing.clone_units, 1);
+
+    // Reference: a FULL build of the same target entries in the other
+    // store (same blobs there).
+    assert_eq!(
+        full_store.put(b"file two\n").unwrap(),
+        f2,
+        "deterministic blob ids make the two stores comparable"
+    );
+    for bytes in [
+        b"file three EDITED\n".as_slice(),
+        b"brand new\n".as_slice(),
+        b"root v2\n".as_slice(),
+    ] {
+        full_store.put(bytes).unwrap();
+    }
+    assert_eq!(
+        full_store.publish_snapshot(gen2, false).unwrap(),
+        Ok(PublishOutcome::Published)
+    );
+
+    let inc_tree = snapshot_tree_path(inc_store.root(), &gen2_manifest.hash);
+    let full_tree = snapshot_tree_path(full_store.root(), &gen2_manifest.hash);
+    assert_eq!(
+        tree_fingerprint(&inc_tree),
+        tree_fingerprint(&full_tree),
+        "incremental delta result must be byte/mode/symlink-exact vs the full build"
+    );
+    inc_store.flush().unwrap();
+    full_store.flush().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn scattered_changes_clone_once_and_relink_only_what_changed() {
+    let (_base, mut store) = incremental_fixture();
+    use crate::Store as _;
+
+    // A wide tree: 20 packages x 10 files.
+    let mut entries = Vec::new();
+    for p in 0..20u8 {
+        entries.push(SnapshotEntry::dir(format!("pkg{p:02}")));
+        for i in 0..10usize {
+            let blob = store
+                .put(format!("package {p} file {i}\n").as_bytes())
+                .unwrap();
+            entries.push(SnapshotEntry::file(
+                format!("pkg{p:02}/f{i:02}"),
+                blob,
+                0o644,
+            ));
+        }
+    }
+    let old_manifest = Manifest::new(entries.clone()).unwrap();
+    assert_eq!(
+        store.publish_snapshot(entries, false).unwrap(),
+        Ok(PublishOutcome::Published)
+    );
+
+    // Scattered bump: exactly three modified files, three different
+    // packages, no adds or deletes.
+    let mut new_entries = old_manifest.entries.clone();
+    for (p, i) in [(0u8, 0usize), (7, 3), (19, 9)] {
+        let rel = format!("pkg{p:02}/f{i:02}");
+        new_entries.retain(|e| e.rel != rel);
+        let blob = store
+            .put(format!("package {p} file {i} EDITED\n").as_bytes())
+            .unwrap();
+        new_entries.push(SnapshotEntry::file(rel, blob, 0o644));
+    }
+    let new_manifest = Manifest::new(new_entries).unwrap();
+
+    let mut timing = SnapshotBuildTiming::default();
+    assert_eq!(
+        store
+            .publish_snapshot_incremental(
+                new_manifest.entries.clone(),
+                &old_manifest.hash,
+                false,
+                Some(&mut timing)
+            )
+            .unwrap(),
+        Ok(PublishOutcome::Published)
+    );
+    assert_eq!(
+        timing.clone_units, 1,
+        "one whole-tree clone regardless of scatter"
+    );
+    assert_eq!(
+        timing.linked_files, 3,
+        "exactly the changed files may be freshly linked"
+    );
+    assert_eq!(
+        store.find_snapshot(&new_manifest.hash).unwrap(),
+        new_manifest
     );
     store.flush().unwrap();
 }

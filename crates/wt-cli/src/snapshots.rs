@@ -48,13 +48,15 @@ pub struct SnapshotHydration {
     pub files: usize,
     /// How this directory was served: `"hit"` (cloned an existing
     /// published snapshot), `"build"` (built + published from blobs),
-    /// or `"v2"` (incremental rebuild cloning unchanged units).
+    /// or `"v2"` (incremental rebuild off the previous snapshot's
+    /// tree).
     pub mode: &'static str,
-    /// v2 only: unchanged-subtree units copied via recursive
-    /// clonefile. Zero for hit/build.
+    /// v2 only: 1 when the rebuild cloned the previous snapshot's
+    /// whole tree with one recursive clonefile, else 0. Zero for
+    /// hit/build.
     pub cloned_units: usize,
-    /// v2 only: regular files placed by hardlink during the
-    /// incremental rebuild. Zero for hit/build.
+    /// v2 only: regular files freshly hardlinked from blobs while
+    /// applying the delta. Zero for hit/build.
     pub linked_files: usize,
     /// Step 0 instrumentation: milliseconds spent looking up a
     /// published snapshot (all attempts, hit or miss).
@@ -273,18 +275,21 @@ fn hydrate_impl(
 /// that looks cheaper than a full build.
 ///
 /// Heuristic: go incremental only when fewer than HALF of the new
-/// manifest's entries changed (`changed_count * 2 < total`). Below
-/// that line the per-unit clones dominate the cost; above it the full
-/// build's simpler single pass wins. Deliberately crude — the index
-/// gives no cheap way to know how many FILES live inside changed
-/// dirs, so entry counts stand in for bytes.
+/// manifest's entries changed (`changed_count * 2 < total`). The
+/// whole-tree clone costs roughly the same regardless of the diff, but
+/// applying a huge delta (an unlink+relink per changed entry) starts
+/// to approach full-build cost while adding clone overhead on top.
+/// Deliberately crude — entry counts stand in for bytes.
 ///
 /// Returns `Some((cloned_units, linked_files))` when an incremental
-/// rebuild published successfully (or consumed a valid winner).
-/// EVERYTHING else — no old snapshot, heuristic says no, corrupt old
-/// snapshot, missing blob, paranoid rot detected, rename lost to
-/// debris — returns `None`, handing control back to the battle-tested
-/// full build whose outcome semantics then apply unchanged.
+/// rebuild published successfully (or consumed a valid winner):
+/// `cloned_units` is 0 or 1 (the single whole-tree clone),
+/// `linked_files` counts regular files freshly hardlinked from blobs
+/// while applying the delta. EVERYTHING else — no old snapshot,
+/// heuristic says no, corrupt old snapshot, refused whole-tree clone,
+/// missing blob, paranoid rot detected, rename lost to debris —
+/// returns `None`, handing control back to the battle-tested full
+/// build whose outcome semantics then apply unchanged.
 #[cfg(target_os = "macos")]
 fn try_incremental(
     store: &mut DiskStore,
@@ -301,32 +306,17 @@ fn try_incremental(
     if total == 0 || diff.changed_count() * 2 >= total {
         return None;
     }
-    let units = SnapshotDiff::unchanged_units(&old_manifest.entries, &manifest.entries);
 
     let mut phase = SnapshotBuildTiming::default();
     match store.publish_snapshot_incremental(
         manifest.entries.clone(),
         &old_hash,
-        &units,
         paranoid,
         Some(&mut phase),
     ) {
         Ok(Ok(PublishOutcome::Published)) | Ok(Ok(PublishOutcome::WinnerValid)) => {
             *build = Some(phase);
-            // Files hardlinked = everything outside unit interiors,
-            // plus any unit whose clone fell back to per-entry links.
-            let outside_units = |rel: &str| {
-                units
-                    .iter()
-                    .all(|u| rel != u && !rel.starts_with(&format!("{u}/")))
-            };
-            let linked = manifest
-                .entries
-                .iter()
-                .filter(|e| e.kind == wt_store::EntryKind::File && outside_units(&e.rel))
-                .count()
-                + phase.fallback_linked_files;
-            Some((phase.clone_units, linked))
+            Some((phase.clone_units, phase.linked_files))
         }
         _ => None,
     }

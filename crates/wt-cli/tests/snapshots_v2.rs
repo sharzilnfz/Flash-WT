@@ -264,6 +264,14 @@ fn bump_rebuilds_incrementally_and_matches_source_exactly() {
         .map(|v| v.trim().parse::<usize>().expect("integer linked count"));
     let linked = linked.expect("snapshot-v2-linked line must be present");
 
+    // Whole-tree clone + in-place delta: exactly ONE bulk clonefile
+    // seeds the rebuild, no matter how the changes are scattered.
+    let cloned = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("wt-stage snapshot-v2-cloned="))
+        .map(|v| v.trim().parse::<usize>().expect("integer cloned count"));
+    assert_eq!(cloned, Some(1), "the whole old tree must clone as ONE unit");
+
     let total_files = count_files(&fx.heavy());
     assert!(
         linked < total_files,
