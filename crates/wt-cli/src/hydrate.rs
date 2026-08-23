@@ -38,7 +38,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use wt_copy::{placement_refused, CloneOut, FileMaterialize, HardlinkOut};
+#[cfg(target_os = "macos")]
+use wt_copy::CloneOut;
+use wt_copy::{placement_refused, FileMaterialize, HardlinkOut};
 #[cfg(target_os = "macos")]
 use wt_store::bulkwalk;
 use wt_store::{ContentId, DiskStore, Entry as CacheEntry, GcMode, Store, ValidationCache};
@@ -133,6 +135,7 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
     let walked: Option<std::convert::Infallible> = None;
 
     match walked {
+        #[cfg(target_os = "macos")]
         Some(entries) => {
             // Bulk entries are relative to `src`; every consumer (and
             // the legacy walk) speaks repo-relative paths, so prefix

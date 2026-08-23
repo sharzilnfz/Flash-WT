@@ -19,7 +19,12 @@ mod selection;
 pub use clonefile::ClonefileBackend;
 pub use deep_copy::DeepCopyBackend;
 pub use hardlink::HardlinkBackend;
+// CloneOut wraps fclonefileat(2) and only exists on macOS; other
+// platforms take the byte-copy path (see wt-cli select_strategy).
+#[cfg(target_os = "macos")]
 pub use materialize::{placement_refused, CloneOut, FileMaterialize, HardlinkOut};
+#[cfg(not(target_os = "macos"))]
+pub use materialize::{placement_refused, FileMaterialize, HardlinkOut};
 #[cfg(target_os = "linux")]
 pub use reflink::ReflinkBackend;
 pub use selection::{candidates, select_backend};

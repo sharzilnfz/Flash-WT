@@ -477,6 +477,7 @@ fn v2_entries(store: &mut DiskStore) -> Vec<SnapshotEntry> {
 /// Fingerprint a hydrated tree for exactness comparisons: every path
 /// (files, symlinks, AND dirs — empty dirs matter) as
 /// `(rel, kind, mode & 0o7777, bytes or target)`, sorted.
+#[cfg(target_os = "macos")]
 fn tree_fingerprint(dir: &Path) -> Vec<(String, char, u32, Vec<u8>)> {
     use std::os::unix::fs::PermissionsExt;
 

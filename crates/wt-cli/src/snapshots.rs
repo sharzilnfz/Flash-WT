@@ -19,22 +19,28 @@
 //! to the existing per-file ladder with `file` mirror records instead
 //! of a `snapshot` record, exactly as if the gate were off.
 
+#[cfg(target_os = "macos")]
 use std::fs;
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::time::Instant;
+
+// Used by every platform: hydrate() itself plus the Outcome payload.
+use wt_store::{ContentId, DiskStore, SnapshotBuildTiming};
 
 #[cfg(target_os = "macos")]
 use wt_copy::{ClonefileBackend, CopyBackend};
-use wt_store::{BuildError, ContentId, DiskStore, SnapshotBuildTiming};
-
 #[cfg(target_os = "macos")]
-use wt_store::{select_old_snapshot, Manifest, PublishOutcome, SnapshotDiff, SnapshotEntry};
+use wt_store::{
+    select_old_snapshot, BuildError, Manifest, PublishOutcome, SnapshotDiff, SnapshotEntry,
+};
 
 use crate::hydrate::Ingested;
 
 /// Feature gate for v2 incremental rebuilds. Requires BOTH env vars
 /// plus macOS/APFS (checked by the caller's backend probe), and any
 /// failure degrades to the plain full build.
+#[cfg(target_os = "macos")]
 pub fn v2_enabled() -> bool {
     std::env::var("WT_SNAPSHOTS").as_deref() == Ok("1")
         && std::env::var("WT_SNAPSHOTS_V2").as_deref() == Ok("1")
@@ -73,6 +79,7 @@ pub struct SnapshotHydration {
 pub enum Outcome {
     /// Hydrated via one recursive clone of a published snapshot.
     /// The caller records the hash in sidecar and mirror.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Hydrated(SnapshotHydration),
     /// The snapshot path could not serve this directory; run the
     /// existing per-file ladder instead. Carries a diagnostic when
@@ -80,6 +87,7 @@ pub enum Outcome {
     FellBack(Option<String>),
     /// Something went wrong that must NOT be silently papered over:
     /// fail the create loudly.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Failed(String),
 }
 
@@ -478,6 +486,7 @@ fn manifest_entries(ingested: &Ingested, heavy_rel: &str) -> Result<Vec<Snapshot
 /// sweep-race ENOENT by re-running put() from the source file.
 /// On success, fills `build` with the winning attempt's internal
 /// phase timings (Step 0 instrumentation).
+#[cfg(target_os = "macos")]
 fn ensure_published(
     store: &mut DiskStore,
     ingested: &Ingested,
@@ -512,6 +521,7 @@ fn ensure_published(
 
 /// Re-store the source bytes behind `blob`. Ingest recorded which
 /// source file produced each id; find it and read it fresh.
+#[cfg(target_os = "macos")]
 fn heal_blob(
     store: &mut DiskStore,
     ingested: &Ingested,

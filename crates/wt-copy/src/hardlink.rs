@@ -100,7 +100,11 @@ fn fs_supports_hardlinks(dir: &Path) -> bool {
     if unsafe { libc::statfs(c_path.as_ptr(), &mut stat) } != 0 {
         return false;
     }
-    if stat.f_flags & libc::ST_RDONLY != 0 {
+    // Linux `statfs` exposes no flags field; `statvfs::f_flag` carries
+    // the read-only bit.
+    let mut vfs = unsafe { std::mem::zeroed::<libc::statvfs>() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut vfs) } == 0 && vfs.f_flag & libc::ST_RDONLY != 0
+    {
         return false;
     }
     stat.f_type != MSDOS_SUPER_MAGIC
