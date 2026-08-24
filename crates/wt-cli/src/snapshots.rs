@@ -383,7 +383,7 @@ fn finish_clone(
 
     match backend.copy_dir(tree, dest_heavy) {
         Ok(()) => Ok(()),
-        Err(wt_copy::Error::Io(e)) if e.raw_os_error() == Some(libc::ENOENT) => {
+        Err(wt_copy::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             // Source snapshot vanished mid-flight (eviction race).
             cleanup_partial(dest_heavy, restore_empty_dir)?;
             Err(CloneFailure::SnapshotVanished)
