@@ -1,0 +1,19 @@
+name: security-audit
+
+# Weekly supply-chain check of Cargo.lock against the RustSec
+# advisory database. Weekly (not per-push) because advisories land on
+# their own schedule; run manually via workflow_dispatch too.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit

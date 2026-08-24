@@ -17,6 +17,17 @@ jobs:
       - run: cargo build --locked
       - run: cargo test --locked
 
+  clippy-macos:
+    # cfg(macos) code (clonefile, bulkwalk externs) is invisible to the
+    # Linux validate job, so lint it on a macOS runner too.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
   validate:
     # Linux validation: formatting, lints, and the test suite on one
     # runner. macOS-only tests skip themselves via #[cfg(target_os =
