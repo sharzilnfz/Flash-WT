@@ -99,10 +99,107 @@ fn failed_copy_leaves_no_new_files_in_dest() {
     assert_eq!(list_files(&dest).len(), before, "failed copy mutated dest");
 }
 
+/// Empty directories must survive the copy: real heavy trees have
+/// them (`node_modules/.bin/`, `.gitkeep`-style placeholders).
+#[test]
+fn all_backends_preserve_empty_directories() {
+    let fixture = TreeFixture::heavy_tree(2);
+    std::fs::create_dir(fixture.src.join("empty-pkg")).expect("mkdir empty");
+    std::fs::create_dir_all(fixture.src.join("a/very/deep/only-dirs")).expect("mkdir nested");
+
+    for backend in runnable_backends(fixture.src.parent().unwrap()) {
+        let dest = fixture
+            .src
+            .parent()
+            .unwrap()
+            .join(format!("dest-empty-{:?}", backend.kind()));
+        let _ = std::fs::remove_dir_all(&dest);
+
+        backend.copy_dir(&fixture.src, &dest).expect("copy_dir");
+        assert!(
+            dest.join("empty-pkg").is_dir(),
+            "{:?} lost an empty directory",
+            backend.kind()
+        );
+        assert!(
+            dest.join("a/very/deep/only-dirs").is_dir(),
+            "{:?} lost a nested directory-only chain",
+            backend.kind()
+        );
+    }
+}
+
+/// A symlink pointing at a directory inside `src` is recreated as a
+/// symlink with the same target — its subtree must not be duplicated.
+#[test]
+fn backends_recreate_symlinks_to_directories_instead_of_expanding_them() {
+    let fixture = TreeFixture::heavy_tree(3);
+    unix_symlink("pkg00/nested", &fixture.src.join("dir-link"));
+
+    for backend in runnable_backends(fixture.src.parent().unwrap()) {
+        let dest = fixture
+            .src
+            .parent()
+            .unwrap()
+            .join(format!("dest-dir-link-{:?}", backend.kind()));
+        let _ = std::fs::remove_dir_all(&dest);
+
+        backend.copy_dir(&fixture.src, &dest).expect("copy_dir");
+
+        let link = dest.join("dir-link");
+        let meta = std::fs::symlink_metadata(&link)
+            .expect("dir link must exist");
+        assert!(meta.is_symlink(), "{:?} expanded a directory symlink", backend.kind());
+        assert_eq!(
+            std::fs::read_link(&link).expect("read_link"),
+            std::path::Path::new("pkg00/nested"),
+            "{:?} retargeted the directory symlink",
+            backend.kind()
+        );
+        // A symlink at that path means the backend did not replace it
+        // with a real directory holding duplicated content.
+    }
+}
+
+/// Symlinks whose target does not exist are recreated verbatim too;
+/// nothing may try to resolve or materialize them.
+#[test]
+fn all_backends_preserve_dangling_symlinks() {
+    let fixture = TreeFixture::heavy_tree(2);
+    unix_symlink("no/such/target", &fixture.src.join("dangling.txt"));
+    // Sanity: it really dangles on this host.
+    assert!(!fixture.src.join("dangling.txt").exists());
+
+    for backend in runnable_backends(fixture.src.parent().unwrap()) {
+        let dest = fixture
+            .src
+            .parent()
+            .unwrap()
+            .join(format!("dest-dangling-{:?}", backend.kind()));
+        let _ = std::fs::remove_dir_all(&dest);
+
+        backend.copy_dir(&fixture.src, &dest).expect("copy_dir");
+
+        let meta = std::fs::symlink_metadata(dest.join("dangling.txt"))
+            .expect("dangling symlink must be recreated");
+        assert!(meta.is_symlink(), "{:?} materialized a dangling symlink", backend.kind());
+        assert_eq!(
+            std::fs::read_link(dest.join("dangling.txt")).expect("read_link"),
+            std::path::Path::new("no/such/target"),
+            "{:?} rewrote a dangling symlink's target",
+            backend.kind()
+        );
+    }
+}
+
 /// Acceptance: clonefile clones a thousand-file directory in well
 /// under a second on APFS.
+///
+/// Ignored by default: wall-clock acceptance, flaky on loaded CI
+/// machines. Run explicitly with `cargo test -p wt-copy -- --ignored`.
 #[cfg(target_os = "macos")]
 #[test]
+#[ignore = "wall-clock acceptance; run with --ignored on a quiet machine"]
 fn clonefile_clones_a_thousand_file_directory_well_under_a_second() {
     use wt_copy::ClonefileBackend;
 
@@ -130,8 +227,12 @@ fn clonefile_clones_a_thousand_file_directory_well_under_a_second() {
 
 /// Acceptance: reflink passes the same shape of test on a supporting
 /// Linux filesystem (btrfs/XFS). Skipped elsewhere, including tmpfs.
+///
+/// Ignored by default: wall-clock acceptance. Run explicitly with
+/// `cargo test -p wt-copy -- --ignored`.
 #[cfg(target_os = "linux")]
 #[test]
+#[ignore = "wall-clock acceptance; run with --ignored on a quiet machine"]
 fn reflink_copies_on_a_supporting_linux_filesystem() {
     use wt_copy::ReflinkBackend;
 
