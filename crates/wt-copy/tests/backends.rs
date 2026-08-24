@@ -147,9 +147,12 @@ fn backends_recreate_symlinks_to_directories_instead_of_expanding_them() {
         backend.copy_dir(&fixture.src, &dest).expect("copy_dir");
 
         let link = dest.join("dir-link");
-        let meta = std::fs::symlink_metadata(&link)
-            .expect("dir link must exist");
-        assert!(meta.is_symlink(), "{:?} expanded a directory symlink", backend.kind());
+        let meta = std::fs::symlink_metadata(&link).expect("dir link must exist");
+        assert!(
+            meta.is_symlink(),
+            "{:?} expanded a directory symlink",
+            backend.kind()
+        );
         assert_eq!(
             std::fs::read_link(&link).expect("read_link"),
             std::path::Path::new("pkg00/nested"),
@@ -182,7 +185,11 @@ fn all_backends_preserve_dangling_symlinks() {
 
         let meta = std::fs::symlink_metadata(dest.join("dangling.txt"))
             .expect("dangling symlink must be recreated");
-        assert!(meta.is_symlink(), "{:?} materialized a dangling symlink", backend.kind());
+        assert!(
+            meta.is_symlink(),
+            "{:?} materialized a dangling symlink",
+            backend.kind()
+        );
         assert_eq!(
             std::fs::read_link(dest.join("dangling.txt")).expect("read_link"),
             std::path::Path::new("no/such/target"),
@@ -334,7 +341,10 @@ fn selection_picks_the_best_available_backend() {
     // both policies yield deep copy rather than panicking.
     let nowhere = Path::new("/definitely/not/here");
     for policy in [SourcePolicy::Immutable, SourcePolicy::Any] {
-        assert_eq!(select_backend(nowhere, policy).kind(), BackendKind::DeepCopy);
+        assert_eq!(
+            select_backend(nowhere, policy).kind(),
+            BackendKind::DeepCopy
+        );
     }
 }
 

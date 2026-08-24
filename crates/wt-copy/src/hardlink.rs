@@ -97,9 +97,7 @@ fn fs_supports_hardlinks(dir: &Path) -> bool {
     if matches!(crate::sys::read_only(dir), Ok(true)) {
         return false;
     }
-    st.f_type != MSDOS_SUPER_MAGIC
-        && st.f_type != CIFS_MAGIC_NUMBER
-        && st.f_type != SMB_SUPER_MAGIC
+    st.f_type != MSDOS_SUPER_MAGIC && st.f_type != CIFS_MAGIC_NUMBER && st.f_type != SMB_SUPER_MAGIC
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]

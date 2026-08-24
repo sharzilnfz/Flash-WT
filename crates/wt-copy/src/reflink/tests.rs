@@ -60,7 +60,11 @@ fn reflink_preserves_the_source_mode_exactly() {
     for (name, want) in [("script.sh", 0o755), ("secret.txt", 0o600)] {
         // Compare the full low byte, umask damage included.
         assert_eq!(
-            fs::metadata(dest.join(name)).expect("meta").permissions().mode() & 0o7777,
+            fs::metadata(dest.join(name))
+                .expect("meta")
+                .permissions()
+                .mode()
+                & 0o7777,
             want,
             "{name} must keep its exact mode after FICLONE"
         );

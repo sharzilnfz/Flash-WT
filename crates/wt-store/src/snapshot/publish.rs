@@ -175,9 +175,13 @@ impl DiskStore {
         entries: Vec<SnapshotEntry>,
         paranoid: bool,
     ) -> Result<PublishReceipt, BuildError> {
-        self.stage_and_publish(entries, StageSeed::FreshTree, &mut |tree_dir, manifest, timing| {
-            self.fill_full_tree(tree_dir, manifest, paranoid, timing)
-        })
+        self.stage_and_publish(
+            entries,
+            StageSeed::FreshTree,
+            &mut |tree_dir, manifest, timing| {
+                self.fill_full_tree(tree_dir, manifest, paranoid, timing)
+            },
+        )
     }
 
     /// The full-build delta: place every manifest entry from blobs.
@@ -272,9 +276,13 @@ impl DiskStore {
         old_hash: &ContentId,
         paranoid: bool,
     ) -> Result<PublishReceipt, BuildError> {
-        self.stage_and_publish(entries, StageSeed::CloneTree, &mut |tree_dir, manifest, timing| {
-            self.fill_incremental_tree(tree_dir, manifest, old_hash, paranoid, timing)
-        })
+        self.stage_and_publish(
+            entries,
+            StageSeed::CloneTree,
+            &mut |tree_dir, manifest, timing| {
+                self.fill_incremental_tree(tree_dir, manifest, old_hash, paranoid, timing)
+            },
+        )
     }
 
     /// The v2 delta application, run against an already-cloned or
@@ -423,7 +431,11 @@ impl DiskStore {
         &self,
         entries: Vec<SnapshotEntry>,
         seed: StageSeed,
-        fill_tree: &mut dyn FnMut(&Path, &Manifest, &mut SnapshotBuildTiming) -> Result<(), BuildError>,
+        fill_tree: &mut dyn FnMut(
+            &Path,
+            &Manifest,
+            &mut SnapshotBuildTiming,
+        ) -> Result<(), BuildError>,
     ) -> Result<PublishReceipt, BuildError> {
         let mut timing = SnapshotBuildTiming::default();
 

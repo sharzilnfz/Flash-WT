@@ -1,7 +1,7 @@
 //! Snapshot manifest and publish tests (fast-hydration ticket 08).
 
-use super::*;
 use super::manifest::{serialize_entries, DIR_MODE, EXEC_FILE_MODE, PLAIN_FILE_MODE};
+use super::*;
 use sha2::{Digest as _, Sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -663,8 +663,7 @@ fn unusable_old_snapshot_aborts_the_incremental_attempt() {
     // fallback anymore — the whole attempt aborts and the CALLER is
     // responsible for the full build.
     let ghost = ContentId([0xAA; 32]);
-    let result =
-        store.publish_snapshot_incremental_with_timing(entries, &ghost, false);
+    let result = store.publish_snapshot_incremental_with_timing(entries, &ghost, false);
     assert!(
         matches!(result, Err(BuildError::Fatal(_))),
         "a refused whole-tree clone must abort the attempt"
@@ -945,10 +944,7 @@ fn scattered_changes_clone_once_and_relink_only_what_changed() {
             false,
         )
         .unwrap();
-    assert_eq!(
-        receipt.outcome,
-        PublishOutcome::Published
-    );
+    assert_eq!(receipt.outcome, PublishOutcome::Published);
     assert_eq!(
         receipt.timing.clone_units, 1,
         "one whole-tree clone regardless of scatter"

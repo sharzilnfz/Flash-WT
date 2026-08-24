@@ -210,10 +210,7 @@ mod tests {
             assert!(result.is_err(), "{:?} should have failed", backend.kind());
             assert!(!dest.exists(), "{:?} left a dest behind", backend.kind());
             assert!(
-                !dest
-                    .parent()
-                    .map(staging_leftovers_for)
-                    .unwrap_or_default(),
+                !dest.parent().map(staging_leftovers_for).unwrap_or_default(),
                 "{:?} left staging leftovers",
                 backend.kind()
             );
