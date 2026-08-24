@@ -35,16 +35,8 @@ use wt_store::{
     select_old_snapshot, BuildError, Manifest, PublishOutcome, SnapshotDiff, SnapshotEntry,
 };
 
+use crate::config::RunConfig;
 use crate::hydrate::Ingested;
-
-/// Feature gate for v2 incremental rebuilds. Requires BOTH env vars
-/// plus macOS/APFS (checked by the caller's backend probe), and any
-/// failure degrades to the plain full build.
-#[cfg(target_os = "macos")]
-pub fn v2_enabled() -> bool {
-    std::env::var("WT_SNAPSHOTS").as_deref() == Ok("1")
-        && std::env::var("WT_SNAPSHOTS_V2").as_deref() == Ok("1")
-}
 
 /// One heavy directory hydrated through the fast path.
 pub struct SnapshotHydration {
@@ -97,7 +89,9 @@ pub enum Outcome {
 /// repo-relative heavy directory name ("heavy" in `heavy/pkg/x`).
 /// `repo_root` and `pattern` key the v2 selection index (the first
 /// `.wtinclude` pattern that matched this directory is fine; the key
-/// only needs to be stable across runs).
+/// only needs to be stable across runs). `cfg.verify` bypasses hits;
+/// v2 incremental rebuilds additionally require `cfg.snapshots` and
+/// `cfg.v2`.
 #[allow(clippy::too_many_arguments)]
 pub fn hydrate(
     store: &mut DiskStore,
@@ -107,18 +101,18 @@ pub fn hydrate(
     src_root: &Path,
     heavy_rel: &str,
     dest_root: &Path,
-    paranoid: bool,
+    cfg: &RunConfig,
 ) -> Outcome {
     #[cfg(target_os = "macos")]
     {
         hydrate_impl(
-            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root, paranoid,
+            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root, cfg,
         )
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (
-            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root, paranoid,
+            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root, cfg,
         );
         // Linux v1: no recursive-clone primitive, so whole-directory
         // snapshots stay a macOS feature. The gate is a no-op.
@@ -136,15 +130,16 @@ fn hydrate_impl(
     src_root: &Path,
     heavy_rel: &str,
     dest_root: &Path,
-    paranoid: bool,
+    cfg: &RunConfig,
 ) -> Outcome {
+    let paranoid = cfg.verify;
     let backend = ClonefileBackend;
     // Gate is a no-op on filesystems without recursive clone support.
     if !backend.supports(dest_root) {
         return Outcome::FellBack(None);
     }
     // v2 needs the same APFS substrate PLUS its own env gate.
-    let v2 = v2_enabled();
+    let v2 = cfg.snapshots && cfg.v2;
     let repo_key = repo_root.to_string_lossy().into_owned();
 
     let entries = match manifest_entries(ingested, heavy_rel) {

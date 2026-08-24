@@ -7,15 +7,16 @@ pub mod remove;
 pub mod sweep;
 
 use crate::cli::{StoreAction, WtCommand};
+use crate::config::RunConfig;
 use crate::error::Result;
 
-pub fn run(command: WtCommand) -> Result<()> {
+pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<()> {
     match command {
         WtCommand::Create {
             name,
             manifest,
             dir,
-        } => create::run(&name, manifest.as_deref(), dir.as_deref()),
+        } => create::run(&name, manifest.as_deref(), dir.as_deref(), cfg),
         WtCommand::Remove { name, dir } => remove::run(&name, dir.as_deref()),
         WtCommand::Sweep { age } => sweep::run(age),
         WtCommand::Store { action } => match action {

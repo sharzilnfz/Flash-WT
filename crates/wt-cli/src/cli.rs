@@ -39,7 +39,8 @@ first write. Filesystems that refuse clones fall back to plain byte copies.
 WT_HARDLINK=1 opts into EXPERIMENTAL hardlinked materialization for maximum
 space sharing: linked files share the store's inode, which must be made
 read-only, so tools that rewrite hydrated files in place fail loudly with
-permission errors. WT_NO_HARDLINK=1 forces byte copies instead.
+permission errors. WT_NO_HARDLINK forces plain byte copies instead. For all
+wt flags: set to 0 to disable, to anything else (including 1) to enable.
 
 Blobs are hash-verified once and then trusted while their size and mtime
 stay unchanged (a verified-blob ledger beside the store tracks this);

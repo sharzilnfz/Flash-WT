@@ -5,6 +5,7 @@
 
 mod cli;
 mod commands;
+mod config;
 mod error;
 mod gc;
 mod gitops;
@@ -16,10 +17,14 @@ mod timing;
 use clap::Parser;
 
 use cli::Cli;
+use config::RunConfig;
 
 fn main() {
     let command = Cli::parse().command;
-    if let Err(e) = commands::run(command) {
+    // Env policy is parsed exactly once, here, and threaded through
+    // the machinery as data.
+    let cfg = RunConfig::from_env();
+    if let Err(e) = commands::run(command, &cfg) {
         eprintln!("wt: {e}");
         // Usage mistakes exit 2 like clap's own parse errors; every
         // other failure exits 1.

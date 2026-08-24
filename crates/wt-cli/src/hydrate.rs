@@ -44,6 +44,7 @@ use wt_copy::{placement_refused, FileMaterialize, HardlinkOut};
 use wt_store::bulkwalk;
 use wt_store::{ContentId, DiskStore, Entry as CacheEntry, GcMode, Store, ValidationCache};
 
+use crate::config::{RunConfig, StrategyPolicy};
 use crate::error::{Error, Result};
 use crate::gitops;
 
@@ -88,14 +89,6 @@ pub struct Ingested {
     pub modes: BTreeMap<String, u32>,
 }
 
-/// Ticket 08 feature gate: `WT_SNAPSHOTS=1` enables whole-directory
-/// snapshots. Anything else — including unset — keeps the existing
-/// per-file materialization. Default stays OFF until parity and
-/// benchmark gates pass (ADR-0005).
-pub fn snapshots_enabled() -> bool {
-    std::env::var("WT_SNAPSHOTS").as_deref() == Ok("1")
-}
-
 /// Walk `src`, storing every regular file's bytes. Symlinks are never
 /// followed out of `src`; with the snapshot gate off they are skipped
 /// for now rather than misinterpreted (matching the copy-backend
@@ -112,8 +105,13 @@ pub fn snapshots_enabled() -> bool {
 /// never wronger: materialize proves every blob before placing it
 /// (`ensure_verified`, ticket 05), so lying cached metadata fails
 /// loudly instead of landing bad bytes in a fresh tree.
-pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<Ingested> {
-    let snapshots = snapshots_enabled();
+pub fn ingest_dir(
+    store: &mut DiskStore,
+    src_root: &Path,
+    src: &Path,
+    cfg: &RunConfig,
+) -> Result<Ingested> {
+    let snapshots = cfg.snapshots;
     let mut ingested = Ingested {
         dirs: Vec::new(),
         files: BTreeMap::new(),
@@ -332,29 +330,29 @@ pub struct MaterializeReport {
     pub place_ms: u128,
 }
 
-/// Which placement strategy this run uses, from the environment:
+/// Which placement strategy this run uses, from the startup policy:
 ///
-/// - `WT_NO_HARDLINK` present: forced byte copies (the escape hatch).
-///   Kept for compatibility with the ticket 07 flag.
-/// - `WT_HARDLINK=1`: experimental hardlinked materialization —
-///   maximum space sharing, but linked inodes are made read-only, so
-///   tools that rewrite files in place fail loudly.
-/// - otherwise: per-file CoW clones on macOS; byte copies elsewhere
+/// - `ForceByteCopy` (`WT_NO_HARDLINK` on): forced byte copies (the
+///   escape hatch). Kept for compatibility with the ticket 07 flag.
+/// - `Hardlink` (`WT_HARDLINK` on): experimental hardlinked
+///   materialization — maximum space sharing, but linked inodes are
+///   made read-only, so tools that rewrite files in place fail loudly.
+/// - `Default`: per-file CoW clones on macOS; byte copies elsewhere
 ///   until Linux reflink is validated for store materialization.
-fn select_strategy() -> Option<Box<dyn FileMaterialize>> {
-    if std::env::var_os("WT_NO_HARDLINK").is_some() {
-        return None;
-    }
-    if std::env::var_os("WT_HARDLINK").is_some() {
-        return Some(Box::new(HardlinkOut));
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Some(Box::new(CloneOut))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
+fn select_strategy(policy: StrategyPolicy) -> Option<Box<dyn FileMaterialize>> {
+    match policy {
+        StrategyPolicy::ForceByteCopy => None,
+        StrategyPolicy::Hardlink => Some(Box::new(HardlinkOut)),
+        StrategyPolicy::Default => {
+            #[cfg(target_os = "macos")]
+            {
+                Some(Box::new(CloneOut))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                None
+            }
+        }
     }
 }
 
@@ -362,8 +360,7 @@ fn select_strategy() -> Option<Box<dyn FileMaterialize>> {
 ///
 /// Per file: verify first, and only then place anything — a corrupt
 /// blob never lands in a fresh tree. Verification is
-/// `Store::get`'s read-and-hash when `WT_VERIFY` is set (env policy
-/// lives in the CLI layer, like `select_strategy`), and
+/// `Store::get`'s read-and-hash when `RunConfig::verify` is set, and
 /// `DiskStore::ensure_verified` otherwise: a blob whose verified
 /// ledger fingerprint still matches its stat is trusted without
 /// reading a byte; everything else is hashed once and remembered.
@@ -380,9 +377,10 @@ pub fn materialize(
     store: &DiskStore,
     ingested: &Ingested,
     dest_root: &Path,
+    cfg: &RunConfig,
 ) -> Result<MaterializeReport> {
-    let backend = select_strategy();
-    let paranoid = std::env::var_os("WT_VERIFY").is_some();
+    let backend = select_strategy(cfg.strategy_policy);
+    let paranoid = cfg.verify;
     let mut copied = 0usize;
     let mut verify_ms = 0u128;
     let mut place_ms = 0u128;

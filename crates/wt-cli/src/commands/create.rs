@@ -8,22 +8,28 @@ use std::time::Instant;
 
 use wt_store::{ContentId, DiskStore};
 
+use crate::config::{RunConfig, StrategyPolicy};
 use crate::error::{Error, Result};
 use crate::gitops;
 use crate::hydrate::{
     claim_references, claim_snapshot_references, ingest_dir, materialize, open_store,
-    publish_mirror, snapshots_enabled, Ingested, MaterializeReport,
+    publish_mirror, Ingested, MaterializeReport,
 };
 use crate::manifest::{self, collect_matches, load_patterns, pattern_matches, LoadedPatterns};
 use crate::snapshots;
 use crate::snapshots::Outcome as SnapshotOutcome;
 use crate::timing::StageTimings;
 
-pub fn run(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<()> {
-    create(name, manifest, dir)
+pub fn run(
+    name: &str,
+    manifest: Option<&Path>,
+    dir: Option<&Path>,
+    cfg: &RunConfig,
+) -> Result<()> {
+    create(name, manifest, dir, cfg)
 }
 
-fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<()> {
+fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>, cfg: &RunConfig) -> Result<()> {
     let root = gitops::repo_root()?;
     let dest = match dir {
         Some(d) => d.to_path_buf(),
@@ -33,7 +39,7 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<()>
         return Err(Error::Usage(format!("{} already exists", dest.display())));
     }
 
-    let timing_enabled = std::env::var_os("WT_TIMING").is_some();
+    let timing_enabled = cfg.timing;
     let mut timings = StageTimings::new();
     let started = Instant::now();
     // Prefer creating the branch from HEAD; an existing branch falls
@@ -69,8 +75,6 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<()>
     }
 
     let mut store = open_store()?;
-    let paranoid = std::env::var_os("WT_VERIFY").is_some();
-    let snapshot_gate = snapshots_enabled();
     let mut total_files = 0usize;
     let mut total_copied = 0usize;
     let mut strategy = "byte-copy";
@@ -86,7 +90,7 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<()>
     let mut snapshot_hashes: Vec<ContentId> = Vec::new();
     let mut git_dir = dest.clone(); // replaced by claim_references
     for rel in &dirs {
-        let outcome = hydrate_one_dir(&mut store, &patterns, &root, &dest, rel, paranoid, snapshot_gate, &mut timings)?;
+        let outcome = hydrate_one_dir(&mut store, &patterns, &root, &dest, rel, cfg, &mut timings)?;
         git_dir = outcome.git_dir;
         if let Some(hash) = outcome.snapshot_hash {
             snapshot_hashes.push(hash);
@@ -113,7 +117,7 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<()>
     timings.references_ms += stage.elapsed().as_millis();
 
     // Say plainly what happened to shared content.
-    if std::env::var_os("WT_NO_HARDLINK").is_some() {
+    if cfg.strategy_policy == StrategyPolicy::ForceByteCopy {
         println!(
             "hardlink mode off (WT_NO_HARDLINK): wrote byte copies for all {total_files} file(s)"
         );
@@ -171,24 +175,22 @@ struct DirOutcome {
 /// when engaged and able, otherwise the per-file ladder (verify +
 /// place). Stage timings and the per-directory progress line are this
 /// function's side effects.
-#[allow(clippy::too_many_arguments)]
 fn hydrate_one_dir(
     store: &mut DiskStore,
     patterns: &[String],
     root: &Path,
     dest: &Path,
     rel: &Path,
-    paranoid: bool,
-    snapshot_gate: bool,
+    cfg: &RunConfig,
     timings: &mut StageTimings,
 ) -> Result<DirOutcome> {
     let src = root.join(rel);
     let stage = Instant::now();
-    let ingested = ingest_dir(store, root, &src)?;
+    let ingested = ingest_dir(store, root, &src, cfg)?;
     timings.ingest_ms += stage.elapsed().as_millis();
     let heavy = rel.to_string_lossy().into_owned();
 
-    if snapshot_gate {
+    if cfg.snapshots {
         let stage = Instant::now();
         // v2 selection-index key: the first manifest pattern that
         // matched this heavy directory. Only stability across runs
@@ -198,9 +200,7 @@ fn hydrate_one_dir(
             .find(|p| pattern_matches(p, rel))
             .map(String::as_str)
             .unwrap_or("");
-        match snapshots::hydrate(
-            store, &ingested, root, pattern, &src, &heavy, dest, paranoid,
-        ) {
+        match snapshots::hydrate(store, &ingested, root, pattern, &src, &heavy, dest, cfg) {
             SnapshotOutcome::Hydrated(h) => {
                 timings.snapshot_ms += stage.elapsed().as_millis();
                 timings.snapshot_engaged = true;
@@ -253,7 +253,7 @@ fn hydrate_one_dir(
     // Ingested paths are repo-relative (they include the heavy
     // directory itself), so materialize against the worktree root.
     let stage = Instant::now();
-    let report = materialize(store, &ingested, dest)
+    let report = materialize(store, &ingested, dest, cfg)
         .map_err(|e| Error::Store(format!("hydration of {} failed: {e}", rel.display())))?;
     timings.materialize_ms += stage.elapsed().as_millis();
     timings.verify_ms += report.verify_ms;
