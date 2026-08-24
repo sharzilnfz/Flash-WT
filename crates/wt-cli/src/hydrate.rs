@@ -44,28 +44,31 @@ use wt_copy::{placement_refused, FileMaterialize, HardlinkOut};
 use wt_store::bulkwalk;
 use wt_store::{ContentId, DiskStore, Entry as CacheEntry, GcMode, Store, ValidationCache};
 
+use crate::error::{Error, Result};
 use crate::gitops;
 
 /// Where the per-machine store lives. `$WT_STORE` wins (tests use it
 /// for isolation); otherwise XDG cache conventions.
-fn store_dir() -> Result<PathBuf, String> {
+fn store_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("WT_STORE") {
         return Ok(PathBuf::from(dir));
     }
     let base = match std::env::var_os("XDG_CACHE_HOME") {
         Some(xdg) => PathBuf::from(xdg),
         None => {
-            let home =
-                std::env::var_os("HOME").ok_or("cannot locate a home directory for the store")?;
+            let home = std::env::var_os("HOME").ok_or_else(|| {
+                Error::Usage("cannot locate a home directory for the store".into())
+            })?;
             PathBuf::from(home).join(".cache")
         }
     };
     Ok(base.join("wt").join("store"))
 }
 
-pub fn open_store() -> Result<DiskStore, String> {
+pub fn open_store() -> Result<DiskStore> {
     let dir = store_dir()?;
-    DiskStore::open(&dir).map_err(|e| format!("cannot open store at {}: {e}", dir.display()))
+    DiskStore::open(&dir)
+        .map_err(|e| Error::Store(format!("cannot open store at {}: {e}", dir.display())))
 }
 
 /// Everything one heavy directory contributed to the store.
@@ -109,7 +112,7 @@ pub fn snapshots_enabled() -> bool {
 /// never wronger: materialize proves every blob before placing it
 /// (`ensure_verified`, ticket 05), so lying cached metadata fails
 /// loudly instead of landing bad bytes in a fresh tree.
-pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<Ingested, String> {
+pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<Ingested> {
     let snapshots = snapshots_enabled();
     let mut ingested = Ingested {
         dirs: Vec::new(),
@@ -141,7 +144,7 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
             // Bulk entries are relative to `src`; every consumer (and
             // the legacy walk) speaks repo-relative paths, so prefix
             // with the heavy directory's own repo-relative name.
-            let base = rel_text(src_root, src);
+            let base = rel_text(src_root, src)?;
             ingested.dirs.push(base.clone());
             for entry in entries {
                 let rel = if base.is_empty() {
@@ -152,7 +155,7 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
                 let path = src.join(&entry.rel_path);
                 if entry.is_symlink {
                     let target = fs::read_link(&path)
-                        .map_err(|e| format!("cannot read symlink {}: {e}", path.display()))?;
+                        .map_err(|e| Error::io("read symlink", &path, e))?;
                     ingested
                         .symlinks
                         .insert(rel.clone(), target.to_string_lossy().into_owned());
@@ -164,10 +167,10 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
                 }
                 if !entry.is_file {
                     if snapshots {
-                        return Err(format!(
+                        return Err(Error::Store(format!(
                             "{} is not a regular file (fifos/sockets/devices are unsupported)",
                             path.display()
-                        ));
+                        )));
                     }
                     continue;
                 }
@@ -180,8 +183,8 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
                     Some(id) if store.contains(&id) => id,
                     _ => {
                         let bytes = fs::read(&path)
-                            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-                        let id = store.put(&bytes).map_err(|e| e.to_string())?;
+                            .map_err(|e| Error::io("read", &path, e))?;
+                        let id = store.put(&bytes)?;
                         cache.record(
                             rel.clone(),
                             CacheEntry {
@@ -203,7 +206,7 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
     ingested.dirs.dedup();
     cache
         .save()
-        .map_err(|e| format!("cannot update ingest cache: {e}"))?;
+        .map_err(|e| Error::io_unanchored("update ingest cache", store.root(), e))?;
     Ok(ingested)
 }
 
@@ -217,17 +220,17 @@ fn ingest_dir_walk(
     src_root: &Path,
     src: &Path,
     snapshots: bool,
-) -> Result<(), String> {
+) -> Result<()> {
     let mut stack = vec![src.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries =
-            fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
-        ingested.dirs.push(rel_text(src_root, &dir));
+            fs::read_dir(&dir).map_err(|e| Error::io("read", &dir, e))?;
+        ingested.dirs.push(rel_text(src_root, &dir)?);
         for entry in entries.flatten() {
             let path = entry.path();
             let file_type = entry
                 .file_type()
-                .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+                .map_err(|e| Error::io("stat", &path, e))?;
             if file_type.is_symlink() {
                 // Ticket 08: with snapshots on, symlinks are recorded
                 // faithfully in the manifest (target only — targets are
@@ -235,9 +238,9 @@ fn ingest_dir_walk(
                 // standing skip applies unchanged.
                 if snapshots {
                     let target = fs::read_link(&path)
-                        .map_err(|e| format!("cannot read symlink {}: {e}", path.display()))?;
+                        .map_err(|e| Error::io("read symlink", &path, e))?;
                     ingested.symlinks.insert(
-                        rel_text(src_root, &path),
+                        rel_text(src_root, &path)?,
                         target.to_string_lossy().into_owned(),
                     );
                 }
@@ -252,23 +255,23 @@ fn ingest_dir_walk(
                 // fail loudly before placement rather than silently
                 // dropping content the manifest cannot represent.
                 if snapshots {
-                    return Err(format!(
+                    return Err(Error::Store(format!(
                         "{} is not a regular file (fifos/sockets/devices are unsupported)",
                         path.display()
-                    ));
+                    )));
                 }
                 continue;
             }
-            let rel = rel_text(src_root, &path);
+            let rel = rel_text(src_root, &path)?;
             let meta =
-                fs::metadata(&path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+                fs::metadata(&path).map_err(|e| Error::io("stat", &path, e))?;
             if snapshots {
                 ingested.modes.insert(rel.clone(), meta.mode() & 0o7777);
             }
             let size = meta.len();
             let mtime = meta
                 .modified()
-                .map_err(|e| format!("cannot stat {}: {e}", rel))?;
+                .map_err(|e| Error::io("stat", &rel, e))?;
             let id = match cache.lookup(&rel, size, mtime) {
                 // Cache hit: same size and same mtime as last time.
                 // Trust it only while the blob is actually still here.
@@ -276,8 +279,8 @@ fn ingest_dir_walk(
                 _ => {
                     // Miss (or a swept blob): pay for read and hash.
                     let bytes = fs::read(&path)
-                        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-                    let id = store.put(&bytes).map_err(|e| e.to_string())?;
+                        .map_err(|e| Error::io("read", &path, e))?;
+                    let id = store.put(&bytes)?;
                     // An mtime before the epoch cannot round-trip
                     // through the cache format; skip caching rather
                     // than fail, so such a file just stays cold.
@@ -293,11 +296,17 @@ fn ingest_dir_walk(
     Ok(())
 }
 
-fn rel_text(root: &Path, path: &Path) -> String {
+/// Repo-relative text of `path` under `root`, or a loud error when a
+/// pattern somehow matched outside the ingestion root.
+fn rel_text(root: &Path, path: &Path) -> Result<String> {
     path.strip_prefix(root)
-        .expect("path under ingestion root")
-        .to_string_lossy()
-        .into_owned()
+        .map_err(|_| {
+            Error::Store(format!(
+                "pattern matched path outside repository root: {}",
+                path.display()
+            ))
+        })
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Outcome of materializing one heavy directory.
@@ -371,7 +380,7 @@ pub fn materialize(
     store: &DiskStore,
     ingested: &Ingested,
     dest_root: &Path,
-) -> Result<MaterializeReport, String> {
+) -> Result<MaterializeReport> {
     let backend = select_strategy();
     let paranoid = std::env::var_os("WT_VERIFY").is_some();
     let mut copied = 0usize;
@@ -379,7 +388,7 @@ pub fn materialize(
     let mut place_ms = 0u128;
     for rel in &ingested.dirs {
         fs::create_dir_all(dest_root.join(rel))
-            .map_err(|e| format!("cannot prepare {}: {e}", dest_root.join(rel).display()))?;
+            .map_err(|e| Error::io("prepare", dest_root.join(rel), e))?;
     }
     for (rel, id) in &ingested.files {
         // Hash verification happens here, before any placement: with
@@ -392,13 +401,13 @@ pub fn materialize(
             let stage = Instant::now();
             store
                 .get(id)
-                .map_err(|e| format!("materialize {rel}: {e}"))?;
+                .map_err(|e| Error::Store(format!("materialize {rel}: {e}")))?;
             verify_ms += stage.elapsed().as_millis();
         } else {
             let stage = Instant::now();
             store
                 .ensure_verified(id)
-                .map_err(|e| format!("materialize {rel}: {e}"))?;
+                .map_err(|e| Error::Store(format!("materialize {rel}: {e}")))?;
             verify_ms += stage.elapsed().as_millis();
         }
         let src = store.blob_path(id);
@@ -415,16 +424,18 @@ pub fn materialize(
                 // land here. Recreate the parent once and retry.
                 let parent = dest
                     .parent()
-                    .ok_or_else(|| format!("{rel} has no parent"))?;
+                    .ok_or_else(|| Error::Store(format!("{rel} has no parent")))?;
                 fs::create_dir_all(parent)
-                    .map_err(|e| format!("cannot prepare {}: {e}", parent.display()))?;
+                    .map_err(|e| Error::io("prepare", parent, e))?;
                 match place(backend.as_deref(), &src, &dest) {
                     Ok(true) => {}
                     Ok(false) => copied += 1,
-                    Err(e) => return Err(format!("materialize {rel}: {e}")),
+                    Err(e) => {
+                        return Err(Error::Store(format!("materialize {rel}: {e}")))
+                    }
                 }
             }
-            Err(e) => return Err(format!("materialize {rel}: {e}")),
+            Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
         }
         place_ms += stage.elapsed().as_millis();
     }
@@ -461,7 +472,7 @@ fn place(backend: Option<&dyn FileMaterialize>, src: &Path, dest: &Path) -> std:
 // real failure.
 
 /// Resolve the (absolute) git dir of a freshly created worktree.
-fn worktree_git_dir(worktree: &Path) -> Result<PathBuf, String> {
+fn worktree_git_dir(worktree: &Path) -> Result<PathBuf> {
     gitops::git_dir(worktree)
 }
 
@@ -476,11 +487,11 @@ pub fn claim_references(
     store: &mut DiskStore,
     worktree: &Path,
     ingested: &Ingested,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf> {
     let distinct: BTreeSet<&ContentId> = ingested.files.values().collect();
     if store.gc_mode() != GcMode::MarkSweepNoRefs {
         for id in &distinct {
-            store.add_ref(id).map_err(|e| e.to_string())?;
+            store.add_ref(id)?;
         }
     }
 
@@ -489,17 +500,18 @@ pub fn claim_references(
         .create(true)
         .append(true)
         .open(git_dir.join("wt-hydrated.tsv"))
-        .map_err(|e| format!("cannot open hydration ledger: {e}"))?;
+        .map_err(|e| Error::io_unanchored("open hydration ledger", git_dir.join("wt-hydrated.tsv"), e))?;
     // 40k one-line writes through an unbuffered handle cost 40k
     // write(2) syscalls; a BufWriter turns that into a handful of
     // large ones.
     let mut sidecar = io::BufWriter::with_capacity(128 * 1024, sidecar_file);
     for (rel, id) in &ingested.files {
-        writeln!(sidecar, "{rel}\t{id}").map_err(|e| format!("cannot write ledger: {e}"))?;
+        writeln!(sidecar, "{rel}\t{id}")
+            .map_err(|e| Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e))?;
     }
     sidecar
         .flush()
-        .map_err(|e| format!("cannot write ledger: {e}"))?;
+        .map_err(|e| Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e))?;
     Ok(git_dir)
 }
 
@@ -515,12 +527,12 @@ pub fn publish_mirror(
     git_dir: &Path,
     ingested: &Ingested,
     snapshots: &[ContentId],
-) -> Result<(), String> {
+) -> Result<()> {
     let distinct: BTreeSet<&ContentId> = ingested.files.values().collect();
     store
         .publish_worktree_mirror(worktree, git_dir, distinct, snapshots.iter())
         .map(|_| ())
-        .map_err(|e| format!("cannot publish worktree mirror: {e}"))
+        .map_err(|e| Error::Store(format!("cannot publish worktree mirror: {e}")))
 }
 
 /// Ticket 08: give a snapshot-hydrated worktree its bookkeeping.
@@ -543,13 +555,13 @@ pub fn claim_snapshot_references(
     worktree: &Path,
     ingested: &Ingested,
     snapshot: ContentId,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf> {
     use wt_store::Store as _;
 
     let distinct: BTreeSet<&ContentId> = ingested.files.values().collect();
     if store.gc_mode() != GcMode::MarkSweepNoRefs {
         for id in &distinct {
-            store.add_ref(id).map_err(|e| e.to_string())?;
+            store.add_ref(id)?;
         }
     }
 
@@ -558,16 +570,17 @@ pub fn claim_snapshot_references(
         .create(true)
         .append(true)
         .open(git_dir.join("wt-hydrated.tsv"))
-        .map_err(|e| format!("cannot open hydration ledger: {e}"))?;
+        .map_err(|e| Error::io_unanchored("open hydration ledger", git_dir.join("wt-hydrated.tsv"), e))?;
     // Same buffering rationale as claim_references.
     let mut sidecar = io::BufWriter::with_capacity(128 * 1024, sidecar_file);
     for (rel, id) in &ingested.files {
-        writeln!(sidecar, "{rel}\tblob\t{id}").map_err(|e| format!("cannot write ledger: {e}"))?;
+        writeln!(sidecar, "{rel}\tblob\t{id}")
+            .map_err(|e| Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e))?;
     }
     writeln!(sidecar, "-\tsnapshot\t{snapshot}")
-        .map_err(|e| format!("cannot write ledger: {e}"))?;
+        .map_err(|e| Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e))?;
     sidecar
         .flush()
-        .map_err(|e| format!("cannot write ledger: {e}"))?;
+        .map_err(|e| Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e))?;
     Ok(git_dir)
 }

@@ -5,6 +5,7 @@
 
 mod cli;
 mod commands;
+mod error;
 mod gc;
 mod gitops;
 mod hydrate;
@@ -18,8 +19,13 @@ use cli::Cli;
 
 fn main() {
     let command = Cli::parse().command;
-    if let Err(msg) = commands::run(command) {
-        eprintln!("wt: {msg}");
-        std::process::exit(1);
+    if let Err(e) = commands::run(command) {
+        eprintln!("wt: {e}");
+        // Usage mistakes exit 2 like clap's own parse errors; every
+        // other failure exits 1.
+        std::process::exit(match e {
+            error::Error::Usage(_) => 2,
+            _ => 1,
+        });
     }
 }

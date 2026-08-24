@@ -7,8 +7,9 @@ pub mod remove;
 pub mod sweep;
 
 use crate::cli::{StoreAction, WtCommand};
+use crate::error::Result;
 
-pub fn run(command: WtCommand) -> Result<(), String> {
+pub fn run(command: WtCommand) -> Result<()> {
     match command {
         WtCommand::Create {
             name,

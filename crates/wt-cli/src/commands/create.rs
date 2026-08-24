@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use wt_store::{ContentId, DiskStore};
 
+use crate::error::{Error, Result};
 use crate::gitops;
 use crate::hydrate::{
     claim_references, claim_snapshot_references, ingest_dir, materialize, open_store,
@@ -18,18 +19,18 @@ use crate::snapshots;
 use crate::snapshots::Outcome as SnapshotOutcome;
 use crate::timing::StageTimings;
 
-pub fn run(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(), String> {
+pub fn run(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<()> {
     create(name, manifest, dir)
 }
 
-fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(), String> {
+fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<()> {
     let root = gitops::repo_root()?;
     let dest = match dir {
         Some(d) => d.to_path_buf(),
         None => gitops::default_worktree_dest(&root, name)?,
     };
     if dest.exists() {
-        return Err(format!("{} already exists", dest.display()));
+        return Err(Error::Usage(format!("{} already exists", dest.display())));
     }
 
     let timing_enabled = std::env::var_os("WT_TIMING").is_some();
@@ -135,7 +136,7 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
     // verifications behind even if something later fails hard.
     store
         .flush()
-        .map_err(|e| format!("cannot update verified-blob ledger: {e}"))?;
+        .map_err(|e| Error::io_unanchored("update verified-blob ledger", store.root(), e))?;
     println!(
         "hydration complete: {total_files} file{} through the store",
         {
@@ -180,7 +181,7 @@ fn hydrate_one_dir(
     paranoid: bool,
     snapshot_gate: bool,
     timings: &mut StageTimings,
-) -> Result<DirOutcome, String> {
+) -> Result<DirOutcome> {
     let src = root.join(rel);
     let stage = Instant::now();
     let ingested = ingest_dir(store, root, &src)?;
@@ -239,7 +240,7 @@ fn hydrate_one_dir(
             }
             SnapshotOutcome::FellBack(None) => {}
             SnapshotOutcome::Failed(msg) => {
-                return Err(format!("hydration of {heavy} failed: {msg}"))
+                return Err(Error::Store(format!("hydration of {heavy} failed: {msg}")))
             }
         }
         // Fell through to the per-file ladder below; its cost is
@@ -253,7 +254,7 @@ fn hydrate_one_dir(
     // directory itself), so materialize against the worktree root.
     let stage = Instant::now();
     let report = materialize(store, &ingested, dest)
-        .map_err(|e| format!("hydration of {} failed: {e}", rel.display()))?;
+        .map_err(|e| Error::Store(format!("hydration of {} failed: {e}", rel.display())))?;
     timings.materialize_ms += stage.elapsed().as_millis();
     timings.verify_ms += report.verify_ms;
     timings.place_ms += report.place_ms;

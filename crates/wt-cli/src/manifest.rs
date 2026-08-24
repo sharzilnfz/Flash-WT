@@ -10,6 +10,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::error::{Error, Result};
+
 /// Used when no manifest exists yet. Deliberately short and boring:
 /// these cover the ecosystems that actually produce untracked bulk.
 pub const DEFAULT_PATTERNS: &[&str] = &[
@@ -102,7 +104,7 @@ fn segment_match(pattern: &str, segment: &str) -> bool {
 /// Every existing directory under `root` (`.git` pruned) matching at
 /// least one include pattern, sorted, with matches nested inside an
 /// earlier match dropped (the outer copy already covers them).
-pub fn collect_matches(root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>, String> {
+pub fn collect_matches(root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>> {
     let mut matched = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -115,10 +117,10 @@ pub fn collect_matches(root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>,
                 continue;
             }
             let rel = path.strip_prefix(root).map_err(|_| {
-                format!(
+                Error::Store(format!(
                     "pattern matched path outside repository root: {}",
                     path.display()
-                )
+                ))
             })?;
             if patterns.iter().any(|p| pattern_matches(p, rel)) {
                 matched.push(rel.to_path_buf());
@@ -146,7 +148,7 @@ pub fn collect_matches(root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>,
 /// manifest is not an error — defaults apply and a starter manifest
 /// is written atomically (temp file beside the destination, one
 /// rename); the caller prints the announcements.
-pub fn load_patterns(root: &Path, manifest: Option<&Path>) -> Result<LoadedPatterns, String> {
+pub fn load_patterns(root: &Path, manifest: Option<&Path>) -> Result<LoadedPatterns> {
     let path = match manifest {
         Some(m) => m.to_path_buf(),
         None => root.join(".wtinclude"),
@@ -157,7 +159,7 @@ pub fn load_patterns(root: &Path, manifest: Option<&Path>) -> Result<LoadedPatte
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if manifest.is_some() {
-                return Err(format!("manifest {} not found", path.display()));
+                return Err(Error::Usage(format!("manifest {} not found", path.display())));
             }
             write_starter_manifest(&path)?;
             Ok(LoadedPatterns::CreatedStarter {
@@ -165,19 +167,23 @@ pub fn load_patterns(root: &Path, manifest: Option<&Path>) -> Result<LoadedPatte
                 patterns: DEFAULT_PATTERNS.iter().map(|s| s.to_string()).collect(),
             })
         }
-        Err(e) => Err(format!("cannot read manifest {}: {e}", path.display())),
+        Err(e) => Err(Error::io("read manifest", &path, e)),
     }
 }
 
 /// Write the starter manifest house-style: temp file beside the
 /// destination, then one atomic rename, so a crash never leaves a
 /// half-written manifest behind.
-fn write_starter_manifest(path: &Path) -> Result<(), String> {
-    let refuse = |e: std::io::Error| format!("cannot write starter manifest: {e}");
-    let mut tmp = tempfile::NamedTempFile::new_in(path.parent().ok_or_else(|| {
-        "cannot write starter manifest: manifest path has no parent directory".to_string()
-    })?)
-    .map_err(refuse)?;
+fn write_starter_manifest(path: &Path) -> Result<()> {
+    let refuse = |source: std::io::Error| {
+        Error::io_unanchored("write starter manifest", path, source)
+    };
+    let parent = path.parent().ok_or_else(|| {
+        Error::Usage(
+            "cannot write starter manifest: manifest path has no parent directory".into(),
+        )
+    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(refuse)?;
     tmp.write_all(STARTER_MANIFEST.as_bytes())
         .map_err(refuse)?;
     tmp.persist(path).map_err(|e| refuse(e.error))?;
@@ -277,7 +283,7 @@ mod tests {
         let root = base.path();
 
         let err = load_patterns(root, Some(&root.join("nope.wtinclude"))).unwrap_err();
-        assert!(err.contains("not found"), "{err}");
+        assert!(err.to_string().contains("not found"), "{err}");
 
         let starter_path = match load_patterns(root, None).unwrap() {
             LoadedPatterns::CreatedStarter { path, patterns } => {
