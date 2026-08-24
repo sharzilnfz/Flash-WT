@@ -1,7 +1,16 @@
 //! Snapshot manifest and publish tests (fast-hydration ticket 08).
 
 use super::*;
+use super::manifest::{serialize_entries, DIR_MODE, EXEC_FILE_MODE, PLAIN_FILE_MODE};
+use sha2::{Digest as _, Sha256};
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::time::{Duration, SystemTime};
+
+// Traits/types the old single-file module globbed in from its own
+// use-statements.
+use crate::{DiskStore, Store as _};
 
 fn id(n: u8) -> ContentId {
     let mut bytes = [0u8; 32];
@@ -229,7 +238,7 @@ fn publish_builds_tree_with_modes_links_and_empty_dirs() {
         SnapshotEntry::symlink("pkg/bin-link", "../pkg/run.sh"),
     ];
     let outcome = store.publish_snapshot(entries.clone(), false).unwrap();
-    assert_eq!(outcome, Ok(PublishOutcome::Published));
+    assert_eq!(outcome, PublishOutcome::Published);
 
     let m = Manifest::new(entries).unwrap();
     let snap_dir = snapshot_path(base.path().join("store").as_path(), &m.hash);
@@ -288,14 +297,14 @@ fn concurrent_publish_loser_consumes_valid_winner() {
 
     assert_eq!(
         store.publish_snapshot(entries.clone(), false).unwrap(),
-        Ok(PublishOutcome::Published)
+        PublishOutcome::Published
     );
 
     // A second builder racing identical content loses the rename but
     // must recognize and consume the valid winner.
     assert_eq!(
         store.publish_snapshot(entries.clone(), false).unwrap(),
-        Ok(PublishOutcome::WinnerValid),
+        PublishOutcome::WinnerValid,
         "loser consumes the winner without failure"
     );
 
@@ -314,7 +323,7 @@ fn concurrent_publish_loser_consumes_valid_winner() {
 
     assert_eq!(
         store.publish_snapshot(other_entries, false).unwrap(),
-        Ok(PublishOutcome::WinnerInvalid),
+        PublishOutcome::WinnerInvalid,
         "invalid winner is never overwritten nor trusted"
     );
     assert_eq!(
@@ -336,7 +345,8 @@ fn missing_blob_reports_missing_for_healing_retry() {
     let ghost = ContentId(Sha256::digest(b"lost bytes").into());
     let entries = vec![SnapshotEntry::file("gone.txt", ghost, 0o644)];
 
-    match store.publish_snapshot(entries.clone(), false).unwrap() {
+    let result = store.publish_snapshot(entries.clone(), false);
+    match result {
         Err(BuildError::MissingBlob(id)) => assert_eq!(id, ghost),
         other => panic!("expected MissingBlob, got {other:?}"),
     }
@@ -353,7 +363,7 @@ fn missing_blob_reports_missing_for_healing_retry() {
     store.put(b"lost bytes").unwrap();
     assert_eq!(
         store.publish_snapshot(entries, false).unwrap(),
-        Ok(PublishOutcome::Published)
+        PublishOutcome::Published
     );
     let m = Manifest::new(vec![SnapshotEntry::file("gone.txt", ghost, 0o644)]).unwrap();
     assert_eq!(
@@ -381,9 +391,7 @@ fn paranoid_publish_full_hashes_and_catches_tampered_blob() {
     f.set_times(std::fs::FileTimes::new().set_modified(original_mtime))
         .unwrap();
 
-    let err = store
-        .publish_snapshot(vec![SnapshotEntry::file("p", blob, 0o644)], true)
-        .unwrap();
+    let err = store.publish_snapshot(vec![SnapshotEntry::file("p", blob, 0o644)], true);
     match err {
         Err(BuildError::Fatal(msg)) => {
             assert!(msg.contains("hash verification"), "{msg}");
@@ -406,7 +414,7 @@ fn verify_bypass_rebuilds_over_a_healthy_winner() {
     let entries = vec![SnapshotEntry::file("p", blob, 0o644)];
     assert_eq!(
         store.publish_snapshot(entries.clone(), false).unwrap(),
-        Ok(PublishOutcome::Published)
+        PublishOutcome::Published
     );
 
     // WT_VERIFY=1 semantics: callers skip find_snapshot entirely and
@@ -414,7 +422,7 @@ fn verify_bypass_rebuilds_over_a_healthy_winner() {
     // healthy store it lands on the existing valid winner.
     assert_eq!(
         store.publish_snapshot(entries, true).unwrap(),
-        Ok(PublishOutcome::WinnerValid)
+        PublishOutcome::WinnerValid
     );
     store.flush().unwrap();
 }
@@ -425,9 +433,7 @@ fn failed_publish_leaves_only_temp_debris_behind() {
     let store = DiskStore::open(base.path().join("store")).unwrap();
 
     let ghost = ContentId(Sha256::digest(b"never stored").into());
-    let err = store
-        .publish_snapshot(vec![SnapshotEntry::file("x", ghost, 0o644)], false)
-        .unwrap();
+    let err = store.publish_snapshot(vec![SnapshotEntry::file("x", ghost, 0o644)], false);
     assert!(matches!(err, Err(BuildError::MissingBlob(_))));
 
     // The snapshots root exists with an empty tmp dir; no published
@@ -520,7 +526,7 @@ fn incremental_publish_matches_full_build_semantics() {
     let old_manifest = Manifest::new(old_entries.clone()).unwrap();
     assert_eq!(
         store.publish_snapshot(old_entries.clone(), false).unwrap(),
-        Ok(PublishOutcome::Published)
+        PublishOutcome::Published
     );
 
     // Bump ONE root-level file; everything else is unchanged content
@@ -533,14 +539,14 @@ fn incremental_publish_matches_full_build_semantics() {
     let new_manifest = Manifest::new(new_entries.clone()).unwrap();
     assert_ne!(new_manifest.hash, old_manifest.hash);
 
-    let mut timing = SnapshotBuildTiming::default();
-    let outcome = store
-        .publish_snapshot_incremental(new_entries, &old_manifest.hash, false, Some(&mut timing))
-        .unwrap();
+    let result =
+        store.publish_snapshot_incremental_with_timing(new_entries, &old_manifest.hash, false);
 
     #[cfg(target_os = "macos")]
     {
-        assert_eq!(outcome, Ok(PublishOutcome::Published));
+        let receipt = result.unwrap();
+        assert_eq!(receipt.outcome, PublishOutcome::Published);
+        let timing = receipt.timing;
         // The whole point: the ENTIRE old tree is one clone unit now.
         // Sub-millisecond clones truncate to 0 ms; only counts lie.
         assert_eq!(timing.clone_units, 1);
@@ -582,8 +588,7 @@ fn incremental_publish_matches_full_build_semantics() {
     {
         // No recursive clone primitive: the attempt aborts so the
         // caller falls back to a full build. Nothing is published.
-        assert!(matches!(outcome, Err(BuildError::Fatal(_))));
-        assert_eq!(timing.clone_units, 0);
+        assert!(matches!(result, Err(BuildError::Fatal(_))));
         assert!(store.find_snapshot(&new_manifest.hash).is_none());
     }
     store.flush().unwrap();
@@ -597,7 +602,7 @@ fn deleted_subtree_delta_lands_exactly() {
     let old_manifest = Manifest::new(old_entries.clone()).unwrap();
     assert_eq!(
         store.publish_snapshot(old_entries.clone(), false).unwrap(),
-        Ok(PublishOutcome::Published)
+        PublishOutcome::Published
     );
 
     // New manifest drops pkg00 entirely and keeps only the empty dir
@@ -618,11 +623,10 @@ fn deleted_subtree_delta_lands_exactly() {
                 .publish_snapshot_incremental(
                     gone_manifest.entries.clone(),
                     &old_manifest.hash,
-                    false,
-                    None
+                    false
                 )
                 .unwrap(),
-            Ok(PublishOutcome::Published)
+            PublishOutcome::Published
         );
         let tree = snapshot_tree_path(store.root(), &gone_manifest.hash);
         assert!(!tree.join("pkg00").exists(), "deleted subtree must vanish");
@@ -639,8 +643,7 @@ fn deleted_subtree_delta_lands_exactly() {
                 .publish_snapshot_incremental(
                     gone_manifest.entries.clone(),
                     &old_manifest.hash,
-                    false,
-                    None
+                    false
                 )
                 .unwrap(),
             Err(BuildError::Fatal(_))
@@ -660,15 +663,12 @@ fn unusable_old_snapshot_aborts_the_incremental_attempt() {
     // fallback anymore — the whole attempt aborts and the CALLER is
     // responsible for the full build.
     let ghost = ContentId([0xAA; 32]);
-    let mut timing = SnapshotBuildTiming::default();
-    let outcome = store
-        .publish_snapshot_incremental(entries, &ghost, false, Some(&mut timing))
-        .unwrap();
+    let result =
+        store.publish_snapshot_incremental_with_timing(entries, &ghost, false);
     assert!(
-        matches!(outcome, Err(BuildError::Fatal(_))),
+        matches!(result, Err(BuildError::Fatal(_))),
         "a refused whole-tree clone must abort the attempt"
     );
-    assert_eq!(timing.clone_units, 0, "nothing could have cloned");
     assert!(
         store.find_snapshot(&manifest_hash).is_none(),
         "an aborted attempt publishes nothing"
@@ -691,7 +691,7 @@ fn old_snapshot_evicted_midflight_yields_to_a_full_build() {
     let old_manifest = Manifest::new(old_entries.clone()).unwrap();
     assert_eq!(
         store.publish_snapshot(old_entries.clone(), false).unwrap(),
-        Ok(PublishOutcome::Published)
+        PublishOutcome::Published
     );
 
     // Eviction race: selection already picked this old snapshot, then
@@ -707,15 +707,12 @@ fn old_snapshot_evicted_midflight_yields_to_a_full_build() {
     new_entries.push(SnapshotEntry::file("root.txt", extra, 0o644));
     let new_manifest = Manifest::new(new_entries.clone()).unwrap();
 
-    let mut timing = SnapshotBuildTiming::default();
-    let outcome = store
-        .publish_snapshot_incremental(new_entries, &old_manifest.hash, false, Some(&mut timing))
-        .unwrap();
+    let result =
+        store.publish_snapshot_incremental_with_timing(new_entries, &old_manifest.hash, false);
     assert!(
-        matches!(outcome, Err(BuildError::Fatal(_))),
+        matches!(result, Err(BuildError::Fatal(_))),
         "the evicted old tree must abort the incremental attempt"
     );
-    assert_eq!(timing.clone_units, 0);
     assert!(
         store.find_snapshot(&new_manifest.hash).is_none(),
         "nothing published from a vanished source; the full build owns this address now"
@@ -741,7 +738,7 @@ fn paranoid_incremental_rejects_rotted_blob_inside_the_cloned_tree() {
     };
     assert_eq!(
         store.publish_snapshot(old_entries.clone(), false).unwrap(),
-        Ok(PublishOutcome::Published)
+        PublishOutcome::Published
     );
 
     // Tamper with a blob INSIDE the cloned region, preserving size AND
@@ -768,10 +765,10 @@ fn paranoid_incremental_rejects_rotted_blob_inside_the_cloned_tree() {
     let new_hash = Manifest::new(new_entries.clone()).unwrap().hash;
 
     let err = store
-        .publish_snapshot_incremental(new_entries, &old_manifest.hash, true, None)
-        .unwrap();
+        .publish_snapshot_incremental(new_entries, &old_manifest.hash, true)
+        .unwrap_err();
     match err {
-        Err(BuildError::Fatal(msg)) => {
+        BuildError::Fatal(msg) => {
             assert!(msg.contains("paranoid check"), "{msg}");
         }
         other => panic!("paranoid incremental must fail loudly, got {other:?}"),
@@ -784,15 +781,14 @@ fn paranoid_incremental_rejects_rotted_blob_inside_the_cloned_tree() {
     let f = fs::OpenOptions::new().write(true).open(&target).unwrap();
     f.set_times(std::fs::FileTimes::new().set_modified(mtime))
         .unwrap();
-    let restored = v2_entries(&mut store);
-    let mut restored = restored;
+    let mut restored = v2_entries(&mut store);
     restored.retain(|e| e.rel != "root.txt");
     restored.push(SnapshotEntry::file("root.txt", extra, 0o644));
     assert_eq!(
         store
-            .publish_snapshot_incremental(restored, &old_manifest.hash, true, None)
+            .publish_snapshot_incremental(restored, &old_manifest.hash, true)
             .unwrap(),
-        Ok(PublishOutcome::Published)
+        PublishOutcome::Published
     );
     store.flush().unwrap();
 }
@@ -831,7 +827,7 @@ fn delta_matrix_matches_a_full_build_of_the_same_target_exactly() {
     ];
     assert_eq!(
         inc_store.publish_snapshot(gen1.clone(), false).unwrap(),
-        Ok(PublishOutcome::Published)
+        PublishOutcome::Published
     );
 
     // Generation 2 exercises EVERY mutation kind in ONE publish:
@@ -866,19 +862,11 @@ fn delta_matrix_matches_a_full_build_of_the_same_target_exactly() {
     assert!(!diff.modified.is_empty());
     assert!(!diff.deleted.is_empty());
 
-    let mut timing = SnapshotBuildTiming::default();
-    assert_eq!(
-        inc_store
-            .publish_snapshot_incremental(
-                gen2.clone(),
-                &gen1_manifest.hash,
-                false,
-                Some(&mut timing)
-            )
-            .unwrap(),
-        Ok(PublishOutcome::Published)
-    );
-    assert_eq!(timing.clone_units, 1);
+    let receipt = inc_store
+        .publish_snapshot_incremental_with_timing(gen2.clone(), &gen1_manifest.hash, false)
+        .unwrap();
+    assert_eq!(receipt.outcome, PublishOutcome::Published);
+    assert_eq!(receipt.timing.clone_units, 1);
 
     // Reference: a FULL build of the same target entries in the other
     // store (same blobs there).
@@ -896,7 +884,7 @@ fn delta_matrix_matches_a_full_build_of_the_same_target_exactly() {
     }
     assert_eq!(
         full_store.publish_snapshot(gen2, false).unwrap(),
-        Ok(PublishOutcome::Published)
+        PublishOutcome::Published
     );
 
     let inc_tree = snapshot_tree_path(inc_store.root(), &gen2_manifest.hash);
@@ -934,7 +922,7 @@ fn scattered_changes_clone_once_and_relink_only_what_changed() {
     let old_manifest = Manifest::new(entries.clone()).unwrap();
     assert_eq!(
         store.publish_snapshot(entries, false).unwrap(),
-        Ok(PublishOutcome::Published)
+        PublishOutcome::Published
     );
 
     // Scattered bump: exactly three modified files, three different
@@ -950,24 +938,23 @@ fn scattered_changes_clone_once_and_relink_only_what_changed() {
     }
     let new_manifest = Manifest::new(new_entries).unwrap();
 
-    let mut timing = SnapshotBuildTiming::default();
+    let receipt = store
+        .publish_snapshot_incremental_with_timing(
+            new_manifest.entries.clone(),
+            &old_manifest.hash,
+            false,
+        )
+        .unwrap();
     assert_eq!(
-        store
-            .publish_snapshot_incremental(
-                new_manifest.entries.clone(),
-                &old_manifest.hash,
-                false,
-                Some(&mut timing)
-            )
-            .unwrap(),
-        Ok(PublishOutcome::Published)
+        receipt.outcome,
+        PublishOutcome::Published
     );
     assert_eq!(
-        timing.clone_units, 1,
+        receipt.timing.clone_units, 1,
         "one whole-tree clone regardless of scatter"
     );
     assert_eq!(
-        timing.linked_files, 3,
+        receipt.timing.linked_files, 3,
         "exactly the changed files may be freshly linked"
     );
     assert_eq!(

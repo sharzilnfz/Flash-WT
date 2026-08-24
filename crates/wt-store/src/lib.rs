@@ -31,7 +31,7 @@ pub use snapindex::{
 };
 pub use snapshot::{
     read_published as read_published_snapshot, snapshot_path, snapshot_tree_path, BuildError,
-    EntryKind, Manifest, PublishOutcome, SnapshotBuildTiming, SnapshotEntry,
+    EntryKind, Manifest, PublishOutcome, PublishReceipt, SnapshotBuildTiming, SnapshotEntry,
 };
 pub use validation::{Entry, ValidationCache};
 pub use verified::{Fingerprint, VerifiedLedger};

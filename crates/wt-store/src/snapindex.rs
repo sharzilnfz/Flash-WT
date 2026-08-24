@@ -417,10 +417,8 @@ mod tests {
         let entries = vec![SnapshotEntry::file("f.txt", blob, 0o644)];
         let m_old = Manifest::new(entries).unwrap();
         assert_eq!(
-            store
-                .publish_snapshot(m_old.entries.clone(), false)
-                .unwrap(),
-            Ok(crate::PublishOutcome::Published)
+            store.publish_snapshot(m_old.entries.clone(), false).unwrap(),
+            crate::PublishOutcome::Published
         );
         super::record_publish(store.root(), ROOT_A, PAT, HEAVY, &m_old.hash).unwrap();
 
@@ -433,10 +431,8 @@ mod tests {
         ];
         let m_new = Manifest::new(entries2).unwrap();
         assert_eq!(
-            store
-                .publish_snapshot(m_new.entries.clone(), false)
-                .unwrap(),
-            Ok(crate::PublishOutcome::Published)
+            store.publish_snapshot(m_new.entries.clone(), false).unwrap(),
+            crate::PublishOutcome::Published
         );
         {
             let mut idx = crate::snapindex::SelectionIndex::load(store.root());

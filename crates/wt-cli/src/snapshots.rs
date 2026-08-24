@@ -315,16 +315,15 @@ fn try_incremental(
         return None;
     }
 
-    let mut phase = SnapshotBuildTiming::default();
-    match store.publish_snapshot_incremental(
+    match store.publish_snapshot_incremental_with_timing(
         manifest.entries.clone(),
         &old_hash,
         paranoid,
-        Some(&mut phase),
     ) {
-        Ok(Ok(PublishOutcome::Published)) | Ok(Ok(PublishOutcome::WinnerValid)) => {
-            *build = Some(phase);
-            Some((phase.clone_units, phase.linked_files))
+        Ok(receipt) => {
+            let timing = receipt.timing;
+            *build = Some(timing);
+            Some((timing.clone_units, timing.linked_files))
         }
         _ => None,
     }
@@ -497,24 +496,23 @@ fn ensure_published(
 ) -> Result<PublishOutcome, String> {
     let mut healed = false;
     loop {
-        let mut phase = SnapshotBuildTiming::default();
-        match store.publish_snapshot_timed(manifest.entries.clone(), paranoid, Some(&mut phase)) {
-            Ok(Ok(outcome)) => {
-                *build = Some(phase);
-                return Ok(outcome);
+        match store.publish_snapshot_with_timing(manifest.entries.clone(), paranoid) {
+            Ok(receipt) => {
+                *build = Some(receipt.timing);
+                return Ok(receipt.outcome);
             }
-            Ok(Err(BuildError::MissingBlob(blob))) if !healed => {
+            Err(BuildError::MissingBlob(blob)) if !healed => {
                 // Sweep raced us: re-run put() for the source content,
                 // then retry ONCE. put re-records the fingerprint, so
                 // re-verification happens inside the next build.
                 healed = true;
                 heal_blob(store, ingested, src_root, blob)?;
             }
-            Ok(Err(BuildError::MissingBlob(blob))) => {
+            Err(BuildError::MissingBlob(blob)) => {
                 return Err(format!("blob {blob} vanished twice during snapshot build"));
             }
-            Ok(Err(BuildError::Fatal(msg))) => return Err(msg),
-            Err(e) => return Err(e.to_string()),
+            Err(BuildError::Fatal(msg)) => return Err(msg),
+            Err(BuildError::Io(e)) => return Err(e.to_string()),
         }
     }
 }
