@@ -3,10 +3,10 @@
 
 mod gc;
 mod hydrate;
+mod manifest;
 mod snapshots;
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -19,6 +19,7 @@ use hydrate::{
     claim_references, claim_snapshot_references, ingest_dir, materialize, publish_mirror,
     snapshots_enabled, Ingested,
 };
+use manifest::{collect_matches, load_patterns, pattern_matches, LoadedPatterns};
 use snapshots::Outcome as SnapshotOutcome;
 
 #[derive(Parser)]
@@ -128,31 +129,6 @@ enum StoreAction {
     },
 }
 
-/// Used when no manifest exists yet. Deliberately short and boring:
-/// these cover the ecosystems that actually produce untracked bulk.
-const DEFAULT_PATTERNS: &[&str] = &[
-    "node_modules/",
-    "target/",
-    "dist/",
-    "build/",
-    ".cache/",
-    ".venv/",
-    "__pycache__/",
-];
-
-const STARTER_MANIFEST: &str = "\
-# wt: directories hydrated into every new worktree.
-# Gitignore syntax, relative to this repository root. Edit freely;
-# anything listed here is copied (never moved) from this checkout.
-node_modules/
-target/
-dist/
-build/
-.cache/
-.venv/
-__pycache__/
-";
-
 fn run(cmd: &mut Command) -> Result<(), String> {
     let out = cmd.output().map_err(|e| e.to_string())?;
     if out.status.success() {
@@ -171,123 +147,6 @@ fn repo_root() -> Result<PathBuf, String> {
         return Err("not inside a git repository".into());
     }
     Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
-}
-
-/// Parse manifest text into patterns, skipping blank lines and
-/// `#` comments. Negation (`!`) is not supported; such lines are
-/// ignored rather than silently misinterpreted.
-fn parse_patterns(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('!'))
-        .map(str::to_owned)
-        .collect()
-}
-
-/// Gitignore-style match of one pattern against a repo-relative
-/// directory path. Patterns without an interior `/` match a single
-/// path segment at any depth; anchored patterns must match from the
-/// root. `*` wildcards within a segment and `**` across segments.
-fn pattern_matches(pattern: &str, rel: &Path) -> bool {
-    let pat = pattern.trim_end_matches('/').trim_start_matches('/');
-    if pat.is_empty() {
-        return false;
-    }
-    let segs: Vec<&str> = pat.split('/').collect();
-    let rel_text = rel.to_string_lossy();
-    let path_segs: Vec<&str> = rel_text.split('/').collect();
-    if pat.contains('/') {
-        glob_match(&segs, &path_segs)
-    } else {
-        path_segs.iter().any(|seg| segment_match(pat, seg))
-    }
-}
-
-fn glob_match(pat: &[&str], path: &[&str]) -> bool {
-    match pat.split_first() {
-        None => path.is_empty(),
-        Some((&"**", rest)) => (0..=path.len()).any(|i| glob_match(rest, &path[i..])),
-        Some((p, rest)) => match path.split_first() {
-            Some((seg, tail)) if segment_match(p, seg) => glob_match(rest, tail),
-            _ => false,
-        },
-    }
-}
-
-fn segment_match(pattern: &str, segment: &str) -> bool {
-    match pattern.split_once('*') {
-        None => pattern == segment,
-        Some((prefix, suffix)) => {
-            segment.len() >= prefix.len() + suffix.len()
-                && segment.starts_with(prefix)
-                && segment.ends_with(suffix)
-        }
-    }
-}
-
-/// Every existing directory under `root` (`.git` pruned) matching at
-/// least one include pattern, sorted, with matches nested inside an
-/// earlier match dropped (the outer copy already covers them).
-fn collect_matches(root: &Path, patterns: &[String]) -> Vec<PathBuf> {
-    let mut matched = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() || entry.file_name() == ".git" {
-                continue;
-            }
-            let rel = path.strip_prefix(root).expect("path under root");
-            if patterns.iter().any(|p| pattern_matches(p, rel)) {
-                matched.push(rel.to_path_buf());
-            } else {
-                stack.push(path);
-            }
-        }
-    }
-    matched.sort();
-    matched
-        .into_iter()
-        .scan(None::<PathBuf>, |prev, rel| {
-            let covered = prev.as_ref().is_some_and(|p| rel.starts_with(p));
-            if !covered {
-                *prev = Some(rel.clone());
-            }
-            Some((!covered).then_some(rel))
-        })
-        .flatten()
-        .collect()
-}
-
-fn load_patterns(root: &Path, manifest: Option<&Path>) -> Result<(Vec<String>, bool), String> {
-    let path = match manifest {
-        Some(m) => m.to_path_buf(),
-        None => root.join(".wtinclude"),
-    };
-    match fs::read_to_string(&path) {
-        Ok(text) => Ok((parse_patterns(&text), false)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if manifest.is_some() {
-                return Err(format!("manifest {} not found", path.display()));
-            }
-            println!(
-                "no .wtinclude in {}; using defaults ({})",
-                root.display(),
-                DEFAULT_PATTERNS.join(" ")
-            );
-            fs::write(&path, STARTER_MANIFEST)
-                .map_err(|e| format!("cannot write starter manifest: {e}"))?;
-            println!("wrote starter manifest {}", path.display());
-            Ok((
-                DEFAULT_PATTERNS.iter().map(|s| s.to_string()).collect(),
-                true,
-            ))
-        }
-        Err(e) => Err(format!("cannot read manifest {}: {e}", path.display())),
-    }
 }
 
 fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(), String> {
@@ -403,8 +262,19 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
         eprintln!("wt-stage total={}", started.elapsed().as_millis());
     };
 
-    let (patterns, _used_defaults) = load_patterns(&root, manifest)?;
-    let dirs = collect_matches(&root, &patterns);
+    let patterns = match load_patterns(&root, manifest)? {
+        LoadedPatterns::CreatedStarter { path, patterns } => {
+            println!(
+                "no .wtinclude in {}; using defaults ({})",
+                root.display(),
+                manifest::DEFAULT_PATTERNS.join(" ")
+            );
+            println!("wrote starter manifest {}", path.display());
+            patterns
+        }
+        LoadedPatterns::Loaded { patterns } => patterns,
+    };
+    let dirs = collect_matches(&root, &patterns)?;
     if dirs.is_empty() {
         println!("nothing to hydrate");
         emit(
