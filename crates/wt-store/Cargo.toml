@@ -3,13 +3,17 @@ name = "wt-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-
-[dependencies]
-libc = "0.2"
-sha2 = "0.10"
-tempfile = "3"
-
-[dev-dependencies]
+description.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+libc.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]

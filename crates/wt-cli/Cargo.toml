@@ -3,6 +3,10 @@ name = "wt-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "wt"
@@ -12,12 +16,12 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-libc = "0.2"
-tempfile = "3"
-thiserror = "2"
+clap.workspace = true
+libc.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
 wt-copy = { path = "../wt-copy" }
 wt-store = { path = "../wt-store" }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

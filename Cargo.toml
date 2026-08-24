@@ -15,6 +15,17 @@ expect_used = "warn"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+description = "Instant git worktrees with heavy directories already hydrated"
+repository = "https://github.com/sharzilnfz/wt"
+readme = "README.md"
+rust-version = "1.85"
+
+[workspace.dependencies]
+libc = "0.2"
+tempfile = "3"
+sha2 = "0.10"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
 
 [profile.release]
 lto = true
