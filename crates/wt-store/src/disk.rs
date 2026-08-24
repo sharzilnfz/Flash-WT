@@ -28,6 +28,7 @@ use sha2::{Digest, Sha256};
 use crate::verified::VerifiedLedger;
 use crate::{ContentId, Error, Result, Store};
 
+/// On-disk [`Store`]: a git-style object database under one root.
 pub struct DiskStore {
     root: PathBuf,
     /// Fast-hydration ticket 05: fingerprints of blobs whose hash has
@@ -204,8 +205,9 @@ impl DiskStore {
     }
 
     fn write_ref_count(&self, id: &ContentId, count: u64) -> Result<()> {
-        let path = self.ref_path(id);
-        let mut tmp = tempfile::NamedTempFile::new_in(path.parent().expect("refs dir"))?;
+        let dir = self.root.join("refs");
+        let path = dir.join(id.to_string());
+        let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
         writeln!(tmp, "{count}")?;
         tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
         Ok(())
@@ -331,8 +333,12 @@ impl Store for DiskStore {
         let id = ContentId(Sha256::digest(content).into());
         let path = self.object_path(&id);
         if !path.exists() {
-            fs::create_dir_all(path.parent().expect("object parent dir"))?;
-            let mut tmp = tempfile::NamedTempFile::new_in(path.parent().expect("object dir"))?;
+            // object_path is always <root>/objects/<2 hex>/<62 hex>, so
+            // the shard directory is computable without unwrapping.
+            let hex = id.to_string();
+            let shard_dir = self.root.join("objects").join(&hex[..2]);
+            fs::create_dir_all(&shard_dir)?;
+            let mut tmp = tempfile::NamedTempFile::new_in(&shard_dir)?;
             tmp.write_all(content)?;
             // Durability: fsync the blob's bytes BEFORE the rename.
             // A crash after the rename without this could leave the

@@ -7,6 +7,7 @@ use std::path::Path;
 use crate::copy_tree::copy_tree;
 use crate::{BackendKind, CopyBackend, Error, Result};
 
+/// Portable byte-by-byte fallback backend; works everywhere.
 #[derive(Debug, Default)]
 pub struct DeepCopyBackend;
 
@@ -28,6 +29,7 @@ impl CopyBackend for DeepCopyBackend {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

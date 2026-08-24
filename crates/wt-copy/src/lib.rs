@@ -67,6 +67,8 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
+    /// The stable, displayable name used in CLI output and selection
+    /// reports (see the enum docs).
     pub fn as_str(self) -> &'static str {
         match self {
             BackendKind::Clonefile => "clonefile",
@@ -89,6 +91,7 @@ pub enum Safety {
     UnsafePending,
 }
 
+/// What went wrong in a backend copy.
 #[derive(Debug)]
 pub enum Error {
     /// The destination already exists. Backends never merge into or
@@ -122,6 +125,7 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Copy result: [`Error`] on failure.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// A strategy for copying one directory tree as cheaply as the

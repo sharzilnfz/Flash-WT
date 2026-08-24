@@ -1,3 +1,7 @@
+// Tests assert with unwrap/expect by design: a panic IS the failure
+// signal under test, so the workspace restriction lints stay off here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Ticket 06: garbage collection. Removing a worktree releases its
 //! references, and an age-based sweep reclaims unreferenced store
 //! entries, so the store never grows without bound. Everything is

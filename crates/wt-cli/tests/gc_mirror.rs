@@ -1,3 +1,7 @@
+// Tests assert with unwrap/expect by design: a panic IS the failure
+// signal under test, so the workspace restriction lints stay off here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Fast-hydration ticket 07: store-local mark-and-sweep. The store
 //! mirror written once per create is the GC root; sweep modes are
 //! gated by `<store>/gc-mode` (`wt store migrate`). Everything is

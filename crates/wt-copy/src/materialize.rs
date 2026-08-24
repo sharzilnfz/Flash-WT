@@ -145,5 +145,6 @@ pub fn placement_refused(_e: &io::Error) -> bool {
     true
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests;

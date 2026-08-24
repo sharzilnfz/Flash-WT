@@ -1,3 +1,7 @@
+// Tests assert with unwrap/expect by design: a panic IS the failure
+// signal under test, so the workspace restriction lints stay off here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Copy-backend integration tests (ticket 03).
 //!
 //! Everything runs through the frozen [`wt_copy::CopyBackend`] trait

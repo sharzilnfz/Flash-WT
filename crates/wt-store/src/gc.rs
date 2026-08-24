@@ -43,7 +43,9 @@ pub enum GcMode {
 }
 
 impl GcMode {
+    /// Canonical name of the mark-and-sweep mode (ADR-0004).
     pub const MARK_SWEEP: &'static str = "mark-sweep";
+    /// Canonical name of the refs-free mark-and-sweep variant.
     pub const MARK_SWEEP_NO_REFS: &'static str = "mark-sweep-no-refs";
 
     fn text(self) -> &'static str {
@@ -381,7 +383,9 @@ pub struct MarkSwept {
 pub struct MarkReport {
     /// Content marked live through valid mirrors.
     pub marked: BTreeSet<ContentId>,
+    /// Mirrors whose marks were all applied.
     pub live_mirrors: usize,
+    /// Mirrors skipped as dead or expired past the grace window.
     pub dead_mirrors: usize,
     /// (path, reason) for mirrors that failed to parse; preserved on
     /// disk for diagnosis.

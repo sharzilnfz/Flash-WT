@@ -45,7 +45,10 @@ pub struct Entry {
     pub id: ContentId,
 }
 
+/// Ingest-side stat cache: path → (size, mtime, content id).
 pub struct ValidationCache {
+    /// Store root the cache file lives in.
+    root: PathBuf,
     path: PathBuf,
     entries: BTreeMap<String, Entry>,
     /// Set by `record`, cleared by a successful `save`: a warm ingest
@@ -65,6 +68,7 @@ impl ValidationCache {
             .map(|text| parse(&text))
             .unwrap_or_default();
         ValidationCache {
+            root: root.to_path_buf(),
             path,
             entries,
             dirty: false,
@@ -107,8 +111,7 @@ impl ValidationCache {
         if !self.dirty {
             return Ok(());
         }
-        let parent = self.path.parent().expect("cache lives beside a root");
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(&self.root)?;
         for (rel, entry) in &self.entries {
             let since = entry
                 .mtime

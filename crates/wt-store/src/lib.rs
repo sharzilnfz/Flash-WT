@@ -66,14 +66,22 @@ impl ContentId {
         }
         let mut out = [0u8; 32];
         for (i, pair) in text.as_bytes().chunks(2).enumerate() {
-            let hi = (pair[0] as char).to_digit(16).expect("hex digit") as u8;
-            let lo = (pair[1] as char).to_digit(16).expect("hex digit") as u8;
-            out[i] = hi << 4 | lo;
+            // The charset guard above makes non-hex digits impossible;
+            // a `None` here degrades to the same `None` answer rather
+            // than trusting it.
+            let (Some(hi), Some(lo)) = (
+                (pair[0] as char).to_digit(16),
+                (pair[1] as char).to_digit(16),
+            ) else {
+                return None;
+            };
+            out[i] = (hi as u8) << 4 | lo as u8;
         }
         Some(ContentId(out))
     }
 }
 
+/// What can go wrong talking to a store.
 #[derive(Debug)]
 pub enum Error {
     /// `get` found the entry but its bytes no longer match the
@@ -85,6 +93,7 @@ pub enum Error {
     /// A reference was released more times than it was added, or
     /// decremented on unknown content.
     RefCountUnderflow(ContentId),
+    /// Any filesystem failure while reading or writing the store.
     Io(io::Error),
 }
 
@@ -107,6 +116,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Store result: [`Error`] on failure.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Hash-addressed content store with reference counting.

@@ -12,6 +12,7 @@ use std::path::Path;
 
 use crate::{BackendKind, CopyBackend, Error, Result};
 
+/// APFS `clonefile(2)` backend (macOS only).
 #[derive(Debug, Default)]
 pub struct ClonefileBackend;
 
@@ -68,5 +69,6 @@ fn c_path(path: &Path) -> io::Result<CString> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL byte"))
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests;

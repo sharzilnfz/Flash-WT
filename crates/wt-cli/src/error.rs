@@ -70,6 +70,7 @@ impl From<wt_store::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

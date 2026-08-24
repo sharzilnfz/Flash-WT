@@ -8,6 +8,9 @@ license.workspace = true
 name = "wt"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"

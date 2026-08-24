@@ -1,3 +1,7 @@
+// Tests assert with unwrap/expect by design: a panic IS the failure
+// signal under test, so the workspace restriction lints stay off here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Ticket 07 hardlink safety, asserted through the CLI seam, under
 //! the WT_HARDLINK=1 opt-in (hardlinks are no longer the default;
 //! fast-hydration ticket 03).

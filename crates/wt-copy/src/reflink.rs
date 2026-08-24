@@ -72,5 +72,6 @@ fn reflink_file(from: &Path, to: &Path) -> io::Result<()> {
     fs::set_permissions(to, fs::Permissions::from_mode(mode))
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests;

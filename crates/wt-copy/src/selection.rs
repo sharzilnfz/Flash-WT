@@ -80,6 +80,7 @@ pub fn select_backend(dir: &Path, policy: SourcePolicy) -> Box<dyn CopyBackend> 
         .unwrap_or(fallback)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -59,7 +59,9 @@ pub struct SnapshotBuildTiming {
 /// through the API; callers who don't use the plain variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublishReceipt {
+    /// What happened to the snapshot tree.
     pub outcome: PublishOutcome,
+    /// Phase timings for Step 0 instrumentation.
     pub timing: SnapshotBuildTiming,
 }
 

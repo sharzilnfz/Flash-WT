@@ -52,8 +52,11 @@ pub struct BulkEntry {
     /// Slash-separated path relative to the walk root. The root
     /// directory itself is NOT among the entries.
     pub rel_path: String,
+    /// True for directory entries.
     pub is_dir: bool,
+    /// True for symlink entries; targets are never followed.
     pub is_symlink: bool,
+    /// True for regular-file entries.
     pub is_file: bool,
     /// Data length in bytes (regular files only; 0 otherwise).
     pub size: u64,
@@ -327,19 +330,39 @@ fn parse_record(
 
 /// Little-endian reads at arbitrary offsets: the kernel packs the
 /// attrbuffer on 4-byte boundaries, which does not always leave
-/// 8-byte fields naturally aligned.
+/// 8-byte fields naturally aligned. Bounds are enforced by the slice
+/// indexing itself; callers length-check each record before parsing
+/// it.
 fn read_u32(buf: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(buf[at..at + 4].try_into().expect("4 bytes"))
+    u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
 }
 
 fn read_i32(buf: &[u8], at: usize) -> i32 {
-    i32::from_le_bytes(buf[at..at + 4].try_into().expect("4 bytes"))
+    i32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
 }
 
 fn read_u64(buf: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(buf[at..at + 8].try_into().expect("8 bytes"))
+    u64::from_le_bytes([
+        buf[at],
+        buf[at + 1],
+        buf[at + 2],
+        buf[at + 3],
+        buf[at + 4],
+        buf[at + 5],
+        buf[at + 6],
+        buf[at + 7],
+    ])
 }
 
 fn read_i64(buf: &[u8], at: usize) -> i64 {
-    i64::from_le_bytes(buf[at..at + 8].try_into().expect("8 bytes"))
+    i64::from_le_bytes([
+        buf[at],
+        buf[at + 1],
+        buf[at + 2],
+        buf[at + 3],
+        buf[at + 4],
+        buf[at + 5],
+        buf[at + 6],
+        buf[at + 7],
+    ])
 }

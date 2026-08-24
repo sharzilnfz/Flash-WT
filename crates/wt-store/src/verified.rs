@@ -52,7 +52,10 @@ pub struct Fingerprint {
     pub mtime: SystemTime,
 }
 
+/// Persisted ledger of verified blob fingerprints (see module docs).
 pub struct VerifiedLedger {
+    /// Store root the ledger file lives in.
+    root: PathBuf,
     path: PathBuf,
     entries: BTreeMap<ContentId, Fingerprint>,
     dirty: bool,
@@ -70,6 +73,7 @@ impl VerifiedLedger {
             .map(|text| parse(&text))
             .unwrap_or_default();
         VerifiedLedger {
+            root: root.to_path_buf(),
             path,
             entries,
             dirty: false,
@@ -120,8 +124,7 @@ impl VerifiedLedger {
         if !self.dirty {
             return Ok(());
         }
-        let parent = self.path.parent().expect("ledger lives beside a root");
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(&self.root)?;
         for (id, fp) in &self.entries {
             let since = fp
                 .mtime

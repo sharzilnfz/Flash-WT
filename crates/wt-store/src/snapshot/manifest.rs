@@ -41,10 +41,14 @@ pub(super) const DIR_MODE: u32 = 0o755;
 /// Conventional lstat mode for symlinks.
 const SYMLINK_MODE: u32 = 0o777;
 
+/// What kind of filesystem object a manifest entry describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EntryKind {
+    /// A regular file backed by a blob.
     File,
+    /// A symlink carrying its target string.
     Symlink,
+    /// A directory (empty trees are represented too).
     Dir,
 }
 
@@ -72,10 +76,15 @@ impl EntryKind {
 /// mode (see module docs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotEntry {
+    /// Slash-separated path relative to the snapshot root.
     pub rel: String,
+    /// The kind of object this entry describes.
     pub kind: EntryKind,
+    /// Normalized octal mode (see module docs).
     pub mode: u32,
+    /// Content address; `Some` for files.
     pub blob: Option<ContentId>,
+    /// Link target; `Some` for symlinks.
     pub target: Option<String>,
 }
 
@@ -144,6 +153,7 @@ fn validate_rel(rel: &str) -> Result<(), String> {
 /// A validated, canonically ordered manifest with its content hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
+    /// All entries, canonically ordered by relative path.
     pub entries: Vec<SnapshotEntry>,
     /// SHA-256 of the exact serialized entry bytes (no header).
     pub hash: ContentId,

@@ -26,8 +26,11 @@ use crate::snapshot::SnapshotEntry;
 /// Classification of one rebuild against an old manifest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SnapshotDiff {
+    /// Entries present only in the new manifest.
     pub added: Vec<SnapshotEntry>,
+    /// Entries in both whose content address changed.
     pub modified: Vec<SnapshotEntry>,
+    /// Entries present only in the old manifest.
     pub deleted: Vec<SnapshotEntry>,
 }
 
@@ -186,6 +189,7 @@ fn ancestor_dirs(rel: &str) -> Vec<String> {
     out
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

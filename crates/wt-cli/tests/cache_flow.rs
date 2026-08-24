@@ -1,3 +1,7 @@
+// Tests assert with unwrap/expect by design: a panic IS the failure
+// signal under test, so the workspace restriction lints stay off here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Ticket 02: staleness behavior through the CLI seam. The validation
 //! cache beside the store must make warm creates cheaper without ever
 //! changing what lands in a hydrated tree: edits arrive, touches stay

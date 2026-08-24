@@ -1,3 +1,7 @@
+// Tests assert with unwrap/expect by design: a panic IS the failure
+// signal under test, so the workspace restriction lints stay off here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! v2 diff-based incremental snapshot rebuilds, end to end.
 //!
 //! Every test runs the real `wt` binary against a real temporary git

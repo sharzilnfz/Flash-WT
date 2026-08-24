@@ -43,8 +43,11 @@ pub const MAX_RING: usize = 3;
 /// happens only at serialization time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectionRecord {
+    /// Absolute path of the repository the selection was made in.
     pub repo_root: String,
+    /// The include-pattern string that selected the heavy directory.
     pub pattern: String,
+    /// The heavy directory's path relative to `repo_root`.
     pub heavy_dir: String,
     /// Manifest hashes, newest first.
     pub ring: Vec<ContentId>,
@@ -107,6 +110,7 @@ impl SelectionRecord {
 /// The whole index: every valid record, in file order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SelectionIndex {
+    /// All valid records.
     pub records: Vec<SelectionRecord>,
 }
 
@@ -162,34 +166,30 @@ impl SelectionIndex {
         Ok(())
     }
 
-    fn find_mut(
-        &mut self,
-        repo_root: &str,
-        pattern: &str,
-        heavy_dir: &str,
-    ) -> Option<&mut SelectionRecord> {
-        self.records
-            .iter_mut()
-            .find(|r| r.matches(repo_root, pattern, heavy_dir))
-    }
-
     fn ensure_record(
         &mut self,
         repo_root: &str,
         pattern: &str,
         heavy_dir: &str,
     ) -> &mut SelectionRecord {
-        if self.find_mut(repo_root, pattern, heavy_dir).is_none() {
-            self.records.push(SelectionRecord {
-                repo_root: repo_root.to_string(),
-                pattern: pattern.to_string(),
-                heavy_dir: heavy_dir.to_string(),
-                ring: Vec::new(),
-                mtime_secs: 0,
-            });
+        if let Some(existing) = self
+            .records
+            .iter()
+            .position(|r| r.matches(repo_root, pattern, heavy_dir))
+        {
+            // In bounds by the `position` match above.
+            return &mut self.records[existing];
         }
-        self.find_mut(repo_root, pattern, heavy_dir)
-            .expect("record just inserted")
+        self.records.push(SelectionRecord {
+            repo_root: repo_root.to_string(),
+            pattern: pattern.to_string(),
+            heavy_dir: heavy_dir.to_string(),
+            ring: Vec::new(),
+            mtime_secs: 0,
+        });
+        let last = self.records.len() - 1;
+        // In bounds by construction: we just pushed it.
+        &mut self.records[last]
     }
 
     /// Move `hash` to the front of the key's ring (dedup, truncate to
@@ -288,6 +288,7 @@ pub fn select_old_snapshot(
     None
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

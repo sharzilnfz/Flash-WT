@@ -25,6 +25,7 @@ use std::path::Path;
 use crate::copy_tree::copy_tree;
 use crate::{BackendKind, CopyBackend, Error, Result, Safety};
 
+/// Plain hardlink backend: shared inodes are made read-only.
 #[derive(Debug, Default)]
 pub struct HardlinkBackend;
 
@@ -105,6 +106,7 @@ fn fs_supports_hardlinks(_dir: &Path) -> bool {
     true
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

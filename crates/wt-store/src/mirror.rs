@@ -126,6 +126,7 @@ pub struct StoreMirror {
 }
 
 impl StoreMirror {
+    /// An empty mirror for the given worktree and its git directory.
     pub fn new(worktree: PathBuf, gitdir: PathBuf) -> StoreMirror {
         StoreMirror {
             worktree,
@@ -135,6 +136,7 @@ impl StoreMirror {
         }
     }
 
+    /// Render the mirror as TSV (see the module-level format docs).
     pub fn serialize(&self) -> String {
         let mut out = String::new();
         out.push_str("v1\tworktree\t");
@@ -244,7 +246,9 @@ pub fn remove(root: &Path, worktree: &Path, gitdir: &Path) -> io::Result<bool> {
 /// One mirror file found on disk, with its mtime and parse verdict.
 #[derive(Debug)]
 pub struct ReadMirror {
+    /// Where the mirror file lives.
     pub path: PathBuf,
+    /// Its modification time, used for grace-window decisions.
     pub modified: SystemTime,
     /// `Err` holds the reason the mirror was rejected; the file is
     /// preserved on disk either way.
@@ -280,6 +284,7 @@ pub fn read_all(root: &Path) -> Vec<ReadMirror> {
     out
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
