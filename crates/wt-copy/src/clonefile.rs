@@ -48,20 +48,11 @@ impl CopyBackend for ClonefileBackend {
 }
 
 /// True if the filesystem holding `path` has the given `statfs`
-/// type name (for example `apfs`).
+/// type name (for example `apfs`). A pure predicate over
+/// [`crate::sys::statfs_of`].
 fn fstype_is(path: &Path, want: &[u8]) -> bool {
-    let Ok(c_path) = c_path(path) else {
+    let Ok(st) = crate::sys::statfs_of(path) else {
         return false;
-    };
-    // SAFETY: `c_path` is a valid NUL-terminated path; `st` is a
-    // correctly sized allocation owned by this call. macOS names the
-    // struct `statfs`; `f_fstypename` carries the type name.
-    let st = unsafe {
-        let mut st: libc::statfs = std::mem::zeroed();
-        if libc::statfs(c_path.as_ptr(), &mut st) != 0 {
-            return false;
-        }
-        st
     };
     let name: &[libc::c_char] = &st.f_fstypename;
     name.get(want.len()) == Some(&0) && name.iter().zip(want).all(|(a, b)| *a as u8 == *b)

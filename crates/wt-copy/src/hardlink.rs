@@ -61,22 +61,17 @@ impl CopyBackend for HardlinkBackend {
 
 #[cfg(target_os = "macos")]
 fn fs_supports_hardlinks(dir: &Path) -> bool {
-    use std::ffi::{CStr, CString};
-    use std::os::unix::ffi::OsStrExt;
+    use std::ffi::CStr;
 
-    let Ok(c_path) = CString::new(dir.as_os_str().as_bytes()) else {
+    // A pure predicate over the shared statfs probe: reject
+    // read-only mounts and filesystem families without hardlinks.
+    let Ok(st) = crate::sys::statfs_of(dir) else {
         return false;
     };
-    let mut stat = unsafe { std::mem::zeroed::<libc::statfs>() };
-    // Negative return means statfs itself failed; treat as unsupported
-    // rather than guessing.
-    if unsafe { libc::statfs(c_path.as_ptr(), &mut stat) } != 0 {
+    if st.f_flags & libc::MNT_RDONLY as u32 != 0 {
         return false;
     }
-    if stat.f_flags & libc::MNT_RDONLY as u32 != 0 {
-        return false;
-    }
-    let fstype = unsafe { CStr::from_ptr(stat.f_fstypename.as_ptr()) };
+    let fstype = unsafe { CStr::from_ptr(st.f_fstypename.as_ptr()) };
     let name = fstype.to_string_lossy().to_lowercase();
     !matches!(
         name.as_str(),
@@ -86,30 +81,22 @@ fn fs_supports_hardlinks(dir: &Path) -> bool {
 
 #[cfg(target_os = "linux")]
 fn fs_supports_hardlinks(dir: &Path) -> bool {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
     const MSDOS_SUPER_MAGIC: i64 = 0x4d44;
     const CIFS_MAGIC_NUMBER: i64 = 0xff53_4d42;
     const SMB_SUPER_MAGIC: i64 = 0x517b;
 
-    let Ok(c_path) = CString::new(dir.as_os_str().as_bytes()) else {
+    let Ok(st) = crate::sys::statfs_of(dir) else {
         return false;
     };
-    let mut stat = unsafe { std::mem::zeroed::<libc::statfs>() };
-    if unsafe { libc::statfs(c_path.as_ptr(), &mut stat) } != 0 {
-        return false;
-    }
     // Linux `statfs` exposes no flags field; `statvfs::f_flag` carries
-    // the read-only bit.
-    let mut vfs = unsafe { std::mem::zeroed::<libc::statvfs>() };
-    if unsafe { libc::statvfs(c_path.as_ptr(), &mut vfs) } == 0 && vfs.f_flag & libc::ST_RDONLY != 0
-    {
+    // the read-only bit. A failed statvfs probe is ignored, matching
+    // the original behavior.
+    if matches!(crate::sys::read_only(dir), Ok(true)) {
         return false;
     }
-    stat.f_type != MSDOS_SUPER_MAGIC
-        && stat.f_type != CIFS_MAGIC_NUMBER
-        && stat.f_type != SMB_SUPER_MAGIC
+    st.f_type != MSDOS_SUPER_MAGIC
+        && st.f_type != CIFS_MAGIC_NUMBER
+        && st.f_type != SMB_SUPER_MAGIC
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]

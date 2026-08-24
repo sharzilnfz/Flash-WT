@@ -14,6 +14,7 @@ mod materialize;
 #[cfg(target_os = "linux")]
 mod reflink;
 mod selection;
+mod sys;
 
 #[cfg(target_os = "macos")]
 pub use clonefile::ClonefileBackend;
