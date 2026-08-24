@@ -66,7 +66,10 @@ fn reflink_file(from: &Path, to: &Path) -> io::Result<()> {
         drop(fs::remove_file(to));
         return Err(err);
     }
-    Ok(())
+    // Mode parity with fs::copy: OpenOptions' .mode() passes through
+    // the umask, so a 0755 script would land as 0755 & !umask. Set
+    // the final mode explicitly once FICLONE has succeeded.
+    fs::set_permissions(to, fs::Permissions::from_mode(mode))
 }
 
 #[cfg(test)]

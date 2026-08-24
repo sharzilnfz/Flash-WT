@@ -116,6 +116,20 @@ fn clone_out_refuses_existing_dest() {
     assert_eq!(err.raw_os_error(), Some(libc::EEXIST));
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn clone_out_reports_invalid_input_instead_of_panicking_on_nameless_dest() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let src = blob(base.path(), b"x\n");
+    // `base/..` has no file_name: the old `.expect` panicked here.
+    let dest = base.path().join("..");
+
+    let err = CloneOut
+        .materialize_file(&src, &dest)
+        .expect_err("InvalidInput expected");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}
+
 #[test]
 fn refusals_fall_back_but_permission_problems_stay_loud() {
     // Filesystem-level refusal: silent byte-copy fallback territory.

@@ -88,7 +88,10 @@ impl FileMaterialize for CloneOut {
         let dir = fs::File::open(dest.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent")
         })?)?;
-        let name = CString::new(dest.file_name().expect("dest has a name").as_bytes())
+        let name = dest.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "destination has no name")
+        })?;
+        let name = CString::new(name.as_bytes())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains NUL byte"))?;
 
         // Flags are 0: CLONE_NOFOLLOW and friends guard against
