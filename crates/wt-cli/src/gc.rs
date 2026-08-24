@@ -27,28 +27,16 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use wt_store::{ContentId, GcMode, Store};
 
+use crate::error::{Error, Result};
+use crate::gitops;
 use crate::hydrate::open_store;
 
 /// Default grace period when `WT_GC_GRACE` is unset or unreadable.
 const DEFAULT_GRACE: Duration = Duration::from_secs(15 * 60);
-
-fn run_git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
-    }
-}
 
 /// Parse a plain duration like `0s`, `90s`, `10m`, `24h`, `7d`.
 pub fn parse_age(text: &str) -> Option<Duration> {
@@ -62,15 +50,17 @@ pub fn parse_age(text: &str) -> Option<Duration> {
         _ => return None,
     };
     let count: u64 = num.parse().ok()?;
-    Some(Duration::from_secs(count * secs))
+    // A huge count must wrap into "invalid", never into a tiny
+    // duration that would let sweep collect young content.
+    Some(Duration::from_secs(count.checked_mul(secs)?))
 }
 
 /// Grace period for mark-and-sweep modes: `WT_GC_GRACE` if it parses
 /// (e.g. `15m`, `1h`), else fifteen minutes.
-pub fn grace_from_env() -> Result<Duration, String> {
+pub fn grace_from_env() -> Result<Duration> {
     match std::env::var("WT_GC_GRACE") {
         Ok(text) => parse_age(&text)
-            .ok_or_else(|| format!("invalid WT_GC_GRACE {text:?} (try 15m, 1h, 7d)")),
+            .ok_or_else(|| Error::Usage(format!("invalid WT_GC_GRACE {text:?} (try 15m, 1h, 7d)"))),
         Err(_) => Ok(DEFAULT_GRACE),
     }
 }
@@ -83,10 +73,10 @@ pub fn grace_from_env() -> Result<Duration, String> {
 /// `<rel>\tblob\t<id>` and `-\tsnapshot\t<id>` are the snapshot-era
 /// forms, so removal knows which ids are blobs (release refs) and
 /// which name snapshots (nothing to release).
-fn read_ledger(git_dir: &Path) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
+fn read_ledger(git_dir: &Path) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
     let path = git_dir.join("wt-hydrated.tsv");
-    let text = fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read hydration ledger {}: {e}", path.display()))?;
+    let text =
+        fs::read_to_string(&path).map_err(|e| Error::io("read hydration ledger", &path, e))?;
     let mut blobs = BTreeSet::new();
     let mut snapshots = BTreeSet::new();
     for line in text.lines() {
@@ -106,53 +96,41 @@ fn read_ledger(git_dir: &Path) -> Result<(BTreeSet<String>, BTreeSet<String>), S
                     snapshots.insert(id.to_string());
                 }
                 other => {
-                    return Err(format!(
+                    return Err(Error::Store(format!(
                         "unknown ledger row type {other:?} in {}",
                         path.display()
-                    ));
+                    )));
                 }
             },
             _ => {
-                return Err(format!(
+                return Err(Error::Store(format!(
                     "malformed ledger row in {}: {line:?}",
                     path.display()
-                ));
+                )));
             }
         }
     }
     Ok((blobs, snapshots))
 }
 
-pub fn remove(name: &str, dir: Option<&Path>) -> Result<(), String> {
-    let root_out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !root_out.status.success() {
-        return Err("not inside a git repository".into());
-    }
-    let root = PathBuf::from(String::from_utf8_lossy(&root_out.stdout).trim());
+pub fn remove(name: &str, dir: Option<&Path>) -> Result<()> {
+    let root = gitops::repo_root()?;
 
     let dest = match dir {
         Some(d) => d.to_path_buf(),
-        None => root
-            .parent()
-            .ok_or("repository root has no parent")?
-            .join(format!(
-                "{}-{name}",
-                root.file_name()
-                    .ok_or("cannot name repository directory")?
-                    .to_string_lossy()
-            )),
+        None => gitops::default_worktree_dest(&root, name)?,
     };
     if !dest.join(".git").exists() {
-        return Err(format!("{} is not a worktree", dest.display()));
+        return Err(Error::Usage(format!(
+            "{} is not a worktree",
+            dest.display()
+        )));
     }
 
     // The linked git dir holds the ledger. Resolve it while the
     // worktree still exists; for linked worktrees this lands inside
     // the main repo's .git/worktrees/<name>.
-    let git_dir_text = run_git(&dest, &["rev-parse", "--absolute-git-dir"])?;
+    let git_dir_text = gitops::run(&dest, &["rev-parse", "--absolute-git-dir"])?;
     let git_dir = PathBuf::from(&git_dir_text);
     let (ledger_blobs, ledger_snapshots) = if git_dir.join("wt-hydrated.tsv").exists() {
         read_ledger(&git_dir)?
@@ -172,54 +150,52 @@ pub fn remove(name: &str, dir: Option<&Path>) -> Result<(), String> {
     // types — file records mark blobs directly, snapshot records mark
     // through their manifests.
     if (!ledger.is_empty() || !ledger_snapshots.is_empty())
-        && store
-            .mirror_is_missing(&dest, &git_dir)
-            .map_err(|e| e.to_string())?
+        && store.mirror_is_missing(&dest, &git_dir)?
     {
         let ids: Vec<ContentId> = ledger
             .iter()
             .map(|hex| {
                 ContentId::from_hex(hex)
-                    .ok_or_else(|| format!("malformed content id in ledger: {hex}"))
+                    .ok_or_else(|| Error::Store(format!("malformed content id in ledger: {hex}")))
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<_>>>()?;
         let snaps: Vec<ContentId> = ledger_snapshots
             .iter()
             .map(|hex| {
                 ContentId::from_hex(hex)
-                    .ok_or_else(|| format!("malformed content id in ledger: {hex}"))
+                    .ok_or_else(|| Error::Store(format!("malformed content id in ledger: {hex}")))
             })
-            .collect::<Result<_, _>>()?;
-        store
-            .publish_worktree_mirror(&dest, &git_dir, ids.iter(), snaps.iter())
-            .map_err(|e| e.to_string())?;
+            .collect::<Result<Vec<_>>>()?;
+        store.publish_worktree_mirror(&dest, &git_dir, ids.iter(), snaps.iter())?;
     }
 
     let mut released = 0usize;
     if !ledger_blobs.is_empty() && !no_refs {
         for hex in &ledger_blobs {
             let id = ContentId::from_hex(hex)
-                .ok_or_else(|| format!("malformed content id in ledger: {hex}"))?;
+                .ok_or_else(|| Error::Store(format!("malformed content id in ledger: {hex}")))?;
             match Store::release_ref(&mut store, &id) {
                 Ok(()) => released += 1,
                 Err(wt_store::Error::RefCountUnderflow(_)) => {}
-                Err(e) => return Err(e.to_string()),
+                Err(e) => return Err(e.into()),
             }
         }
     }
 
     if !ledger_blobs.is_empty() || !ledger_snapshots.is_empty() {
-        fs::remove_file(git_dir.join("wt-hydrated.tsv"))
-            .map_err(|e| format!("cannot remove ledger: {e}"))?;
+        fs::remove_file(git_dir.join("wt-hydrated.tsv")).map_err(|e| {
+            Error::io_unanchored("remove ledger", git_dir.join("wt-hydrated.tsv"), e)
+        })?;
         // Retire the mirror now that both the sidecar and the
         // worktree are going away.
-        store
-            .remove_worktree_mirror(&dest, &git_dir)
-            .map_err(|e| e.to_string())?;
+        store.remove_worktree_mirror(&dest, &git_dir)?;
     }
 
-    run_git(&root, &["worktree", "remove", &dest.to_string_lossy()])
-        .map_err(|e| format!("git worktree remove failed (references already released): {e}"))?;
+    gitops::run(&root, &["worktree", "remove", &dest.to_string_lossy()]).map_err(|e| {
+        Error::Git(format!(
+            "git worktree remove failed (references already released): {e}"
+        ))
+    })?;
 
     println!(
         "removed worktree {}; released {released} reference{}",
@@ -229,21 +205,16 @@ pub fn remove(name: &str, dir: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn sweep(age: Option<&str>) -> Result<(), String> {
+pub fn sweep(age: Option<Duration>) -> Result<()> {
     let mut store = open_store()?;
     match store.gc_mode() {
         GcMode::Legacy => {
-            let age_text = age.unwrap_or("7d");
-            let max_age = parse_age(age_text)
-                .ok_or_else(|| format!("invalid --age {age_text:?} (try 0s, 10m, 1h, 7d)"))?;
-            let swept = store.sweep(max_age).map_err(|e| e.to_string())?;
+            let max_age = age.unwrap_or(Duration::from_secs(7 * 24 * 60 * 60));
+            let swept = store.sweep(max_age)?;
             // Dual-write parity evidence: compare what mirrors would
             // keep against what refcounts kept. Agreement prints
             // nothing; any disagreement is loud on stderr.
-            for line in store
-                .audit_marks_against_refs(grace_from_env()?)
-                .map_err(|e| e.to_string())?
-            {
+            for line in store.audit_marks_against_refs(grace_from_env()?)? {
                 eprintln!("{line}");
             }
             println!(
@@ -256,11 +227,10 @@ pub fn sweep(age: Option<&str>) -> Result<(), String> {
         }
         GcMode::MarkSweep | GcMode::MarkSweepNoRefs => {
             let grace = match age {
-                Some(explicit) => parse_age(explicit)
-                    .ok_or_else(|| format!("invalid --age {explicit:?} (try 0s, 10m, 1h, 7d)"))?,
+                Some(explicit) => explicit,
                 None => grace_from_env()?,
             };
-            let swept = store.sweep_mark_sweep(grace).map_err(|e| e.to_string())?;
+            let swept = store.sweep_mark_sweep(grace)?;
             if swept.deferred_by_grace {
                 eprintln!(
                     "wt-gc-audit: malformed young mirror deferred this sweep; rerun after the grace period"
@@ -278,7 +248,7 @@ pub fn sweep(age: Option<&str>) -> Result<(), String> {
 /// The explicit one-way cutover (ADR-0004): activate mark-and-sweep,
 /// or drop legacy refcount files entirely with a loud warning that
 /// pre-cutover binaries must not use this store afterwards.
-pub fn migrate(activate: bool, drop_refs: bool) -> Result<(), String> {
+pub fn migrate(activate: bool, drop_refs: bool) -> Result<()> {
     let mut store = open_store()?;
     if drop_refs {
         eprintln!(
@@ -287,10 +257,10 @@ pre-cutover binaries; they may collect live data. Make sure every wt binary that
 touches {} understands mirrors.",
             store.root().display()
         );
-        let purged = store.purge_legacy_refs().map_err(|e| e.to_string())?;
+        let purged = store.purge_legacy_refs()?;
         store
             .set_gc_mode(GcMode::MarkSweepNoRefs)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Error::Store(e.to_string()))?;
         println!(
             "gc-mode set to {}; purged {purged} legacy ref file{}",
             GcMode::MARK_SWEEP_NO_REFS,
@@ -299,7 +269,7 @@ touches {} understands mirrors.",
     } else if activate {
         store
             .set_gc_mode(GcMode::MarkSweep)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Error::Store(e.to_string()))?;
         println!(
             "gc-mode set to {}: sweep now collects from live-mirror marks plus the \
 grace period; refs/ stay maintained but ignored",
