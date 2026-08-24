@@ -2,25 +2,28 @@
 //! garbage collection for `wt remove`/`wt sweep` (ticket 06).
 
 mod gc;
+mod gitops;
 mod hydrate;
 mod manifest;
 mod snapshots;
+mod timing;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 
 use wt_store::ContentId;
 
+use gitops::{default_worktree_dest, repo_root, run};
 use hydrate::{
     claim_references, claim_snapshot_references, ingest_dir, materialize, publish_mirror,
     snapshots_enabled, Ingested,
 };
 use manifest::{collect_matches, load_patterns, pattern_matches, LoadedPatterns};
 use snapshots::Outcome as SnapshotOutcome;
+use timing::StageTimings;
 
 #[derive(Parser)]
 #[command(
@@ -129,138 +132,31 @@ enum StoreAction {
     },
 }
 
-fn run(cmd: &mut Command) -> Result<(), String> {
-    let out = cmd.output().map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-    }
-}
-
-fn repo_root() -> Result<PathBuf, String> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err("not inside a git repository".into());
-    }
-    Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
-}
-
 fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(), String> {
     let root = repo_root()?;
     let dest = match dir {
         Some(d) => d.to_path_buf(),
-        None => root
-            .parent()
-            .ok_or("repository root has no parent")?
-            .join(format!(
-                "{}-{name}",
-                root.file_name()
-                    .ok_or("cannot name repository directory")?
-                    .to_string_lossy()
-            )),
+        None => default_worktree_dest(&root, name)?,
     };
     if dest.exists() {
         return Err(format!("{} already exists", dest.display()));
     }
 
-    let timing = std::env::var_os("WT_TIMING").is_some();
-    // total spans git-worktree-add through summary printing (Step 0:
-    // the git worktree add itself gets its own stage line).
+    let timing_enabled = std::env::var_os("WT_TIMING").is_some();
+    let mut timings = StageTimings::new();
     let started = Instant::now();
-    let added = {
-        let mut cmd = Command::new("git");
-        cmd.current_dir(&root)
-            .args(["worktree", "add", "-b", name])
-            .arg(&dest)
-            .arg("HEAD");
-        run(&mut cmd)
-    }
-    .or_else(|_| {
-        let mut cmd = Command::new("git");
-        cmd.current_dir(&root)
-            .args(["worktree", "add"])
-            .arg(&dest)
-            .arg(name);
-        run(&mut cmd)
-    });
-    added?;
-    let git_worktree_ms = started.elapsed().as_millis();
+    // Prefer creating the branch from HEAD; an existing branch falls
+    // back to checking it out directly.
+    let dest_text = dest.to_string_lossy().into_owned();
+    run(&root, &["worktree", "add", "-b", name, &dest_text, "HEAD"])
+        .or_else(|_| run(&root, &["worktree", "add", &dest_text, name]))?;
+    timings.git_worktree_ms = started.elapsed().as_millis();
 
     println!(
         "created worktree {} from {}",
         dest.display(),
         root.display()
     );
-
-    let mut ingest_ms = 0u128;
-    let mut references_ms = 0u128;
-    let mut materialize_ms = 0u128;
-    let mut snapshot_ms = 0u128;
-    let mut snapshot_engaged = false;
-    // Step 0: fine-grained sub-stage attribution.
-    let mut verify_ms = 0u128;
-    let mut place_ms = 0u128;
-    let mut snapshot_lookup_ms = 0u128;
-    let mut snapshot_clonefile_ms = 0u128;
-    let mut build_verify_ms = 0u64;
-    let mut build_link_train_ms = 0u64;
-    let mut build_publish_ms = 0u64;
-    let mut snapshot_built = false;
-    // v2 incremental reporting: the mode line shows the LAST heavy
-    // directory's serving mode (hit/build/v2); the counters sum.
-    let mut snapshot_mode = "build";
-    let mut snapshot_v2_cloned = 0usize;
-    let mut snapshot_v2_linked = 0usize;
-    // One line per stage on stderr (`wt-stage <name>=<ms>`, integer
-    // milliseconds). total covers git-worktree-add through the end.
-    // The snapshot line appears only when the fast path did work, so
-    // pre-snapshot consumers see the same four lines as before; its
-    // meaning is unchanged (lookup + build + clone wall time).
-    #[allow(clippy::too_many_arguments)]
-    let emit = |git_worktree: u128,
-                ingest: u128,
-                references: u128,
-                materialize: u128,
-                verify: u128,
-                place: u128,
-                snapshot: u128,
-                engaged: bool,
-                lookup: u128,
-                clonefile: u128,
-                built: Option<(u64, u64, u64)>,
-                mode: &str,
-                v2_cloned: usize,
-                v2_linked: usize| {
-        if !timing {
-            return;
-        }
-        eprintln!("wt-stage git-worktree={git_worktree}");
-        eprintln!("wt-stage ingest={ingest}");
-        eprintln!("wt-stage references={references}");
-        eprintln!("wt-stage materialize={materialize}");
-        if materialize > 0 {
-            eprintln!("wt-stage verify={verify}");
-            eprintln!("wt-stage place={place}");
-        }
-        if engaged {
-            eprintln!("wt-stage snapshot={snapshot}");
-            eprintln!("wt-stage snapshot-lookup={lookup}");
-            eprintln!("wt-stage snapshot-clonefile={clonefile}");
-            eprintln!("wt-stage snapshot-mode={mode}");
-            eprintln!("wt-stage snapshot-v2-cloned={v2_cloned}");
-            eprintln!("wt-stage snapshot-v2-linked={v2_linked}");
-            if let Some((bv, blt, bp)) = built {
-                eprintln!("wt-stage snapshot-build-verify={bv}");
-                eprintln!("wt-stage snapshot-build-link-train={blt}");
-                eprintln!("wt-stage snapshot-build-publish={bp}");
-            }
-        }
-        eprintln!("wt-stage total={}", started.elapsed().as_millis());
-    };
 
     let patterns = match load_patterns(&root, manifest)? {
         LoadedPatterns::CreatedStarter { path, patterns } => {
@@ -277,22 +173,7 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
     let dirs = collect_matches(&root, &patterns)?;
     if dirs.is_empty() {
         println!("nothing to hydrate");
-        emit(
-            git_worktree_ms,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            false,
-            0,
-            0,
-            None,
-            "build",
-            0,
-            0,
-        );
+        timings.emit(started, timing_enabled);
         return Ok(());
     }
 
@@ -317,7 +198,7 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
         let src = root.join(rel);
         let stage = Instant::now();
         let ingested = ingest_dir(&mut store, &root, &src)?;
-        ingest_ms += stage.elapsed().as_millis();
+        timings.ingest_ms += stage.elapsed().as_millis();
         let heavy = rel.to_string_lossy().into_owned();
 
         if snapshot_gate {
@@ -334,22 +215,22 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
                 &mut store, &ingested, &root, pattern, &src, &heavy, &dest, paranoid,
             ) {
                 SnapshotOutcome::Hydrated(h) => {
-                    snapshot_ms += stage.elapsed().as_millis();
-                    snapshot_engaged = true;
-                    snapshot_lookup_ms += h.lookup_ms;
-                    snapshot_clonefile_ms += h.clonefile_ms;
-                    snapshot_mode = h.mode;
-                    snapshot_v2_cloned += h.cloned_units;
-                    snapshot_v2_linked += h.linked_files;
+                    timings.snapshot_ms += stage.elapsed().as_millis();
+                    timings.snapshot_engaged = true;
+                    timings.snapshot_lookup_ms += h.lookup_ms;
+                    timings.snapshot_clonefile_ms += h.clonefile_ms;
+                    timings.snapshot_mode = h.mode;
+                    timings.v2_cloned += h.cloned_units;
+                    timings.v2_linked += h.linked_files;
                     if let Some(b) = h.build {
-                        snapshot_built = true;
-                        build_verify_ms += b.verify_ms;
-                        build_link_train_ms += b.link_train_ms;
-                        build_publish_ms += b.publish_ms;
+                        timings.snapshot_built = true;
+                        timings.build_verify_ms += b.verify_ms;
+                        timings.build_link_train_ms += b.link_train_ms;
+                        timings.build_publish_ms += b.publish_ms;
                     }
                     let refs = Instant::now();
                     git_dir = claim_snapshot_references(&mut store, &dest, &ingested, h.hash)?;
-                    references_ms += refs.elapsed().as_millis();
+                    timings.references_ms += refs.elapsed().as_millis();
                     snapshot_hashes.push(h.hash);
                     total_files += h.files;
                     println!(
@@ -377,15 +258,15 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
 
         let stage = Instant::now();
         git_dir = claim_references(&mut store, &dest, &ingested)?;
-        references_ms += stage.elapsed().as_millis();
+        timings.references_ms += stage.elapsed().as_millis();
         // Ingested paths are repo-relative (they include the heavy
         // directory itself), so materialize against the worktree root.
         let stage = Instant::now();
         let report = materialize(&store, &ingested, &dest)
             .map_err(|e| format!("hydration of {} failed: {e}", rel.display()))?;
-        materialize_ms += stage.elapsed().as_millis();
-        verify_ms += report.verify_ms;
-        place_ms += report.place_ms;
+        timings.materialize_ms += stage.elapsed().as_millis();
+        timings.verify_ms += report.verify_ms;
+        timings.place_ms += report.place_ms;
         combined.dirs.extend(ingested.dirs.iter().cloned());
         for (rel, id) in &ingested.files {
             combined.files.insert(rel.clone(), *id);
@@ -406,7 +287,7 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
     // snapshot-hydrated dirs appear as `snapshot` records here.
     let stage = Instant::now();
     publish_mirror(&mut store, &dest, &git_dir, &combined, &snapshot_hashes)?;
-    references_ms += stage.elapsed().as_millis();
+    timings.references_ms += stage.elapsed().as_millis();
     // Say plainly what happened to shared content.
     if std::env::var_os("WT_NO_HARDLINK").is_some() {
         println!(
@@ -442,22 +323,7 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>) -> Result<(),
             }
         }
     );
-    emit(
-        git_worktree_ms,
-        ingest_ms,
-        references_ms,
-        materialize_ms,
-        verify_ms,
-        place_ms,
-        snapshot_ms,
-        snapshot_engaged,
-        snapshot_lookup_ms,
-        snapshot_clonefile_ms,
-        snapshot_built.then_some((build_verify_ms, build_link_train_ms, build_publish_ms)),
-        snapshot_mode,
-        snapshot_v2_cloned,
-        snapshot_v2_linked,
-    );
+    timings.emit(started, timing_enabled);
     Ok(())
 }
 

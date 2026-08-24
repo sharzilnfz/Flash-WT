@@ -35,7 +35,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 #[cfg(target_os = "macos")]
@@ -44,6 +43,8 @@ use wt_copy::{placement_refused, FileMaterialize, HardlinkOut};
 #[cfg(target_os = "macos")]
 use wt_store::bulkwalk;
 use wt_store::{ContentId, DiskStore, Entry as CacheEntry, GcMode, Store, ValidationCache};
+
+use crate::gitops;
 
 /// Where the per-machine store lives. `$WT_STORE` wins (tests use it
 /// for isolation); otherwise XDG cache conventions.
@@ -461,17 +462,7 @@ fn place(backend: Option<&dyn FileMaterialize>, src: &Path, dest: &Path) -> std:
 
 /// Resolve the (absolute) git dir of a freshly created worktree.
 fn worktree_git_dir(worktree: &Path) -> Result<PathBuf, String> {
-    let git_dir = Command::new("git")
-        .current_dir(worktree)
-        .args(["rev-parse", "--absolute-git-dir"])
-        .output()
-        .map_err(|e| format!("cannot query git dir: {e}"))?;
-    if !git_dir.status.success() {
-        return Err("newly created worktree is not a git worktree".into());
-    }
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&git_dir.stdout).trim(),
-    ))
+    gitops::git_dir(worktree)
 }
 
 /// Give this worktree one reference on every distinct blob it uses,
