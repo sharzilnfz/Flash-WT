@@ -117,33 +117,40 @@ fn rename_staged(staging: &Path, dest: &Path) -> Result<()> {
 
 /// Failure injection for the mid-copy test (ticket 04). Compiled only
 /// under `cfg(test)`; production builds carry no hook.
+///
+/// Thread-local so parallel test threads cannot arm or consume each
+/// other's injections.
 #[cfg(test)]
 pub(crate) mod test_hooks {
+    use std::cell::Cell;
     use std::io;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    static FILES_UNTIL_FAILURE: AtomicUsize = AtomicUsize::new(usize::MAX);
+    thread_local! {
+        static FILES_UNTIL_FAILURE: Cell<usize> = const { Cell::new(usize::MAX) };
+    }
 
-    /// Fail the Nth regular-file copy of the next backend run.
+    /// Fail the Nth regular-file copy of the current thread's next
+    /// backend run.
     pub fn arm_after(n: usize) {
-        FILES_UNTIL_FAILURE.store(n, Ordering::SeqCst);
+        FILES_UNTIL_FAILURE.with(|c| c.set(n));
     }
 
     pub fn disarm() {
-        FILES_UNTIL_FAILURE.store(usize::MAX, Ordering::SeqCst);
+        FILES_UNTIL_FAILURE.with(|c| c.set(usize::MAX));
     }
 
     pub fn maybe_fail_injected() -> io::Result<()> {
-        let cur = FILES_UNTIL_FAILURE.load(Ordering::SeqCst);
-        if cur == usize::MAX {
-            return Ok(());
-        }
-        if cur == 1 {
-            FILES_UNTIL_FAILURE.store(usize::MAX, Ordering::SeqCst);
-            return Err(io::Error::other("injected mid-copy failure"));
-        }
-        FILES_UNTIL_FAILURE.store(cur - 1, Ordering::SeqCst);
-        Ok(())
+        FILES_UNTIL_FAILURE.with(|c| match c.get() {
+            usize::MAX => Ok(()),
+            1 => {
+                c.set(usize::MAX);
+                Err(io::Error::other("injected mid-copy failure"))
+            }
+            n => {
+                c.set(n - 1);
+                Ok(())
+            }
+        })
     }
 }
 
