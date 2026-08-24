@@ -21,6 +21,10 @@
 //! in the same directory, then rename). Parsing is tolerant: any line
 //! that does not validate is dropped silently — the index is pure
 //! optimization metadata, never worth failing a create over.
+//!
+//! Durability status: rebuildable and best-effort by design (losing it
+//! only degrades v2 incremental rebuilds to full builds); NOT
+//! crash-durable — writes are atomic but not fsynced.
 
 use std::fs;
 use std::io::{self, Write};
@@ -417,10 +421,8 @@ mod tests {
         let entries = vec![SnapshotEntry::file("f.txt", blob, 0o644)];
         let m_old = Manifest::new(entries).unwrap();
         assert_eq!(
-            store
-                .publish_snapshot(m_old.entries.clone(), false)
-                .unwrap(),
-            Ok(crate::PublishOutcome::Published)
+            store.publish_snapshot(m_old.entries.clone(), false).unwrap(),
+            crate::PublishOutcome::Published
         );
         super::record_publish(store.root(), ROOT_A, PAT, HEAVY, &m_old.hash).unwrap();
 
@@ -433,10 +435,8 @@ mod tests {
         ];
         let m_new = Manifest::new(entries2).unwrap();
         assert_eq!(
-            store
-                .publish_snapshot(m_new.entries.clone(), false)
-                .unwrap(),
-            Ok(crate::PublishOutcome::Published)
+            store.publish_snapshot(m_new.entries.clone(), false).unwrap(),
+            crate::PublishOutcome::Published
         );
         {
             let mut idx = crate::snapindex::SelectionIndex::load(store.root());

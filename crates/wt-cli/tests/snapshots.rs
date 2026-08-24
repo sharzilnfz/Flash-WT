@@ -607,7 +607,7 @@ fn gc_marks_through_valid_manifests_only() {
     let m = Manifest::new(entries).unwrap();
     assert_eq!(
         store.publish_snapshot(m.entries.clone(), false).unwrap(),
-        Ok(wt_store::PublishOutcome::Published)
+        wt_store::PublishOutcome::Published
     );
 
     let wt_dir = base.path().join("wt");

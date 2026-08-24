@@ -116,7 +116,16 @@ struct AttrList {
     forkattr: u32,
 }
 
+// SAFETY contract for every call below: each function is called with
+// pointers derived from valid, NUL-terminated C strings or valid
+// buffers for the duration of the call only; none of the three keep
+// references after returning. The declarations are repeated locally
+// (instead of via the `libc` crate) so the fast path does not depend
+// on the crate version carrying them.
 extern "C" {
+    /// SAFETY (callers): `fd` must be an open directory file
+    /// descriptor; `attr_list`/`attr_buf` must be valid for
+    /// `attr_buf_size` bytes.
     fn getattrlistbulk(
         fd: i32,
         attr_list: *const AttrList,
@@ -124,7 +133,12 @@ extern "C" {
         attr_buf_size: usize,
         options: u64,
     ) -> i32;
+    /// SAFETY (callers): `path` must point to a valid NUL-terminated
+    /// C string; variadic mode is required for the O_CREAT-less open
+    /// used here (no third argument is passed).
     fn open(path: *const core::ffi::c_char, oflag: i32, ...) -> i32;
+    /// SAFETY (callers): `fd` must be an open descriptor and must not
+    /// be used again afterwards.
     fn close(fd: i32) -> i32;
 }
 
