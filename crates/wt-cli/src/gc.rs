@@ -59,9 +59,8 @@ pub fn parse_age(text: &str) -> Option<Duration> {
 /// (e.g. `15m`, `1h`), else fifteen minutes.
 pub fn grace_from_env() -> Result<Duration> {
     match std::env::var("WT_GC_GRACE") {
-        Ok(text) => parse_age(&text).ok_or_else(|| {
-            Error::Usage(format!("invalid WT_GC_GRACE {text:?} (try 15m, 1h, 7d)"))
-        }),
+        Ok(text) => parse_age(&text)
+            .ok_or_else(|| Error::Usage(format!("invalid WT_GC_GRACE {text:?} (try 15m, 1h, 7d)"))),
         Err(_) => Ok(DEFAULT_GRACE),
     }
 }
@@ -76,8 +75,8 @@ pub fn grace_from_env() -> Result<Duration> {
 /// which name snapshots (nothing to release).
 fn read_ledger(git_dir: &Path) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
     let path = git_dir.join("wt-hydrated.tsv");
-    let text = fs::read_to_string(&path)
-        .map_err(|e| Error::io("read hydration ledger", &path, e))?;
+    let text =
+        fs::read_to_string(&path).map_err(|e| Error::io("read hydration ledger", &path, e))?;
     let mut blobs = BTreeSet::new();
     let mut snapshots = BTreeSet::new();
     for line in text.lines() {
@@ -122,7 +121,10 @@ pub fn remove(name: &str, dir: Option<&Path>) -> Result<()> {
         None => gitops::default_worktree_dest(&root, name)?,
     };
     if !dest.join(".git").exists() {
-        return Err(Error::Usage(format!("{} is not a worktree", dest.display())));
+        return Err(Error::Usage(format!(
+            "{} is not a worktree",
+            dest.display()
+        )));
     }
 
     // The linked git dir holds the ledger. Resolve it while the
@@ -148,9 +150,7 @@ pub fn remove(name: &str, dir: Option<&Path>) -> Result<()> {
     // types — file records mark blobs directly, snapshot records mark
     // through their manifests.
     if (!ledger.is_empty() || !ledger_snapshots.is_empty())
-        && store
-            .mirror_is_missing(&dest, &git_dir)
-            ?
+        && store.mirror_is_missing(&dest, &git_dir)?
     {
         let ids: Vec<ContentId> = ledger
             .iter()
@@ -183,15 +183,19 @@ pub fn remove(name: &str, dir: Option<&Path>) -> Result<()> {
     }
 
     if !ledger_blobs.is_empty() || !ledger_snapshots.is_empty() {
-        fs::remove_file(git_dir.join("wt-hydrated.tsv"))
-            .map_err(|e| Error::io_unanchored("remove ledger", git_dir.join("wt-hydrated.tsv"), e))?;
+        fs::remove_file(git_dir.join("wt-hydrated.tsv")).map_err(|e| {
+            Error::io_unanchored("remove ledger", git_dir.join("wt-hydrated.tsv"), e)
+        })?;
         // Retire the mirror now that both the sidecar and the
         // worktree are going away.
         store.remove_worktree_mirror(&dest, &git_dir)?;
     }
 
-    gitops::run(&root, &["worktree", "remove", &dest.to_string_lossy()])
-        .map_err(|e| Error::Git(format!("git worktree remove failed (references already released): {e}")))?;
+    gitops::run(&root, &["worktree", "remove", &dest.to_string_lossy()]).map_err(|e| {
+        Error::Git(format!(
+            "git worktree remove failed (references already released): {e}"
+        ))
+    })?;
 
     println!(
         "removed worktree {}; released {released} reference{}",
@@ -210,10 +214,7 @@ pub fn sweep(age: Option<Duration>) -> Result<()> {
             // Dual-write parity evidence: compare what mirrors would
             // keep against what refcounts kept. Agreement prints
             // nothing; any disagreement is loud on stderr.
-            for line in store
-                .audit_marks_against_refs(grace_from_env()?)
-                ?
-            {
+            for line in store.audit_marks_against_refs(grace_from_env()?)? {
                 eprintln!("{line}");
             }
             println!(

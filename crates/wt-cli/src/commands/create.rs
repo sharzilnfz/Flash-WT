@@ -20,12 +20,7 @@ use crate::snapshots;
 use crate::snapshots::Outcome as SnapshotOutcome;
 use crate::timing::StageTimings;
 
-pub fn run(
-    name: &str,
-    manifest: Option<&Path>,
-    dir: Option<&Path>,
-    cfg: &RunConfig,
-) -> Result<()> {
+pub fn run(name: &str, manifest: Option<&Path>, dir: Option<&Path>, cfg: &RunConfig) -> Result<()> {
     create(name, manifest, dir, cfg)
 }
 
@@ -216,8 +211,7 @@ fn hydrate_one_dir(
                     timings.build_publish_ms += b.publish_ms;
                 }
                 let refs = Instant::now();
-                let git_dir =
-                    claim_snapshot_references(store, dest, &ingested, h.hash)?;
+                let git_dir = claim_snapshot_references(store, dest, &ingested, h.hash)?;
                 timings.references_ms += refs.elapsed().as_millis();
                 println!(
                     "hydrated {heavy} from {} via snapshot {} (one clone, {} file{})",
@@ -234,9 +228,7 @@ fn hydrate_one_dir(
                 });
             }
             SnapshotOutcome::FellBack(Some(reason)) => {
-                eprintln!(
-                    "wt-snapshots: {heavy}: falling back to per-file placement ({reason})"
-                );
+                eprintln!("wt-snapshots: {heavy}: falling back to per-file placement ({reason})");
             }
             SnapshotOutcome::FellBack(None) => {}
             SnapshotOutcome::Failed(msg) => {

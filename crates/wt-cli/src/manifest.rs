@@ -46,7 +46,10 @@ pub enum LoadedPatterns {
     Loaded { patterns: Vec<String> },
     /// No default-path manifest existed; defaults were chosen and a
     /// starter manifest written to `path`.
-    CreatedStarter { path: PathBuf, patterns: Vec<String> },
+    CreatedStarter {
+        path: PathBuf,
+        patterns: Vec<String>,
+    },
 }
 
 /// Parse manifest text into patterns, skipping blank lines and
@@ -159,7 +162,10 @@ pub fn load_patterns(root: &Path, manifest: Option<&Path>) -> Result<LoadedPatte
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if manifest.is_some() {
-                return Err(Error::Usage(format!("manifest {} not found", path.display())));
+                return Err(Error::Usage(format!(
+                    "manifest {} not found",
+                    path.display()
+                )));
             }
             write_starter_manifest(&path)?;
             Ok(LoadedPatterns::CreatedStarter {
@@ -175,17 +181,13 @@ pub fn load_patterns(root: &Path, manifest: Option<&Path>) -> Result<LoadedPatte
 /// destination, then one atomic rename, so a crash never leaves a
 /// half-written manifest behind.
 fn write_starter_manifest(path: &Path) -> Result<()> {
-    let refuse = |source: std::io::Error| {
-        Error::io_unanchored("write starter manifest", path, source)
-    };
+    let refuse =
+        |source: std::io::Error| Error::io_unanchored("write starter manifest", path, source);
     let parent = path.parent().ok_or_else(|| {
-        Error::Usage(
-            "cannot write starter manifest: manifest path has no parent directory".into(),
-        )
+        Error::Usage("cannot write starter manifest: manifest path has no parent directory".into())
     })?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(refuse)?;
-    tmp.write_all(STARTER_MANIFEST.as_bytes())
-        .map_err(refuse)?;
+    tmp.write_all(STARTER_MANIFEST.as_bytes()).map_err(refuse)?;
     tmp.persist(path).map_err(|e| refuse(e.error))?;
     Ok(())
 }
@@ -263,7 +265,10 @@ mod tests {
         let found = collect_matches(root, &patterns).unwrap();
         // `outer/inner` matched `inner/` directly but sits inside the
         // `outer` match, so the outer copy already covers it.
-        assert_eq!(found, vec![PathBuf::from("outer"), PathBuf::from("standalone")]);
+        assert_eq!(
+            found,
+            vec![PathBuf::from("outer"), PathBuf::from("standalone")]
+        );
     }
 
     #[test]
@@ -289,7 +294,10 @@ mod tests {
             LoadedPatterns::CreatedStarter { path, patterns } => {
                 assert_eq!(
                     patterns,
-                    DEFAULT_PATTERNS.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+                    DEFAULT_PATTERNS
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
                 );
                 path
             }

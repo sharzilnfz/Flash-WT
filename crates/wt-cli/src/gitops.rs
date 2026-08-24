@@ -46,11 +46,11 @@ pub fn git_dir(worktree: &Path) -> Result<PathBuf> {
         .output()
         .map_err(|e| Error::Git(format!("cannot query git dir: {e}")))?;
     if !out.status.success() {
-        return Err(Error::Git("newly created worktree is not a git worktree".into()));
+        return Err(Error::Git(
+            "newly created worktree is not a git worktree".into(),
+        ));
     }
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&out.stdout).trim(),
-    ))
+    Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
 }
 
 /// The default destination for a new worktree: a sibling of the

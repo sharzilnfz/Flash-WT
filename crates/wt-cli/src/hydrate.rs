@@ -152,8 +152,8 @@ pub fn ingest_dir(
                 };
                 let path = src.join(&entry.rel_path);
                 if entry.is_symlink {
-                    let target = fs::read_link(&path)
-                        .map_err(|e| Error::io("read symlink", &path, e))?;
+                    let target =
+                        fs::read_link(&path).map_err(|e| Error::io("read symlink", &path, e))?;
                     ingested
                         .symlinks
                         .insert(rel.clone(), target.to_string_lossy().into_owned());
@@ -180,8 +180,7 @@ pub fn ingest_dir(
                 let id = match cache.lookup(&rel, entry.size, mtime) {
                     Some(id) if store.contains(&id) => id,
                     _ => {
-                        let bytes = fs::read(&path)
-                            .map_err(|e| Error::io("read", &path, e))?;
+                        let bytes = fs::read(&path).map_err(|e| Error::io("read", &path, e))?;
                         let id = store.put(&bytes)?;
                         cache.record(
                             rel.clone(),
@@ -221,22 +220,19 @@ fn ingest_dir_walk(
 ) -> Result<()> {
     let mut stack = vec![src.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries =
-            fs::read_dir(&dir).map_err(|e| Error::io("read", &dir, e))?;
+        let entries = fs::read_dir(&dir).map_err(|e| Error::io("read", &dir, e))?;
         ingested.dirs.push(rel_text(src_root, &dir)?);
         for entry in entries.flatten() {
             let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|e| Error::io("stat", &path, e))?;
+            let file_type = entry.file_type().map_err(|e| Error::io("stat", &path, e))?;
             if file_type.is_symlink() {
                 // Ticket 08: with snapshots on, symlinks are recorded
                 // faithfully in the manifest (target only — targets are
                 // never stored as blobs). With the gate off, the long-
                 // standing skip applies unchanged.
                 if snapshots {
-                    let target = fs::read_link(&path)
-                        .map_err(|e| Error::io("read symlink", &path, e))?;
+                    let target =
+                        fs::read_link(&path).map_err(|e| Error::io("read symlink", &path, e))?;
                     ingested.symlinks.insert(
                         rel_text(src_root, &path)?,
                         target.to_string_lossy().into_owned(),
@@ -261,23 +257,19 @@ fn ingest_dir_walk(
                 continue;
             }
             let rel = rel_text(src_root, &path)?;
-            let meta =
-                fs::metadata(&path).map_err(|e| Error::io("stat", &path, e))?;
+            let meta = fs::metadata(&path).map_err(|e| Error::io("stat", &path, e))?;
             if snapshots {
                 ingested.modes.insert(rel.clone(), meta.mode() & 0o7777);
             }
             let size = meta.len();
-            let mtime = meta
-                .modified()
-                .map_err(|e| Error::io("stat", &rel, e))?;
+            let mtime = meta.modified().map_err(|e| Error::io("stat", &rel, e))?;
             let id = match cache.lookup(&rel, size, mtime) {
                 // Cache hit: same size and same mtime as last time.
                 // Trust it only while the blob is actually still here.
                 Some(id) if store.contains(&id) => id,
                 _ => {
                     // Miss (or a swept blob): pay for read and hash.
-                    let bytes = fs::read(&path)
-                        .map_err(|e| Error::io("read", &path, e))?;
+                    let bytes = fs::read(&path).map_err(|e| Error::io("read", &path, e))?;
                     let id = store.put(&bytes)?;
                     // An mtime before the epoch cannot round-trip
                     // through the cache format; skip caching rather
@@ -423,14 +415,11 @@ pub fn materialize(
                 let parent = dest
                     .parent()
                     .ok_or_else(|| Error::Store(format!("{rel} has no parent")))?;
-                fs::create_dir_all(parent)
-                    .map_err(|e| Error::io("prepare", parent, e))?;
+                fs::create_dir_all(parent).map_err(|e| Error::io("prepare", parent, e))?;
                 match place(backend.as_deref(), &src, &dest) {
                     Ok(true) => {}
                     Ok(false) => copied += 1,
-                    Err(e) => {
-                        return Err(Error::Store(format!("materialize {rel}: {e}")))
-                    }
+                    Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
                 }
             }
             Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
@@ -498,14 +487,17 @@ pub fn claim_references(
         .create(true)
         .append(true)
         .open(git_dir.join("wt-hydrated.tsv"))
-        .map_err(|e| Error::io_unanchored("open hydration ledger", git_dir.join("wt-hydrated.tsv"), e))?;
+        .map_err(|e| {
+            Error::io_unanchored("open hydration ledger", git_dir.join("wt-hydrated.tsv"), e)
+        })?;
     // 40k one-line writes through an unbuffered handle cost 40k
     // write(2) syscalls; a BufWriter turns that into a handful of
     // large ones.
     let mut sidecar = io::BufWriter::with_capacity(128 * 1024, sidecar_file);
     for (rel, id) in &ingested.files {
-        writeln!(sidecar, "{rel}\t{id}")
-            .map_err(|e| Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e))?;
+        writeln!(sidecar, "{rel}\t{id}").map_err(|e| {
+            Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e)
+        })?;
     }
     sidecar
         .flush()
@@ -568,12 +560,15 @@ pub fn claim_snapshot_references(
         .create(true)
         .append(true)
         .open(git_dir.join("wt-hydrated.tsv"))
-        .map_err(|e| Error::io_unanchored("open hydration ledger", git_dir.join("wt-hydrated.tsv"), e))?;
+        .map_err(|e| {
+            Error::io_unanchored("open hydration ledger", git_dir.join("wt-hydrated.tsv"), e)
+        })?;
     // Same buffering rationale as claim_references.
     let mut sidecar = io::BufWriter::with_capacity(128 * 1024, sidecar_file);
     for (rel, id) in &ingested.files {
-        writeln!(sidecar, "{rel}\tblob\t{id}")
-            .map_err(|e| Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e))?;
+        writeln!(sidecar, "{rel}\tblob\t{id}").map_err(|e| {
+            Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e)
+        })?;
     }
     writeln!(sidecar, "-\tsnapshot\t{snapshot}")
         .map_err(|e| Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e))?;
