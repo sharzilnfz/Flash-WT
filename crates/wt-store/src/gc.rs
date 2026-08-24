@@ -71,7 +71,10 @@ impl GcMode {
     }
 
     /// Write `<root>/gc-mode`. Writing legacy removes the marker,
-    /// restoring pre-marker semantics for any binary.
+    /// restoring pre-marker semantics for any binary. The write is
+    /// crash-durable (fsync before rename): the mode marker gates
+    /// collection strategy, so a half-landed marker is exactly the
+    /// ambiguity the durability work exists to eliminate.
     pub fn write(self, root: &Path) -> io::Result<()> {
         let path = root.join("gc-mode");
         match self.text() {
@@ -80,7 +83,7 @@ impl GcMode {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(e),
             },
-            text => fs::write(&path, format!("{text}\n")),
+            text => crate::fsutil::durable_write(&path, format!("{text}\n").as_bytes()),
         }
     }
 }

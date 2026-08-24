@@ -14,11 +14,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Instant;
 
-use sha2::{Digest, Sha256};
-
 use super::manifest::{EntryKind, Manifest, SnapshotEntry};
 use super::publish::BuildError;
-use crate::{DiskStore, Error, Store};
+use crate::DiskStore;
+use crate::Error;
 
 /// Internal phase timings of the tree-construction phase.
 /// Milliseconds, best-effort.
@@ -134,20 +133,24 @@ pub(super) fn paranoid_verify_tree(tree_dir: &Path, manifest: &Manifest) -> Resu
                 let Some(blob) = entry.blob else {
                     return Err(malformed_entry(entry, "file entry lacks a blob ref"));
                 };
-                let bytes = match fs::read(tree_dir.join(&entry.rel)) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        return Err(BuildError::Fatal(format!(
-                            "paranoid check cannot read staged file {}: {e}",
+                // Streaming read-and-hash of the STAGED copy (a
+                // hardlink to the blob, so same inode): constant
+                // memory no matter how big the file.
+                if let Err(e) = DiskStore::verify_file(&tree_dir.join(&entry.rel), &blob) {
+                    return Err(match e {
+                        Error::UnknownContent(_) => BuildError::Fatal(format!(
+                            "paranoid check cannot read staged file {}: it is missing",
                             entry.rel
-                        )));
-                    }
-                };
-                if crate::ContentId(Sha256::digest(&bytes).into()) != blob {
-                    return Err(BuildError::Fatal(format!(
-                        "paranoid check failed: staged file {} does not hash to its blob {}",
-                        entry.rel, blob
-                    )));
+                        )),
+                        Error::Io(io) => BuildError::Fatal(format!(
+                            "paranoid check cannot read staged file {}: {io}",
+                            entry.rel
+                        )),
+                        _ => BuildError::Fatal(format!(
+                            "paranoid check failed: staged file {} does not hash to its blob {}",
+                            entry.rel, blob
+                        )),
+                    });
                 }
             }
         }
@@ -185,8 +188,8 @@ impl DiskStore {
     /// calls it for added and content-modified entries, and for any
     /// manifest-required dir the delta left missing). Semantics are
     /// identical:
-    /// verify-first policy (`paranoid` = full read-and-hash via
-    /// [`Store::get`], otherwise verified-ledger trust through
+    /// verify-first policy (`paranoid` = full streaming read-and-hash,
+    /// otherwise verified-ledger trust through
     /// [`DiskStore::ensure_verified`]), hardlink +
     /// skip-no-op-chmod for files, symlink recreation, mkdir + chmod
     /// for dirs. Missing blobs surface as [`BuildError::MissingBlob`]
@@ -248,10 +251,14 @@ impl DiskStore {
                 }
                 timings.link_train_ms += stage.elapsed().as_millis() as u64;
                 // Verify first: a corrupt or missing blob never
-                // reaches placement.
+                // reaches placement. Both checks STREAM the bytes
+                // through a fixed-size window, so verification cost
+                // is bounded regardless of blob size; paranoid runs
+                // always re-hash, everyone else trusts the verified
+                // ledger when it can answer.
                 let stage = Instant::now();
                 let verdict = if paranoid {
-                    Store::get(self, &blob).map(|_| ())
+                    self.verify_digest(&blob)
                 } else {
                     self.ensure_verified(&blob)
                 };

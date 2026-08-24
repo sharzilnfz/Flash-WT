@@ -25,6 +25,12 @@
 //! dropped rather than trusted; saving rewrites the whole file through
 //! temp-file-plus-rename so a crash mid-write leaves either the
 //! previous ledger or the complete new one, never a mixture.
+//!
+//! Durability status: this ledger is REBUILDABLE (losing it only costs
+//! re-verification of every blob on the next run), so it is
+//! deliberately NOT crash-durable — writes are atomic but not fsynced.
+//! Only blobs, mirrors, gc-mode, and snapshot metadata are
+//! crash-durable.
 
 use std::collections::BTreeMap;
 use std::fs;

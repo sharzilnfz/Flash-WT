@@ -459,10 +459,19 @@ impl DiskStore {
         fill_tree(&tree_dir, &manifest, &mut timing)?;
 
         let stage = Instant::now();
-        fs::write(tmp_path.join("manifest.tsv"), manifest.serialize())?;
-        fs::write(
-            tmp_path.join(".complete"),
-            format!("v1\t{}\n", manifest.hash),
+        // Durability ordering: the metadata that PROVES this snapshot
+        // valid (manifest.tsv, .complete) is fsynced before the
+        // rename, and the snapshots directory is fsynced after. A
+        // crash mid-publish can then never leave the final name over
+        // empty/unwritten bytes — the worst case is no published name
+        // at all (pure cache debris GC already understands).
+        crate::fsutil::durable_write(
+            &tmp_path.join("manifest.tsv"),
+            manifest.serialize().as_bytes(),
+        )?;
+        crate::fsutil::durable_write(
+            &tmp_path.join(".complete"),
+            format!("v1\t{}\n", manifest.hash).as_bytes(),
         )?;
 
         let final_path = self.snapshot_path(&manifest.hash);
@@ -471,6 +480,7 @@ impl DiskStore {
                 // Dropping the TempDir handle now tries to remove the
                 // OLD temp path, which no longer exists: a harmless
                 // no-op that leaves the published tree untouched.
+                crate::fsutil::sync_parent_dir(&final_path)?;
                 PublishOutcome::Published
             }
             Err(e) if matches!(e.raw_os_error(), Some(libc::EEXIST) | Some(libc::ENOTEMPTY)) => {

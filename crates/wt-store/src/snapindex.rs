@@ -21,6 +21,10 @@
 //! in the same directory, then rename). Parsing is tolerant: any line
 //! that does not validate is dropped silently — the index is pure
 //! optimization metadata, never worth failing a create over.
+//!
+//! Durability status: rebuildable and best-effort by design (losing it
+//! only degrades v2 incremental rebuilds to full builds); NOT
+//! crash-durable — writes are atomic but not fsynced.
 
 use std::fs;
 use std::io::{self, Write};

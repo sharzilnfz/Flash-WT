@@ -7,6 +7,7 @@
 //! (ticket 06).
 
 mod disk;
+mod fsutil;
 mod gc;
 mod mirror;
 mod snapdiff;
@@ -57,6 +58,7 @@ impl fmt::Display for ContentId {
 impl ContentId {
     /// Parse the lowercase hex form produced by [`Display`]. Returns
     /// `None` for anything that is not exactly 64 hex digits.
+    #[must_use]
     pub fn from_hex(text: &str) -> Option<ContentId> {
         let bytes = text.as_bytes();
         if bytes.len() != 64 || !bytes.iter().all(u8::is_ascii_hexdigit) {

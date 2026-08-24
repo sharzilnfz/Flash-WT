@@ -18,6 +18,10 @@
 //! lines are dropped rather than trusted; saving rewrites the whole
 //! file through temp-file-plus-rename so a crash mid-write leaves
 //! either the previous cache or the complete new one, never a mixture.
+//!
+//! Durability status: rebuildable and best-effort by design (losing it
+//! only costs a full re-read-and-hash on the next ingest); NOT
+//! crash-durable — writes are atomic but not fsynced.
 
 use std::collections::BTreeMap;
 use std::fs;
