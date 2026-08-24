@@ -201,14 +201,11 @@ pub fn remove(name: &str, dir: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-pub fn sweep(age: Option<&str>) -> Result<()> {
+pub fn sweep(age: Option<Duration>) -> Result<()> {
     let mut store = open_store()?;
     match store.gc_mode() {
         GcMode::Legacy => {
-            let age_text = age.unwrap_or("7d");
-            let max_age = parse_age(age_text).ok_or_else(|| {
-                Error::Usage(format!("invalid --age {age_text:?} (try 0s, 10m, 1h, 7d)"))
-            })?;
+            let max_age = age.unwrap_or(Duration::from_secs(7 * 24 * 60 * 60));
             let swept = store.sweep(max_age)?;
             // Dual-write parity evidence: compare what mirrors would
             // keep against what refcounts kept. Agreement prints
@@ -229,9 +226,7 @@ pub fn sweep(age: Option<&str>) -> Result<()> {
         }
         GcMode::MarkSweep | GcMode::MarkSweepNoRefs => {
             let grace = match age {
-                Some(explicit) => parse_age(explicit).ok_or_else(|| {
-                    Error::Usage(format!("invalid --age {explicit:?} (try 0s, 10m, 1h, 7d)"))
-                })?,
+                Some(explicit) => explicit,
                 None => grace_from_env()?,
             };
             let swept = store.sweep_mark_sweep(grace)?;

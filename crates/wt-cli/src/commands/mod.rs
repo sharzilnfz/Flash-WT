@@ -17,7 +17,7 @@ pub fn run(command: WtCommand) -> Result<()> {
             dir,
         } => create::run(&name, manifest.as_deref(), dir.as_deref()),
         WtCommand::Remove { name, dir } => remove::run(&name, dir.as_deref()),
-        WtCommand::Sweep { age } => sweep::run(age.as_deref()),
+        WtCommand::Sweep { age } => sweep::run(age),
         WtCommand::Store { action } => match action {
             StoreAction::Migrate {
                 activate_mark_sweep,

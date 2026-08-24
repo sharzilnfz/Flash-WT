@@ -3,8 +3,16 @@
 //! the command handlers under `commands/`.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
+
+/// Custom `--age` value parser: bad durations die at parse time,
+/// before any side effect.
+fn parse_age_value(text: &str) -> Result<Duration, String> {
+    crate::gc::parse_age(text)
+        .ok_or_else(|| format!("invalid duration {text:?} (try 0s, 90s, 10m, 1h, 7d)"))
+}
 
 #[derive(Parser)]
 #[command(
@@ -83,8 +91,8 @@ per-file ladder above.")]
         /// content that is mid-ingestion or awaiting its first
         /// reference. Defaults to 7d in legacy mode, and to
         /// WT_GC_GRACE (default 15m) in mark-sweep mode.
-        #[arg(long)]
-        age: Option<String>,
+        #[arg(long, value_parser = parse_age_value)]
+        age: Option<Duration>,
     },
     /// Store-level inspection and one-way migrations.
     Store {
@@ -98,6 +106,9 @@ pub enum StoreAction {
     /// Migrate the store's garbage-collection scheme (one-way; see
     /// ADR-0004). Until activated, sweep stays refcount-driven and
     /// every sweep audits mirrors against refs for parity.
+    #[command(group = ArgGroup::new("migrate-mode")
+        .required(true)
+        .args(&["activate_mark_sweep", "drop_legacy_refs"]))]
     Migrate {
         /// Sweep collects from live-mirror marks plus the grace
         /// period (WT_GC_GRACE, default 15m) from now on. Legacy
