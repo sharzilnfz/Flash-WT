@@ -12,7 +12,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use crate::copy_tree::copy_tree;
-use crate::{ensure_dest_free, BackendKind, CopyBackend, Error, Result};
+use crate::{BackendKind, CopyBackend, Error, Result};
 
 #[derive(Debug, Default)]
 pub struct ReflinkBackend;
@@ -38,9 +38,10 @@ impl CopyBackend for ReflinkBackend {
     }
 
     fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()> {
-        ensure_dest_free(dest)?;
-        let mut clone_file = |from: &Path, to: &Path| reflink_file(from, to);
-        copy_tree(src, dest, &mut clone_file).map_err(Error::Io)
+        crate::copy_tree::staged_copy(dest, self.safety(), &mut |staging| {
+            let mut clone_file = |from: &Path, to: &Path| reflink_file(from, to).map_err(Error::Io);
+            copy_tree(src, staging, &mut clone_file).map_err(Error::Io)
+        })
     }
 }
 

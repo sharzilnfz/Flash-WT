@@ -23,7 +23,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use crate::copy_tree::copy_tree;
-use crate::{ensure_dest_free, BackendKind, CopyBackend, Error, Result, Safety};
+use crate::{BackendKind, CopyBackend, Error, Result, Safety};
 
 #[derive(Debug, Default)]
 pub struct HardlinkBackend;
@@ -48,16 +48,17 @@ impl CopyBackend for HardlinkBackend {
     }
 
     fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()> {
-        ensure_dest_free(dest)?;
-        let mut link_file = |from: &Path, to: &Path| {
-            fs::hard_link(from, to)?;
-            // Strip write bits from the shared inode; keep exec so
-            // scripts and shims stay runnable.
-            let mut perms = fs::metadata(to)?.permissions();
-            perms.set_mode(perms.mode() & !0o222);
-            fs::set_permissions(to, perms)
-        };
-        copy_tree(src, dest, &mut link_file).map_err(Error::Io)
+        crate::copy_tree::staged_copy(dest, self.safety(), &mut |staging| {
+            let mut link_file = |from: &Path, to: &Path| {
+                fs::hard_link(from, to)?;
+                // Strip write bits from the shared inode; keep exec so
+                // scripts and shims stay runnable.
+                let mut perms = fs::metadata(to)?.permissions();
+                perms.set_mode(perms.mode() & !0o222);
+                fs::set_permissions(to, perms)
+            };
+            copy_tree(src, staging, &mut link_file).map_err(Error::Io)
+        })
     }
 }
 
