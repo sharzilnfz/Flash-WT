@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::manifest::{EntryKind, Manifest, SnapshotEntry};
-use super::tree::{clone_dir_recursive, paranoid_verify_tree, TreeTimings};
+use super::tree::{TreeTimings, clone_dir_recursive, paranoid_verify_tree};
 use crate::snapdiff::SnapshotDiff;
 use crate::{ContentId, DiskStore};
 

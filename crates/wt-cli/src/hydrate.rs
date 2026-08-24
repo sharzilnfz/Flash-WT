@@ -39,7 +39,7 @@ use std::time::Instant;
 
 #[cfg(target_os = "macos")]
 use wt_copy::CloneOut;
-use wt_copy::{placement_refused, FileMaterialize, HardlinkOut};
+use wt_copy::{FileMaterialize, HardlinkOut, placement_refused};
 #[cfg(target_os = "macos")]
 use wt_store::bulkwalk;
 use wt_store::{ContentId, DiskStore, Entry as CacheEntry, GcMode, Store, ValidationCache};

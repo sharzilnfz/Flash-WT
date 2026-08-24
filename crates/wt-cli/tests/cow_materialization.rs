@@ -18,7 +18,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use common::{list_files, Fixture};
+use common::{Fixture, list_files};
 
 /// rel path -> bytes for every regular file under `dir`.
 fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {

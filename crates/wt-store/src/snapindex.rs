@@ -31,9 +31,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::mirror::escape;
-use crate::snapshot::{read_published, Manifest};
 use crate::ContentId;
+use crate::mirror::escape;
+use crate::snapshot::{Manifest, read_published};
 
 /// Ring capacity: how many recent manifest hashes one key remembers.
 pub const MAX_RING: usize = 3;
@@ -412,8 +412,8 @@ mod tests {
 
     #[test]
     fn select_walks_ring_newest_first_and_skips_invalid_candidates() {
-        use crate::snapshot::{Manifest, SnapshotEntry};
         use crate::Store as _;
+        use crate::snapshot::{Manifest, SnapshotEntry};
 
         let base = tempfile::tempdir().unwrap();
         let mut store = crate::DiskStore::open(base.path().join("store")).unwrap();

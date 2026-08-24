@@ -125,7 +125,7 @@ struct AttrList {
 // references after returning. The declarations are repeated locally
 // (instead of via the `libc` crate) so the fast path does not depend
 // on the crate version carrying them.
-extern "C" {
+unsafe extern "C" {
     /// SAFETY (callers): `fd` must be an open directory file
     /// descriptor; `attr_list`/`attr_buf` must be valid for
     /// `attr_buf_size` bytes.

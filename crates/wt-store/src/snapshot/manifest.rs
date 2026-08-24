@@ -29,8 +29,8 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::mirror::unescape;
 use crate::ContentId;
+use crate::mirror::unescape;
 
 /// Normalized mode for a regular file with any execute bit set.
 pub(super) const EXEC_FILE_MODE: u32 = 0o755;

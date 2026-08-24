@@ -517,10 +517,11 @@ fn fifo_fails_loudly_under_gate_and_is_skipped_without_it() {
     // succeeds exactly as it always did.
     let out = fx.wt(&["create", "two"], &[], "origin-two");
     assert_created(&out);
-    assert!(fx
-        .worktree_path("origin-two")
-        .join("heavy/pkg00/nested/file-0.txt")
-        .exists());
+    assert!(
+        fx.worktree_path("origin-two")
+            .join("heavy/pkg00/nested/file-0.txt")
+            .exists()
+    );
 }
 
 unsafe fn c_fifo(path: &Path) -> *const std::ffi::c_char {

@@ -20,7 +20,7 @@ use std::io;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
-use crate::{ensure_backend_runnable, Error, Result, Safety};
+use crate::{Error, Result, Safety, ensure_backend_runnable};
 
 /// Copy the tree at `src` into the not-yet-existing directory `dest`,
 /// creating it exclusively.
@@ -159,7 +159,7 @@ pub(crate) mod test_hooks {
 mod tests {
     use super::*;
     use crate::CopyBackend;
-    use crate::{candidates, BackendKind};
+    use crate::{BackendKind, candidates};
     use std::fs;
 
     fn fixture(base: &Path) -> PathBuf {

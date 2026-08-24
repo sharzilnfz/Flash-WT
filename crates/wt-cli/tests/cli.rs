@@ -10,7 +10,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use common::{list_files, Fixture};
+use common::{Fixture, list_files};
 
 const HEAVY_FILES: usize = 2_000;
 

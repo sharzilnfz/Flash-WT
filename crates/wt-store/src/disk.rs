@@ -121,7 +121,7 @@ impl DiskStore {
         let meta = match fs::metadata(&path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(Error::UnknownContent(*id))
+                return Err(Error::UnknownContent(*id));
             }
             Err(e) => return Err(e.into()),
         };
@@ -158,7 +158,7 @@ impl DiskStore {
         let file = match fs::File::open(path) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(Error::UnknownContent(*expected))
+                return Err(Error::UnknownContent(*expected));
             }
             Err(e) => return Err(e.into()),
         };

@@ -32,7 +32,7 @@ use wt_store::{ContentId, DiskStore, SnapshotBuildTiming};
 use wt_copy::{ClonefileBackend, CopyBackend};
 #[cfg(target_os = "macos")]
 use wt_store::{
-    select_old_snapshot, BuildError, Manifest, PublishOutcome, SnapshotDiff, SnapshotEntry,
+    BuildError, Manifest, PublishOutcome, SnapshotDiff, SnapshotEntry, select_old_snapshot,
 };
 
 use crate::config::RunConfig;
@@ -191,7 +191,7 @@ fn hydrate_impl(
                             lookup_ms,
                             clonefile_ms,
                             build,
-                        })
+                        });
                     }
                     // Snapshot evicted mid-flight: rebuild and try again.
                     Err(CloneFailure::SnapshotVanished) => continue,

@@ -14,7 +14,7 @@ use std::fs;
 use std::path::Path;
 use std::thread;
 
-use common::{list_files, Fixture};
+use common::{Fixture, list_files};
 
 /// Total file count under the store root — how much content it holds.
 /// The ingest validation cache and the verified-blob ledger beside the

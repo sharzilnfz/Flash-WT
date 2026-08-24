@@ -492,10 +492,11 @@ fn sweep_evicts_unreferenced_old_generation_but_shared_blobs_survive() {
         String::from_utf8_lossy(&removed.stderr)
     );
 
-    assert!(fx
-        .wt_raw(&["store", "migrate", "--activate-mark-sweep"])
-        .status
-        .success());
+    assert!(
+        fx.wt_raw(&["store", "migrate", "--activate-mark-sweep"])
+            .status
+            .success()
+    );
     let swept = fx.wt_raw(&["sweep", "--age", "0s"]);
     assert!(
         swept.status.success(),
@@ -573,10 +574,11 @@ fn sweep_keeps_old_generation_alive_when_newer_snapshot_dir_vanishes() {
     ))
     .unwrap();
 
-    assert!(fx
-        .wt_raw(&["store", "migrate", "--activate-mark-sweep"])
-        .status
-        .success());
+    assert!(
+        fx.wt_raw(&["store", "migrate", "--activate-mark-sweep"])
+            .status
+            .success()
+    );
     let swept = fx.wt_raw(&["sweep", "--age", "0s"]);
     assert!(
         swept.status.success(),

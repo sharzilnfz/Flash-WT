@@ -14,10 +14,10 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::{assert_trees_identical, list_files, unix_symlink, TreeFixture};
+use common::{TreeFixture, assert_trees_identical, list_files, unix_symlink};
 use wt_copy::{
-    candidates, select_backend, BackendKind, CopyBackend, DeepCopyBackend, Error, Safety,
-    SourcePolicy,
+    BackendKind, CopyBackend, DeepCopyBackend, Error, Safety, SourcePolicy, candidates,
+    select_backend,
 };
 
 /// Backends that can actually operate on `dir` right now: supported,

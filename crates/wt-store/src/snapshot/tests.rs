@@ -1,6 +1,6 @@
 //! Snapshot manifest and publish tests (fast-hydration ticket 08).
 
-use super::manifest::{serialize_entries, DIR_MODE, EXEC_FILE_MODE, PLAIN_FILE_MODE};
+use super::manifest::{DIR_MODE, EXEC_FILE_MODE, PLAIN_FILE_MODE, serialize_entries};
 use super::*;
 use sha2::{Digest as _, Sha256};
 use std::fs;

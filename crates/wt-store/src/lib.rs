@@ -22,17 +22,17 @@ pub mod bulkwalk;
 pub use disk::DiskStore;
 pub use gc::{GcMode, MarkReport, MarkSwept};
 pub use mirror::{
-    escape, mirror_path, publish as publish_mirror, read_all as read_mirrors, unescape,
-    worktree_key, ReadMirror, StoreMirror,
+    ReadMirror, StoreMirror, escape, mirror_path, publish as publish_mirror,
+    read_all as read_mirrors, unescape, worktree_key,
 };
 pub use snapdiff::SnapshotDiff;
 pub use snapindex::{
-    record_hit as record_snapshot_hit, record_publish as record_snapshot_publish,
-    select_old_snapshot, SelectionIndex, SelectionRecord, MAX_RING,
+    MAX_RING, SelectionIndex, SelectionRecord, record_hit as record_snapshot_hit,
+    record_publish as record_snapshot_publish, select_old_snapshot,
 };
 pub use snapshot::{
-    read_published as read_published_snapshot, snapshot_path, snapshot_tree_path, BuildError,
-    EntryKind, Manifest, PublishOutcome, PublishReceipt, SnapshotBuildTiming, SnapshotEntry,
+    BuildError, EntryKind, Manifest, PublishOutcome, PublishReceipt, SnapshotBuildTiming,
+    SnapshotEntry, read_published as read_published_snapshot, snapshot_path, snapshot_tree_path,
 };
 pub use validation::{Entry, ValidationCache};
 pub use verified::{Fingerprint, VerifiedLedger};

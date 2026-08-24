@@ -127,7 +127,7 @@ fn read_published_checked(root: &Path, hash: &ContentId) -> Verdict {
     let complete = match fs::read_to_string(dir.join(".complete")) {
         Ok(complete) => complete,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Verdict::Invalid("missing .complete marker".into())
+            return Verdict::Invalid("missing .complete marker".into());
         }
         Err(e) => return Verdict::Io(e),
     };

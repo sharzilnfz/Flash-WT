@@ -193,8 +193,8 @@ fn ancestor_dirs(rel: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{EntryKind, SnapshotEntry};
     use crate::ContentId;
+    use crate::snapshot::{EntryKind, SnapshotEntry};
 
     fn id(n: u8) -> ContentId {
         let mut bytes = [0u8; 32];

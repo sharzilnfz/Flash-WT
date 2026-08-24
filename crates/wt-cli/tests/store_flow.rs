@@ -12,7 +12,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use common::{list_files, Fixture};
+use common::{Fixture, list_files};
 
 /// Total bytes and file count of everything under the store root —
 /// the externally observable measure of how much content it holds.

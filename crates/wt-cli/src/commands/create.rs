@@ -12,10 +12,10 @@ use crate::config::{RunConfig, StrategyPolicy};
 use crate::error::{Error, Result};
 use crate::gitops;
 use crate::hydrate::{
-    claim_references, claim_snapshot_references, ingest_dir, materialize, open_store,
-    publish_mirror, Ingested, MaterializeReport,
+    Ingested, MaterializeReport, claim_references, claim_snapshot_references, ingest_dir,
+    materialize, open_store, publish_mirror,
 };
-use crate::manifest::{self, collect_matches, load_patterns, pattern_matches, LoadedPatterns};
+use crate::manifest::{self, LoadedPatterns, collect_matches, load_patterns, pattern_matches};
 use crate::snapshots;
 use crate::snapshots::Outcome as SnapshotOutcome;
 use crate::timing::StageTimings;
@@ -138,13 +138,7 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>, cfg: &RunConf
         .map_err(|e| Error::io_unanchored("update verified-blob ledger", store.root(), e))?;
     println!(
         "hydration complete: {total_files} file{} through the store",
-        {
-            if total_files == 1 {
-                ""
-            } else {
-                "s"
-            }
-        }
+        { if total_files == 1 { "" } else { "s" } }
     );
     timings.emit(started, timing_enabled);
     Ok(())
@@ -232,7 +226,7 @@ fn hydrate_one_dir(
             }
             SnapshotOutcome::FellBack(None) => {}
             SnapshotOutcome::Failed(msg) => {
-                return Err(Error::Store(format!("hydration of {heavy} failed: {msg}")))
+                return Err(Error::Store(format!("hydration of {heavy} failed: {msg}")));
             }
         }
         // Fell through to the per-file ladder below; its cost is

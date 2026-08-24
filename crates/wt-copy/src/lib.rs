@@ -38,12 +38,12 @@ pub use hardlink::HardlinkBackend;
 // CloneOut wraps fclonefileat(2) and only exists on macOS; other
 // platforms take the byte-copy path (see wt-cli select_strategy).
 #[cfg(target_os = "macos")]
-pub use materialize::{placement_refused, CloneOut, FileMaterialize, HardlinkOut};
+pub use materialize::{CloneOut, FileMaterialize, HardlinkOut, placement_refused};
 #[cfg(not(target_os = "macos"))]
-pub use materialize::{placement_refused, FileMaterialize, HardlinkOut};
+pub use materialize::{FileMaterialize, HardlinkOut, placement_refused};
 #[cfg(target_os = "linux")]
 pub use reflink::ReflinkBackend;
-pub use selection::{candidates, select_backend, SourcePolicy};
+pub use selection::{SourcePolicy, candidates, select_backend};
 
 use std::io;
 use std::path::Path;

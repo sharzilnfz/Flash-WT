@@ -17,7 +17,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use common::{list_files, Fixture};
+use common::{Fixture, list_files};
 
 /// Flip the first byte of one stored blob. When `restore_mtime` is
 /// set, put the original mtime back exactly afterwards: size never
