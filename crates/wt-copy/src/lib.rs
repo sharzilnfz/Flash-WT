@@ -4,6 +4,21 @@
 //! Linux reflink, and hardlink. Callers never branch on the OS; they
 //! ask the selection layer (ticket 03) for the best backend for a
 //! given directory and call [`CopyBackend::copy_dir`].
+//!
+//! ## Source policy
+//!
+//! [`select_backend`] also takes a [`SourcePolicy`] promise about the
+//! source tree. Hardlink strips write bits from the shared inode, and
+//! because permissions live on the inode, the source path loses them
+//! too — hydrating FROM a live checkout would silently make its files
+//! unwritable. The rules:
+//!
+//! - Hydration from the Store passes
+//!   [`SourcePolicy::Immutable`]: blobs and snapshot trees are
+//!   content-addressed and never mutate.
+//! - Hydration from a live checkout (anything outside the Store)
+//!   passes [`SourcePolicy::Any`]: hardlink is excluded up front and
+//!   selection falls through to deep copy.
 
 #[cfg(target_os = "macos")]
 mod clonefile;
@@ -28,7 +43,7 @@ pub use materialize::{placement_refused, CloneOut, FileMaterialize, HardlinkOut}
 pub use materialize::{placement_refused, FileMaterialize, HardlinkOut};
 #[cfg(target_os = "linux")]
 pub use reflink::ReflinkBackend;
-pub use selection::{candidates, select_backend};
+pub use selection::{candidates, select_backend, SourcePolicy};
 
 use std::io;
 use std::path::Path;

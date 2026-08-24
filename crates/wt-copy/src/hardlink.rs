@@ -12,9 +12,11 @@
 //! managers already exercise trees for.
 //!
 //! The trade-off is inherent to hardlinks: permissions live on the
-//! inode, so the source path loses its write bits too. Callers must
-//! therefore hand this backend immutable sources — in practice,
-//! content-addressed store objects.
+//! inode, so the source path loses its write bits too. Selection
+//! therefore hands this backend immutable sources only: it is picked
+//! under [`crate::SourcePolicy::Immutable`] and skipped entirely
+//! under [`crate::SourcePolicy::Any`]. In practice that means
+//! content-addressed store objects and snapshot trees.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

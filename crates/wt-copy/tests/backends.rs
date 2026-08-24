@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use common::{assert_trees_identical, list_files, unix_symlink, TreeFixture};
 use wt_copy::{
     candidates, select_backend, BackendKind, CopyBackend, DeepCopyBackend, Error, Safety,
+    SourcePolicy,
 };
 
 /// Backends that can actually operate on `dir` right now: supported,
@@ -191,15 +192,22 @@ fn hardlink_backend_runs_with_copy_on_shared_write_guard() {
 }
 
 /// Selection picks the best available backend per filesystem: always
-/// something safe, and the fastest thing that works.
+/// something safe, and the fastest thing that works. The integration
+/// default is `Any` — the conservative promise — so hardlink is only
+/// ever picked by callers that explicitly claim immutability.
 #[test]
 fn selection_picks_the_best_available_backend() {
     let fixture = TreeFixture::heavy_tree(1);
     let dir = fixture.src.parent().unwrap();
 
-    let picked = select_backend(dir);
+    let picked = select_backend(dir, SourcePolicy::Any);
     assert_eq!(picked.safety(), Safety::Safe);
     assert!(picked.supports(dir));
+    assert_ne!(
+        picked.kind(),
+        BackendKind::Hardlink,
+        "Any policy must never select hardlink"
+    );
 
     #[cfg(target_os = "macos")]
     assert_eq!(
@@ -215,6 +223,18 @@ fn selection_picks_the_best_available_backend() {
     assert!(all.iter().any(|b| b.kind() == BackendKind::DeepCopy));
     assert_eq!(all.last().unwrap().kind(), BackendKind::DeepCopy);
     assert_eq!(all[all.len() - 2].kind(), BackendKind::Hardlink);
+
+    // With an Immutable promise, a filesystem without clone support
+    // may pick hardlink — but on APFS clonefile still wins.
+    let immutable = select_backend(dir, SourcePolicy::Immutable);
+    assert_eq!(immutable.safety(), Safety::Safe);
+
+    // Even against paths where nothing but the floor reports support,
+    // both policies yield deep copy rather than panicking.
+    let nowhere = Path::new("/definitely/not/here");
+    for policy in [SourcePolicy::Immutable, SourcePolicy::Any] {
+        assert_eq!(select_backend(nowhere, policy).kind(), BackendKind::DeepCopy);
+    }
 }
 
 /// Selection falls back to deep copy when no fast mechanism applies.
