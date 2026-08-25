@@ -645,8 +645,8 @@ fn deleted_subtree_delta_lands_exactly() {
                     &old_manifest.hash,
                     false
                 )
-                .unwrap(),
-            Err(BuildError::Fatal(_))
+                .unwrap_err(),
+            BuildError::Fatal(_)
         ));
     }
     store.flush().unwrap();

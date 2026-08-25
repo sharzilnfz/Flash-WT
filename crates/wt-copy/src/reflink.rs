@@ -39,7 +39,7 @@ impl CopyBackend for ReflinkBackend {
 
     fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()> {
         crate::copy_tree::staged_copy(dest, self.safety(), &mut |staging| {
-            let mut clone_file = |from: &Path, to: &Path| reflink_file(from, to).map_err(Error::Io);
+            let mut clone_file = |from: &Path, to: &Path| reflink_file(from, to);
             copy_tree(src, staging, &mut clone_file).map_err(Error::Io)
         })
     }
