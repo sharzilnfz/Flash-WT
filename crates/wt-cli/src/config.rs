@@ -45,6 +45,10 @@ pub struct RunConfig {
     pub snapshots: bool,
     /// `WT_SNAPSHOTS_V2`: incremental snapshot rebuilds. Only ever
     /// honored together with `snapshots`.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(dead_code, reason = "v2 gate is macOS-only")
+    )]
     pub v2: bool,
     /// `WT_TIMING`: print `wt-stage` lines to stderr.
     pub timing: bool,

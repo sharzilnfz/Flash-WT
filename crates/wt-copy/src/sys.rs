@@ -69,7 +69,7 @@ mod tests {
 
         #[cfg(target_os = "linux")]
         // Ordinary tempdirs are not mounted read-only.
-        assert_eq!(read_only(dir.path()).expect("statvfs"), false);
+        assert!(!read_only(dir.path()).expect("statvfs"));
 
         let err = statfs_of(Path::new("/definitely/not/here")).expect_err("ENOENT expected");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);

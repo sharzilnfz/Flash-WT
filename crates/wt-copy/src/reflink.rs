@@ -14,6 +14,8 @@ use std::path::Path;
 use crate::copy_tree::copy_tree;
 use crate::{BackendKind, CopyBackend, Error, Result};
 
+/// Copy-on-write clone backend for Linux (`FICLONE` ioctl on
+/// btrfs/XFS). See the module docs for how per-file clones compose.
 #[derive(Debug, Default)]
 pub struct ReflinkBackend;
 
