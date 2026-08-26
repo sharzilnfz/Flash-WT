@@ -238,7 +238,7 @@ fn miss_builds_publishes_and_second_create_hits_with_private_files() {
     let published: Vec<String> = fs::read_dir(&snapshots_dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| n != "tmp")
+        .filter(|n| n != "tmp" && n != "index.tsv" && n != "lru.tsv")
         .collect();
     assert_eq!(published.len(), 1, "exactly one snapshot expected");
 
@@ -426,7 +426,7 @@ fn concurrent_identical_creates_one_publish_wins_loser_consumes_winner() {
     let published: Vec<String> = fs::read_dir(&snapshots_dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| n != "tmp")
+        .filter(|n| n != "tmp" && n != "index.tsv" && n != "lru.tsv")
         .collect();
     assert_eq!(
         published.len(),
@@ -456,7 +456,7 @@ fn evicted_snapshot_referenced_by_mirror_rebuilds_on_next_create() {
     let hash = fs::read_dir(&snapshots_dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .find(|n| *n != "tmp")
+        .find(|n| *n != "tmp" && *n != "index.tsv" && *n != "lru.tsv")
         .expect("published snapshot");
     fs::remove_dir_all(snapshots_dir.join(&hash)).unwrap();
 
