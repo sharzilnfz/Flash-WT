@@ -248,23 +248,32 @@ fn parse_record(
     // Fixed-width data, consumed in kernel source order. A reserved
     // (always-zero here) error slot sits at @20 before the first
     // attribute; see get_error_attributes in xnu's vfs_attrlist.c.
+    // Every read below is length-checked against the record first so
+    // a truncated or malformed buffer degrades into the portable walk
+    // (an io::Error) instead of panicking on slice indexing.
     let mut pos = 24usize;
 
     // NAME: attrreference_t { i32 dataoffset (relative to itself),
     // u32 length including the trailing NUL }; bytes live in the tail.
+    if record.len() < pos + 8 {
+        return Err(io::Error::other("getattrlistbulk record too short"));
+    }
     let dataoffset = read_i32(record, pos);
     let name_len = read_u32(record, pos + 4) as usize;
     if name_len == 0 || dataoffset < 0 {
         return Err(io::Error::other("getattrlistbulk returned a bad name"));
     }
     let name_start = (pos as isize + dataoffset as isize) as usize;
-    if name_start + name_len > record.len() {
+    if name_len > record.len() || name_start > record.len() - name_len {
         return Err(io::Error::other("getattrlistbulk returned a bad name"));
     }
     let raw_name = &record[name_start..name_start + name_len - 1];
     pos += 8;
 
     // OBJTYPE: u32 vtype.
+    if record.len() < pos + 4 {
+        return Err(io::Error::other("getattrlistbulk record too short"));
+    }
     let vtype = read_u32(record, pos);
     pos += 4;
 
@@ -272,6 +281,9 @@ fn parse_record(
     let mut mtime_secs = 0u64;
     let mut mtime_nanos = 0u32;
     if common & ATTR_CMN_MODTIME != 0 {
+        if record.len() < pos + 16 {
+            return Err(io::Error::other("getattrlistbulk record too short"));
+        }
         let secs = read_i64(record, pos);
         let nanos = read_i64(record, pos + 8);
         pos += 16;
@@ -286,6 +298,9 @@ fn parse_record(
     // with `MetadataExt::mode`.
     let mut mode = 0u32;
     if common & ATTR_CMN_ACCESSMASK != 0 {
+        if record.len() < pos + 4 {
+            return Err(io::Error::other("getattrlistbulk record too short"));
+        }
         mode = read_u32(record, pos);
         pos += 4;
     }
@@ -293,6 +308,9 @@ fn parse_record(
     // FILE DATALENGTH: u64; only returned for non-directories.
     let mut size = 0u64;
     if filebits & ATTR_FILE_DATALENGTH != 0 {
+        if record.len() < pos + 8 {
+            return Err(io::Error::other("getattrlistbulk record too short"));
+        }
         size = read_u64(record, pos);
     }
 

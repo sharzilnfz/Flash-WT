@@ -75,6 +75,7 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>, cfg: &RunConf
     let mut strategy = "byte-copy";
     let mut combined = Ingested {
         dirs: Vec::new(),
+        dir_modes: BTreeMap::new(),
         files: BTreeMap::new(),
         symlinks: BTreeMap::new(),
         modes: BTreeMap::new(),
@@ -95,6 +96,9 @@ fn create(name: &str, manifest: Option<&Path>, dir: Option<&Path>, cfg: &RunConf
             None => total_files += outcome.ingested.files.len(),
             Some(report) => {
                 combined.dirs.extend(outcome.ingested.dirs.iter().cloned());
+                for (rel, mode) in &outcome.ingested.dir_modes {
+                    combined.dir_modes.insert(rel.clone(), *mode);
+                }
                 for (rel, id) in &outcome.ingested.files {
                     combined.files.insert(rel.clone(), *id);
                 }

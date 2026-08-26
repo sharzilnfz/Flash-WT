@@ -95,6 +95,17 @@ per-file ladder above.")]
         #[arg(long, value_parser = parse_age_value)]
         age: Option<Duration>,
     },
+    /// Re-hash every blob in the store against its content address
+    /// and repair corruption. Closes the documented trust-model gap:
+    /// a bit flip that preserves both size and mtime slips past the
+    /// verified-blob ledger between checks, and only a full scrub can
+    /// see it.
+    Scrub {
+        /// Report corrupt blobs without deleting anything (and
+        /// without touching the verified-blob ledger).
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Store-level inspection and one-way migrations.
     Store {
         #[command(subcommand)]

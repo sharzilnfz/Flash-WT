@@ -145,13 +145,13 @@ impl SnapshotDiff {
         // entry under d/ is dirty. All entries carrying the d/
         // prefix sort in the half-open range ["d/", "d0"): '/' + 1
         // is '0', so the successor bound is just an appended '0'.
+        // The bounds are compared without materializing either string
+        // (this runs once per candidate directory on the v2 path).
         let fully: HashMap<&str, bool> = dirs
             .iter()
             .map(|d| {
-                let prefix = format!("{d}/");
-                let bound = format!("{d}0");
-                let start = merged.partition_point(|rel| rel.as_bytes() < prefix.as_bytes());
-                let end = merged.partition_point(|rel| rel.as_bytes() < bound.as_bytes());
+                let start = merged.partition_point(|rel| rel_before_bound(rel, d, b'/'));
+                let end = merged.partition_point(|rel| rel_before_bound(rel, d, b'0'));
                 debug_assert!(end >= start);
                 let clean_range = end >= start && dirty_prefix[end] - dirty_prefix[start] == 0;
                 (*d, clean_range && same.contains(d))
@@ -175,6 +175,22 @@ impl SnapshotDiff {
 
 fn entries_identical(a: &SnapshotEntry, b: &SnapshotEntry) -> bool {
     a.kind == b.kind && a.mode == b.mode && a.blob == b.blob && a.target == b.target
+}
+
+/// Byte-wise `rel < dir + suffix` without allocating the joined bound.
+fn rel_before_bound(rel: &str, dir: &str, suffix: u8) -> bool {
+    let r = rel.as_bytes();
+    let d = dir.as_bytes();
+    let Some(head) = r.get(..d.len()) else {
+        // Shorter than the dir: a proper prefix sorts strictly before
+        // both the dir and anything extending it.
+        return true;
+    };
+    if head == d {
+        r.len() == d.len() || r[d.len()] < suffix
+    } else {
+        head < d
+    }
 }
 
 /// Proper directory ancestors of a relpath, nearest first:

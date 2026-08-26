@@ -209,7 +209,16 @@ impl DiskStore {
         let path = dir.join(id.to_string());
         let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
         writeln!(tmp, "{count}")?;
+        // Durability ordering mirrors fsutil::durable_write_then_rename
+        // (fsync the FILE before the rename, fsync the parent after):
+        // refcounts gate legacy sweeps, so a rename that landed over
+        // never-written data could silently drop an increment below
+        // what live trees hold and let a later sweep collect content
+        // still in use. This runs once per distinct blob per create,
+        // not per byte, so the fsync cost is bounded by fan-in.
+        tmp.as_file().sync_all()?;
         tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
+        crate::fsutil::sync_parent_dir(&path)?;
         Ok(())
     }
     /// Every content id currently stored, in stable order. Malformed
@@ -256,7 +265,11 @@ impl DiskStore {
             Err(e) => return Err(e.into()),
         }
         fs::remove_file(self.object_path(id))?;
-        // Best-effort cleanup of an emptied shard directory.
+        // Best-effort cleanup of an emptied shard directory. Ignoring
+        // failure is safe by construction: the shard may still hold
+        // other blobs (ENOTEMPTY), and leaving an empty shard behind
+        // only costs one readdir slot — enumeration keys off blob file
+        // names, never off shard directories.
         if let Some(shard) = self.object_path(id).parent() {
             let _ = fs::remove_dir(shard);
         }
@@ -364,6 +377,14 @@ impl Store for DiskStore {
             // hash of the bytes just written through an atomic rename,
             // so a fresh blob is verified by construction.
             let perms = fs::Permissions::from_mode(0o644);
+            // Failure is deliberately swallowed here, and only here:
+            // the worst case is a blob left at the temp file's 0600
+            // mode, exactly the accepted state of blobs written by
+            // older versions (their clones come out owner-rw-only).
+            // Correctness is untouched — materialize applies the
+            // per-path mode recorded at ingest time — and failing the
+            // put over a cosmetic chmod would strand already-durable
+            // content.
             let _ = fs::set_permissions(&path, perms);
             if let Ok(meta) = fs::metadata(&path) {
                 if let Ok(mtime) = meta.modified() {
@@ -414,7 +435,15 @@ impl Store for DiskStore {
             }
             Err(e) => return Err(e.into()),
         };
-        self.write_ref_count(id, current + 1)
+        // checked_add: a wrapping increment in release mode would
+        // publish a zero refcount for live content — exactly the state
+        // a sweep collects. u64::MAX references cannot happen honestly.
+        let next = current.checked_add(1).ok_or_else(|| {
+            Error::Io(io::Error::other(format!(
+                "reference count overflow for {id}"
+            )))
+        })?;
+        self.write_ref_count(id, next)
     }
 
     fn release_ref(&mut self, id: &ContentId) -> Result<()> {

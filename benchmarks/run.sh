@@ -258,13 +258,14 @@ gap_mode_example=""
 #   3. Symlink targets, via the sorted readlink listing.
 #
 # baseline and cow runs must match on all three axes; any mismatch is
-# fatal. wt runs additionally tolerate exactly two KNOWN fidelity gaps,
-# counted and reported in the results section rather than silently
-# ignored, because wt ingest skips symlinks and normalizes file modes
-# today (see crates/wt-cli/src/hydrate.rs); closing that gap needs CLI
-# changes tracked by the hydration performance plan. Anything beyond
-# those two axes — wrong bytes, missing or extra regular files, missing
-# empty directories, unexpected symlinks — fails a wt run too.
+# fatal. wt runs are held to the same standard today: ingest records
+# symlinks and per-file/directory modes, so hydration restores them
+# exactly (see crates/wt-cli/src/hydrate.rs). The tolerated-gap
+# accounting below survives only as a LEGACY FALLBACK for trees
+# hydrated by binaries or stores predating that fidelity work; if it
+# fires on a current build, something regressed. Anything beyond those
+# two axes — wrong bytes, missing or extra regular files, missing
+# empty directories, unexpected symlinks — fails a wt run either way.
 verify_tree() { # src dest
     local src=$1 dest=$2
     # Per-run symlink-gap tally: the suite-level counter accumulates,
@@ -656,14 +657,19 @@ run_suite() { # label generator_function file_count
 
     if [ "$gap_links" -gt 0 ] || [ "$gap_modes" -gt 0 ]; then
         echo
-        echo "### Known wt fidelity gaps surfaced by --verify on this fixture"
+        echo "### wt fidelity tolerances surfaced by --verify on this fixture (legacy fallback)"
+        echo
+        echo "Current wt ingest records and restores symlinks and modes, so these"
+        echo "tolerances should NOT fire on a modern binary and store. They are kept"
+        echo "as a legacy fallback for trees hydrated by pre-fidelity binaries or"
+        echo "stores; if they appear on a current build, treat it as a regression."
         echo
         echo "- $gap_links symlink(s) absent from wt-hydrated trees (first: \`$gap_link_example\`)."
-        echo "  wt ingest skips symlinks today (crates/wt-cli/src/hydrate.rs); baseline and"
-        echo "  direct-CoW clones preserve them and are held to that standard."
+        echo "  Legacy fallback only: current wt ingest records symlinks and recreates"
+        echo "  them verbatim; baseline and direct-CoW clones are held to exact parity."
         echo "- $gap_modes file(s) with different modes (first: \`$gap_mode_example\`)."
-        echo "  wt stores blobs with normalized writable modes, dropping exec bits;"
-        echo "  again, the plain-copy scenarios are held to exact-mode parity."
+        echo "  Legacy fallback only: current wt records per-path modes (and directory"
+        echo "  modes) at ingest and restores them after placement."
         echo "Everything else — bytes, file presence, empty directories — matched exactly,"
         echo "and any deviation there fails the run."
     fi

@@ -21,6 +21,13 @@
 //! the grace period. No `git worktree list` calls: git's
 //! administrative records outlive `rm -rf` until pruned, so they are
 //! not a liveness oracle.
+//!
+//! Unreferenced snapshots additionally face an LRU retention cap
+//! (product-handoff §7.4): past the grace filter at most
+//! `snapshot_cap` of them survive each sweep (`WT_SNAPSHOT_CAP`,
+//! default 64), least-recently-used first, with last-use stamps in
+//! the [`crate::snapindex::SnapshotLru`] sidecar beside
+//! `snapshots/`. Referenced snapshots never count against the cap.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -218,13 +225,17 @@ impl DiskStore {
     /// Sweep in a mirror-driven mode: delete unmarked blobs older
     /// than the grace period, unreferenced/debris snapshots older
     /// than it, snapshot temp data older than it, and stale mirrors.
+    /// On top of the grace period, unreferenced snapshots are also
+    /// capped at `snapshot_cap` entries (`WT_SNAPSHOT_CAP`, default
+    /// 64): when more survive the grace filter than the cap allows,
+    /// the least-recently-used go first, per product-handoff §7.4.
     ///
     /// If any malformed mirror is younger than the grace window, this
     /// pass deletes NOTHING beyond what [`DiskStore::compute_marks`]
     /// already removed: an unparsable mirror might name live roots we
     /// cannot see, and waiting one more grace period costs disk, not
     /// correctness.
-    pub fn sweep_mark_sweep(&mut self, grace: Duration) -> Result<MarkSwept> {
+    pub fn sweep_mark_sweep(&mut self, grace: Duration, snapshot_cap: usize) -> Result<MarkSwept> {
         let now = SystemTime::now();
         let cutoff = cutoff_of(now, grace);
         let marks = self.compute_marks(now, grace)?;
@@ -236,6 +247,7 @@ impl DiskStore {
             reclaimed: 0,
             mirrors_removed: marks.stale_mirrors_removed.len() as u64,
             snapshot_dirs_removed: 0,
+            snapshot_cap_evicted: 0,
             deferred_by_grace: marks.invalid_young > 0,
         };
         if outcome.deferred_by_grace {
@@ -257,22 +269,41 @@ impl DiskStore {
             outcome.reclaimed += 1;
         }
 
-        outcome.snapshot_dirs_removed =
-            self.sweep_snapshots(&marks.referenced_snapshots, cutoff)?;
+        let (swept, cap_evicted) =
+            self.sweep_snapshots(&marks.referenced_snapshots, cutoff, snapshot_cap)?;
+        outcome.snapshot_dirs_removed = swept + cap_evicted;
+        outcome.snapshot_cap_evicted = cap_evicted;
         Ok(outcome)
     }
 
-    /// Snapshot retention (plan's eviction rule): snapshots are
-    /// rebuildable caches, not roots. Anything under `snapshots/`
-    /// that is either unreferenced by a live mirror or debris, and
-    /// older than the cutoff, goes. Phase 1 stores have no snapshots
-    /// directory, so this is normally a no-op scan.
-    fn sweep_snapshots(&self, referenced: &BTreeSet<ContentId>, cutoff: SystemTime) -> Result<u64> {
+    /// Snapshot retention (plan's eviction rule + §7.4 LRU cap):
+    /// snapshots are rebuildable caches, not roots. Anything under
+    /// `snapshots/` that is either unreferenced by a live mirror or
+    /// debris, and older than the cutoff, goes — and when more than
+    /// `cap` unreferenced aged-out snapshots remain, the surplus is
+    /// deleted least-recently-used first (LRU sidecar stamp, falling
+    /// back to directory mtime; unknown age counts as oldest).
+    /// Referenced snapshots never count against the cap, and young
+    /// (inside-grace) ones are simply skipped this pass, whatever the
+    /// cap says. Phase 1 stores have no snapshots directory, so this
+    /// is normally a no-op scan.
+    ///
+    /// Returns `(grace-and-debris removals, retention-cap evictions)`.
+    fn sweep_snapshots(
+        &self,
+        referenced: &BTreeSet<ContentId>,
+        cutoff: SystemTime,
+        cap: usize,
+    ) -> Result<(u64, u64)> {
         let mut removed = 0u64;
         let dir = self.root().join("snapshots");
         let Ok(entries) = fs::read_dir(&dir) else {
-            return Ok(0);
+            return Ok((0, 0));
         };
+        let lru = crate::snapindex::SnapshotLru::load(self.root());
+        // Aged-out, unreferenced survivors of this pass, awaiting the
+        // retention-cap decision.
+        let mut candidates: Vec<(ContentId, PathBuf)> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
             let modified = match fs::metadata(&path).and_then(|m| m.modified()) {
@@ -284,34 +315,55 @@ impl DiskStore {
             }
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name == "tmp" {
-                // Temp build debris past the grace window.
-                if remove_tree(&path) {
-                    removed += 1;
+            match name.as_ref() {
+                "tmp" => {
+                    // Temp build debris past the grace window.
+                    if remove_tree(&path) {
+                        removed += 1;
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if name == "index.tsv" {
-                // Live selection metadata for v2 incremental
-                // rebuilds, not rebuildable cache: never collected.
-                // (Its own temp-file debris has a non-hex name and
-                // falls through to collection below.)
-                continue;
+                "index.tsv" | "lru.tsv" => {
+                    // Live selection/LRU-retention metadata, not
+                    // rebuildable cache: never collected. (Their own
+                    // temp-file debris has a non-hex name and falls
+                    // through to collection below.)
+                    continue;
+                }
+                _ => {}
             }
             let id = ContentId::from_hex(&name);
             match id {
                 Some(id) if referenced.contains(&id) => {}
-                _ => {
+                Some(id) => candidates.push((id, path)),
+                None => {
                     // Referenced-but-unresolvable snapshots stay:
                     // their blobs' fate follows blob marks alone, and the
-                    // directory may still be mid-publish.
+                    // directory may still be mid-publish. Non-hex names
+                    // are sidecar temp debris: collectible.
                     if remove_tree(&path) {
                         removed += 1;
                     }
                 }
             }
         }
-        Ok(removed)
+
+        let mut cap_evicted = 0u64;
+        if candidates.len() > cap {
+            // Least-recently-used first; the sort key falls back to
+            // the publish-time directory mtime and finally to 0 for
+            // anything unreadable, so unknown age loses.
+            candidates.sort_by_key(|(id, path)| {
+                lru.last_use(id).unwrap_or_else(|| path_mtime_secs(path))
+            });
+            let excess = candidates.len() - cap;
+            for (_, path) in candidates.drain(..excess) {
+                if remove_tree(&path) {
+                    cap_evicted += 1;
+                }
+            }
+        }
+        Ok((removed, cap_evicted))
     }
 
     /// Audit mode (legacy sweeps): compare mirror-marks against
@@ -371,8 +423,13 @@ pub struct MarkSwept {
     pub reclaimed: u64,
     /// Stale mirrors removed.
     pub mirrors_removed: u64,
-    /// Snapshot directories (including tmp debris) removed.
+    /// Snapshot directories (including tmp debris) removed. Includes
+    /// [`Self::snapshot_cap_evicted`].
     pub snapshot_dirs_removed: u64,
+    /// Of those, how many went purely because the unreferenced
+    /// snapshot count exceeded the retention cap (LRU order), not
+    /// because of age.
+    pub snapshot_cap_evicted: u64,
     /// True when a malformed mirror inside the grace window deferred
     /// all deletion this pass.
     pub deferred_by_grace: bool,
@@ -403,6 +460,17 @@ pub struct MarkReport {
 
 fn cutoff_of(now: SystemTime, grace: Duration) -> SystemTime {
     now.checked_sub(grace).unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+/// Unix seconds of `path`'s mtime, or 0 when it cannot be read — the
+/// LRU eviction order treats unknown age as oldest.
+fn path_mtime_secs(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Apply one parsed mirror's records to the report.

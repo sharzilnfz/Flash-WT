@@ -582,9 +582,8 @@ fn invalid_winner_debris_falls_back_to_per_file_ladder() {
         "debris is left untouched"
     );
 
-    // The per-file ladder preserves gate-off semantics for everything
-    // it can place (symlinks are skipped there — long-standing v1
-    // behavior, recorded in ADR-0005).
+    // The per-file ladder places everything the fixture holds, gate
+    // or no gate.
     let heavy = fx.worktree_path("origin-one").join("heavy");
     assert_eq!(
         fs::read_to_string(heavy.join("pkg00/nested/file-0.txt")).unwrap(),
@@ -647,10 +646,9 @@ fn gc_marks_through_valid_manifests_only() {
 }
 
 #[test]
-fn snapshot_covers_everything_the_ladder_places_plus_symlinks() {
-    // The per-file ladder skips symlinks (long-standing behavior);
-    // the snapshot path represents them faithfully. So the snapshot
-    // tree must be exactly the ladder's tree PLUS the symlink.
+fn ladder_and_snapshot_hydrate_identical_trees() {
+    // Both hydration paths represent every manifest kind faithfully,
+    // so their trees must be the same path set — symlink included.
     let fx = RichFixture::new();
     assert_created(&fx.wt(&["create", "plain"], &[], "origin-plain"));
     assert_created(&fx.wt(&["create", "snap"], SNAPSHOTS_ON, "origin-snap"));
@@ -664,17 +662,9 @@ fn snapshot_covers_everything_the_ladder_places_plus_symlinks() {
     let plain = rel_prefix(&fx.worktree_path("origin-plain").join("heavy"));
     let snap = rel_prefix(&fx.worktree_path("origin-snap").join("heavy"));
 
-    // Every path the ladder places, the snapshot places too.
-    for p in &plain {
-        assert!(
-            snap.contains(p),
-            "snapshot must place {p:?} like the ladder does"
-        );
-    }
-    // And only the snapshot carries the symlink.
+    assert_eq!(plain, snap, "ladder and snapshot must place the same paths");
     assert!(
-        !plain.contains(&PathBuf::from("bin-link")),
-        "ladder skips symlinks (pre-existing behavior)"
+        plain.contains(&PathBuf::from("bin-link")),
+        "both paths must carry the symlink"
     );
-    assert!(snap.contains(&PathBuf::from("bin-link")));
 }

@@ -4,6 +4,7 @@
 pub mod create;
 pub mod migrate;
 pub mod remove;
+pub mod scrub;
 pub mod sweep;
 
 use crate::cli::{StoreAction, WtCommand};
@@ -19,6 +20,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<()> {
         } => create::run(&name, manifest.as_deref(), dir.as_deref(), cfg),
         WtCommand::Remove { name, dir } => remove::run(&name, dir.as_deref()),
         WtCommand::Sweep { age } => sweep::run(age),
+        WtCommand::Scrub { dry_run } => scrub::run(dry_run),
         WtCommand::Store { action } => match action {
             StoreAction::Migrate {
                 activate_mark_sweep,

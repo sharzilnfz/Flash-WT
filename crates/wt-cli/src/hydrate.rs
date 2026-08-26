@@ -33,7 +33,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -76,25 +76,31 @@ pub fn open_store() -> Result<DiskStore> {
 pub struct Ingested {
     /// Repo-relative directory paths to recreate even when empty.
     pub dirs: Vec<String>,
+    /// Repo-relative directory path -> on-disk mode (`& 0o7777`).
+    /// Recorded on every ingest; materialize restores these bits
+    /// after placement, because `create_dir_all` normalizes new
+    /// directories through the process umask just like it once did
+    /// for files.
+    pub dir_modes: BTreeMap<String, u32>,
     /// Repo-relative file path -> stored content address.
     pub files: BTreeMap<String, ContentId>,
-    /// Ticket 08 (only populated when `WT_SNAPSHOTS=1`): repo-relative
-    /// symlink path -> raw target. Symlinks are recorded, never
-    /// followed or stored as blobs; only the snapshot manifest
-    /// consumes them.
+    /// Repo-relative symlink path -> raw target (possibly dangling;
+    /// targets are never followed or stored as blobs). Recorded on
+    /// every ingest so both the fallback ladder and the snapshot
+    /// manifest can recreate the link verbatim.
     pub symlinks: BTreeMap<String, String>,
-    /// Ticket 08 (same gate): repo-relative file path -> on-disk mode.
-    /// Only the snapshot manifest consumes these; the per-file ladder
-    /// keeps its existing normalized-mode behavior untouched.
+    /// Repo-relative file path -> on-disk mode (`& 0o7777`). Recorded
+    /// on every ingest; the fallback ladder restores it after
+    /// placement, the snapshot manifest consumes it too.
     pub modes: BTreeMap<String, u32>,
 }
 
 /// Walk `src`, storing every regular file's bytes. Symlinks are never
-/// followed out of `src`; with the snapshot gate off they are skipped
-/// for now rather than misinterpreted (matching the copy-backend
-/// trait's stance). With `WT_SNAPSHOTS=1` they are recorded for the
-/// manifest instead, and non-regular files fail loudly rather than
-/// silently vanishing from a snapshot.
+/// followed out of `src`; they are recorded with their raw targets
+/// (dangling ones included) so materialize can recreate them
+/// verbatim, and non-regular files are skipped — except under
+/// `WT_SNAPSHOTS=1`, where anything a manifest cannot represent fails
+/// loudly rather than silently vanishing from a snapshot.
 ///
 /// Ticket 02: a validation cache beside the store remembers each
 /// path's size, mtime, and content id from the previous ingest. A
@@ -114,6 +120,7 @@ pub fn ingest_dir(
     let snapshots = cfg.snapshots;
     let mut ingested = Ingested {
         dirs: Vec::new(),
+        dir_modes: BTreeMap::new(),
         files: BTreeMap::new(),
         symlinks: BTreeMap::new(),
         modes: BTreeMap::new(),
@@ -143,6 +150,13 @@ pub fn ingest_dir(
             // the legacy walk) speaks repo-relative paths, so prefix
             // with the heavy directory's own repo-relative name.
             let base = rel_text(src_root, src)?;
+            // The heavy root itself is a directory the manifest must
+            // carry (its clone replaces it wholesale on the snapshot
+            // path, but the per-file ladder recreates it).
+            let root_meta = fs::symlink_metadata(src).map_err(|e| Error::io("stat", src, e))?;
+            ingested
+                .dir_modes
+                .insert(base.clone(), root_meta.mode() & 0o7777);
             ingested.dirs.push(base.clone());
             for entry in entries {
                 let rel = if base.is_empty() {
@@ -156,10 +170,11 @@ pub fn ingest_dir(
                         fs::read_link(&path).map_err(|e| Error::io("read symlink", &path, e))?;
                     ingested
                         .symlinks
-                        .insert(rel.clone(), target.to_string_lossy().into_owned());
+                        .insert(rel, target.to_string_lossy().into_owned());
                     continue;
                 }
                 if entry.is_dir {
+                    ingested.dir_modes.insert(rel.clone(), entry.mode & 0o7777);
                     ingested.dirs.push(rel);
                     continue;
                 }
@@ -221,23 +236,29 @@ fn ingest_dir_walk(
     let mut stack = vec![src.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = fs::read_dir(&dir).map_err(|e| Error::io("read", &dir, e))?;
-        ingested.dirs.push(rel_text(src_root, &dir)?);
+        let rel = rel_text(src_root, &dir)?;
+        // One extra stat per DIRECTORY (not per file): its permission
+        // bits must survive hydration, since create_dir_all cannot
+        // carry them through the umask.
+        let dir_meta = fs::symlink_metadata(&dir).map_err(|e| Error::io("stat", &dir, e))?;
+        ingested
+            .dir_modes
+            .insert(rel.clone(), dir_meta.mode() & 0o7777);
+        ingested.dirs.push(rel);
         for entry in entries.flatten() {
             let path = entry.path();
             let file_type = entry.file_type().map_err(|e| Error::io("stat", &path, e))?;
             if file_type.is_symlink() {
-                // Ticket 08: with snapshots on, symlinks are recorded
-                // faithfully in the manifest (target only — targets are
-                // never stored as blobs). With the gate off, the long-
-                // standing skip applies unchanged.
-                if snapshots {
-                    let target =
-                        fs::read_link(&path).map_err(|e| Error::io("read symlink", &path, e))?;
-                    ingested.symlinks.insert(
-                        rel_text(src_root, &path)?,
-                        target.to_string_lossy().into_owned(),
-                    );
-                }
+                // The raw target is what gets recorded, dangling or
+                // not: materialize recreates it verbatim via
+                // symlink(2), which never resolves the target. (With
+                // snapshots on the manifest consumes the same record.)
+                let target =
+                    fs::read_link(&path).map_err(|e| Error::io("read symlink", &path, e))?;
+                ingested.symlinks.insert(
+                    rel_text(src_root, &path)?,
+                    target.to_string_lossy().into_owned(),
+                );
                 continue;
             }
             if file_type.is_dir() {
@@ -258,9 +279,7 @@ fn ingest_dir_walk(
             }
             let rel = rel_text(src_root, &path)?;
             let meta = fs::metadata(&path).map_err(|e| Error::io("stat", &path, e))?;
-            if snapshots {
-                ingested.modes.insert(rel.clone(), meta.mode() & 0o7777);
-            }
+            ingested.modes.insert(rel.clone(), meta.mode() & 0o7777);
             let size = meta.len();
             let mtime = meta.modified().map_err(|e| Error::io("stat", &rel, e))?;
             let id = match cache.lookup(&rel, size, mtime) {
@@ -304,7 +323,9 @@ pub struct MaterializeReport {
     /// Total files placed.
     pub files: usize,
     /// Files written as plain byte copies because the selected
-    /// strategy was disabled or refused by the filesystem.
+    /// strategy was disabled, refused by the filesystem, or could not
+    /// carry the recorded mode (a hardlink whose exec bits mismatched
+    /// is replaced by a private copy — that replacement counts here).
     pub copied: usize,
     /// Strategy attempted for this directory: `"copy-on-write"`
     /// (default), `"hardlink"` (`WT_HARDLINK=1`), or `"byte-copy"`
@@ -359,12 +380,16 @@ fn select_strategy(policy: StrategyPolicy) -> Option<Box<dyn FileMaterialize>> {
 ///
 /// Placement tries the selected strategy (CoW clone by default)
 /// against the verified blob; filesystem refusals fall back silently
-/// to a byte copy from the blob itself. Directories are pre-created
-/// once from the ingested dir list — there is no per-file
-/// `create_dir_all`; if placement still hits ENOENT (a directory the
-/// manifest's walk never saw), it recreates the parent and retries
-/// exactly once, EAFP-style. Permission problems on the destination
-/// are real failures and stay loud.
+/// to a byte copy from the blob itself. After placement each file
+/// gets the mode recorded at ingest time (the exec bit survives even
+/// though blobs themselves are normalized), and every ingested
+/// symlink is recreated verbatim from its raw target, dangling or
+/// not. Directories are pre-created once from the ingested dir
+/// list — there is no per-file `create_dir_all`; if placement still
+/// hits ENOENT (a directory the manifest's walk never saw), it
+/// recreates the parent and retries exactly once, EAFP-style.
+/// Permission problems on the destination are real failures and stay
+/// loud.
 pub fn materialize(
     store: &DiskStore,
     ingested: &Ingested,
@@ -405,9 +430,8 @@ pub fn materialize(
 
         // The ENOENT parent-repair retry is part of placement cost.
         let stage = Instant::now();
-        match place(backend.as_deref(), &src, &dest) {
-            Ok(true) => {}
-            Ok(false) => copied += 1,
+        let placed = match place(backend.as_deref(), &src, &dest) {
+            Ok(placed) => placed,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // The heavy directories themselves were just
                 // recreated above; only an unexpected gap should ever
@@ -417,14 +441,62 @@ pub fn materialize(
                     .ok_or_else(|| Error::Store(format!("{rel} has no parent")))?;
                 fs::create_dir_all(parent).map_err(|e| Error::io("prepare", parent, e))?;
                 match place(backend.as_deref(), &src, &dest) {
-                    Ok(true) => {}
-                    Ok(false) => copied += 1,
+                    Ok(placed) => placed,
                     Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
                 }
             }
             Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
+        };
+        if !placed {
+            copied += 1;
+        }
+        if let Some(&mode) = ingested.modes.get(rel) {
+            // A mode can only be applied in place when the placement
+            // owns its inode; see `finalize_mode` for the shared case.
+            let shared_inode = placed
+                && backend
+                    .as_deref()
+                    .is_some_and(|b| b.shares_inode_with_source());
+            match finalize_mode(shared_inode, mode, &src, &dest) {
+                Ok(repaired) => {
+                    // The shared-inode repair IS a byte copy: count it
+                    // so `copied` reports honestly how much of the
+                    // hardlink strategy actually stuck.
+                    if repaired {
+                        copied += 1;
+                    }
+                }
+                Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
+            }
         }
         place_ms += stage.elapsed().as_millis();
+    }
+    for (rel, target) in &ingested.symlinks {
+        let dest = dest_root.join(rel);
+        // The dirs pass created every walked directory; this only
+        // covers a parent that somehow escaped the walk (same EAFP
+        // stance as the files above).
+        if let Some(parent) = dest.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent).map_err(|e| Error::io("prepare", parent, e))?;
+            }
+        }
+        std::os::unix::fs::symlink(target, &dest)
+            .map_err(|e| Error::io("place symlink", &dest, e))?;
+    }
+    // Restore directory permission bits AFTER placement (a restrictive
+    // parent must not block file creation) and deepest-first: sorted
+    // ascending puts every ancestor before its descendants, so the
+    // reverse walk fixes children while their ancestors can still be
+    // traversed. Without this pass, `create_dir_all` leaves every
+    // directory umask-normalized and modes like 0700 or 0500 are lost.
+    for rel in ingested.dirs.iter().rev() {
+        let Some(&mode) = ingested.dir_modes.get(rel) else {
+            continue;
+        };
+        let path = dest_root.join(rel);
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode))
+            .map_err(|e| Error::io("restore dir mode", &path, e))?;
     }
     Ok(MaterializeReport {
         files: ingested.files.len(),
@@ -433,6 +505,37 @@ pub fn materialize(
         verify_ms,
         place_ms,
     })
+}
+
+/// Bring one freshly placed file to the mode recorded at ingest time.
+///
+/// Blobs are normalized (0644) and deduped by content only, so the
+/// recorded mode is per PATH and must be applied after placement. On
+/// a private inode that is a plain chmod. A hardlinked placement
+/// shares its inode with the store blob and every sibling tree —
+/// chmod there would leak both directions, and re-adding write bits
+/// would defeat the read-only guard — so a link whose exec bits do
+/// not match the record is replaced by a private byte copy first,
+/// which then takes any mode safely. Exec-bit parity is all a shared
+/// inode can ever carry faithfully; the stripped write bits stay.
+///
+/// Returns `true` when that replacement happened: the caller counts
+/// it as a byte copy in [`MaterializeReport::copied`].
+fn finalize_mode(shared_inode: bool, mode: u32, src: &Path, dest: &Path) -> io::Result<bool> {
+    let current = fs::metadata(dest)?.permissions().mode();
+    if shared_inode {
+        if current & 0o111 == mode & 0o111 {
+            return Ok(false);
+        }
+        fs::remove_file(dest)?;
+        fs::copy(src, dest)?;
+        fs::set_permissions(dest, fs::Permissions::from_mode(mode))?;
+        return Ok(true);
+    }
+    if current & 0o7777 != mode {
+        fs::set_permissions(dest, fs::Permissions::from_mode(mode))?;
+    }
+    Ok(false)
 }
 
 /// One placement attempt for one file. Returns whether the selected

@@ -38,6 +38,11 @@ use crate::hydrate::open_store;
 /// Default grace period when `WT_GC_GRACE` is unset or unreadable.
 const DEFAULT_GRACE: Duration = Duration::from_secs(15 * 60);
 
+/// Default retention cap for unreferenced snapshots (product-handoff
+/// §7.4): generous by design — the cap only stops unbounded growth,
+/// it does not manage a working set.
+const DEFAULT_SNAPSHOT_CAP: usize = 64;
+
 /// Parse a plain duration like `0s`, `90s`, `10m`, `24h`, `7d`.
 pub fn parse_age(text: &str) -> Option<Duration> {
     let split = text.find(|c: char| c.is_alphabetic())?;
@@ -62,6 +67,20 @@ pub fn grace_from_env() -> Result<Duration> {
         Ok(text) => parse_age(&text)
             .ok_or_else(|| Error::Usage(format!("invalid WT_GC_GRACE {text:?} (try 15m, 1h, 7d)"))),
         Err(_) => Ok(DEFAULT_GRACE),
+    }
+}
+
+/// Retention cap for unreferenced snapshots: `WT_SNAPSHOT_CAP` if it
+/// parses as a plain non-negative integer, else
+/// [`DEFAULT_SNAPSHOT_CAP`]. Zero is legal and means every aged-out
+/// unreferenced snapshot goes at the next sweep; the grace period
+/// still applies first.
+pub fn snapshot_cap_from_env() -> Result<usize> {
+    match std::env::var("WT_SNAPSHOT_CAP") {
+        Ok(text) => text
+            .parse::<usize>()
+            .map_err(|_| Error::Usage(format!("invalid WT_SNAPSHOT_CAP {text:?} (try 64, 128)"))),
+        Err(_) => Ok(DEFAULT_SNAPSHOT_CAP),
     }
 }
 
@@ -230,15 +249,19 @@ pub fn sweep(age: Option<Duration>) -> Result<()> {
                 Some(explicit) => explicit,
                 None => grace_from_env()?,
             };
-            let swept = store.sweep_mark_sweep(grace)?;
+            let swept = store.sweep_mark_sweep(grace, snapshot_cap_from_env()?)?;
             if swept.deferred_by_grace {
                 eprintln!(
                     "wt-gc-audit: malformed young mirror deferred this sweep; rerun after the grace period"
                 );
             }
             println!(
-                "swept store (mark-and-sweep): examined {}, reclaimed {}, mirrors removed {}, snapshots removed {}",
-                swept.examined, swept.reclaimed, swept.mirrors_removed, swept.snapshot_dirs_removed,
+                "swept store (mark-and-sweep): examined {}, reclaimed {}, mirrors removed {}, snapshots removed {}, cap evicted {}",
+                swept.examined,
+                swept.reclaimed,
+                swept.mirrors_removed,
+                swept.snapshot_dirs_removed,
+                swept.snapshot_cap_evicted,
             );
             Ok(())
         }

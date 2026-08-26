@@ -10,6 +10,7 @@ mod disk;
 mod fsutil;
 mod gc;
 mod mirror;
+mod scrub;
 mod snapdiff;
 mod snapindex;
 mod snapshot;
@@ -25,10 +26,11 @@ pub use mirror::{
     ReadMirror, StoreMirror, escape, mirror_path, publish as publish_mirror,
     read_all as read_mirrors, unescape, worktree_key,
 };
+pub use scrub::ScrubReport;
 pub use snapdiff::SnapshotDiff;
 pub use snapindex::{
-    MAX_RING, SelectionIndex, SelectionRecord, record_hit as record_snapshot_hit,
-    record_publish as record_snapshot_publish, select_old_snapshot,
+    MAX_RING, SelectionIndex, SelectionRecord, SnapshotLru, record_hit as record_snapshot_hit,
+    record_publish as record_snapshot_publish, record_snapshot_lru_touch, select_old_snapshot,
 };
 pub use snapshot::{
     BuildError, EntryKind, Manifest, PublishOutcome, PublishReceipt, SnapshotBuildTiming,

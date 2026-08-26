@@ -175,6 +175,11 @@ fn hydrate_impl(
                         heavy_rel,
                         &manifest.hash,
                     );
+                } else {
+                    // No selection index without v2, but a hit must
+                    // still refresh LRU recency or retention-cap
+                    // eviction can collect a hot snapshot.
+                    wt_store::record_snapshot_lru_touch(store.root(), &manifest.hash);
                 }
                 let tree = wt_store::snapshot_tree_path(store.root(), &manifest.hash);
                 let stage = Instant::now();
@@ -238,6 +243,9 @@ fn hydrate_impl(
                 heavy_rel,
                 &manifest.hash,
             );
+        } else {
+            // Same recency rule as the hit path above.
+            wt_store::record_snapshot_lru_touch(store.root(), &manifest.hash);
         }
 
         let stage = Instant::now();

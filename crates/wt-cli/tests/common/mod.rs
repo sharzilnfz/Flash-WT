@@ -66,6 +66,24 @@ impl Fixture {
             .output()
             .expect("run wt binary")
     }
+
+    /// [`Self::wt_with_store`] plus extra environment pairs, for
+    /// suites that need to drive a specific strategy flag.
+    #[allow(dead_code)] // each suite compiles this module; not all need env control
+    pub fn wt_with_store_env(
+        &self,
+        args: &[&str],
+        store: &Path,
+        env: &[(&str, &str)],
+    ) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_wt"))
+            .args(args)
+            .env("WT_STORE", store)
+            .envs(env.iter().copied())
+            .current_dir(&self.repo)
+            .output()
+            .expect("run wt binary")
+    }
 }
 
 /// Recursively collect every regular-file path under `dir`, sorted,
