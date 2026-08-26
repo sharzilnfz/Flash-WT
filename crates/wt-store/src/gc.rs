@@ -277,16 +277,19 @@ impl DiskStore {
     }
 
     /// Snapshot retention (plan's eviction rule + §7.4 LRU cap):
-    /// snapshots are rebuildable caches, not roots. Anything under
-    /// `snapshots/` that is either unreferenced by a live mirror or
-    /// debris, and older than the cutoff, goes — and when more than
-    /// `cap` unreferenced aged-out snapshots remain, the surplus is
-    /// deleted least-recently-used first (LRU sidecar stamp, falling
-    /// back to directory mtime; unknown age counts as oldest).
-    /// Referenced snapshots never count against the cap, and young
-    /// (inside-grace) ones are simply skipped this pass, whatever the
-    /// cap says. Phase 1 stores have no snapshots directory, so this
-    /// is normally a no-op scan.
+    /// snapshots are rebuildable caches, not roots. The grace rule is
+    /// unchanged — anything under `snapshots/` that is unreferenced by
+    /// a live mirror (or debris) and older than the cutoff goes. On
+    /// top of that, the retention cap bounds how many UNREFERENCED
+    /// snapshots may pile up INSIDE the grace window between sweeps:
+    /// if more than `cap` young unreferenced ones remain after the
+    /// grace pass, the surplus is deleted least-recently-used first
+    /// (LRU sidecar stamp, falling back to directory mtime; unknown
+    /// age counts as oldest). Referenced snapshots never count
+    /// against the cap and are never collected here whatever their
+    /// age; a cap eviction racing an in-flight create is survived by
+    /// the hydration retry path. Phase 1 stores have no snapshots
+    /// directory, so this is normally a no-op scan.
     ///
     /// Returns `(grace-and-debris removals, retention-cap evictions)`.
     fn sweep_snapshots(
@@ -301,28 +304,14 @@ impl DiskStore {
             return Ok((0, 0));
         };
         let lru = crate::snapindex::SnapshotLru::load(self.root());
-        // Aged-out, unreferenced survivors of this pass, awaiting the
-        // retention-cap decision.
+        // Young, unreferenced survivors of the grace pass, awaiting
+        // the retention-cap decision.
         let mut candidates: Vec<(ContentId, PathBuf)> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            let modified = match fs::metadata(&path).and_then(|m| m.modified()) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            if modified > cutoff {
-                continue;
-            }
             let name = entry.file_name();
             let name = name.to_string_lossy();
             match name.as_ref() {
-                "tmp" => {
-                    // Temp build debris past the grace window.
-                    if remove_tree(&path) {
-                        removed += 1;
-                    }
-                    continue;
-                }
                 "index.tsv" | "lru.tsv" => {
                     // Live selection/LRU-retention metadata, not
                     // rebuildable cache: never collected. (Their own
@@ -332,19 +321,22 @@ impl DiskStore {
                 }
                 _ => {}
             }
+            let modified = match fs::metadata(&path).and_then(|m| m.modified()) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let aged_out = modified <= cutoff;
             let id = ContentId::from_hex(&name);
             match id {
                 Some(id) if referenced.contains(&id) => {}
+                Some(_) if aged_out => removed += u64::from(remove_tree(&path)),
                 Some(id) => candidates.push((id, path)),
-                None => {
-                    // Referenced-but-unresolvable snapshots stay:
-                    // their blobs' fate follows blob marks alone, and the
-                    // directory may still be mid-publish. Non-hex names
-                    // are sidecar temp debris: collectible.
-                    if remove_tree(&path) {
-                        removed += 1;
-                    }
+                None if aged_out => {
+                    // Non-hex names are sidecar temp debris or tmp
+                    // build dirs past the grace window.
+                    removed += u64::from(remove_tree(&path));
                 }
+                None => {}
             }
         }
 
@@ -426,9 +418,10 @@ pub struct MarkSwept {
     /// Snapshot directories (including tmp debris) removed. Includes
     /// [`Self::snapshot_cap_evicted`].
     pub snapshot_dirs_removed: u64,
-    /// Of those, how many went purely because the unreferenced
+    /// Of those, how many went purely because the YOUNG unreferenced
     /// snapshot count exceeded the retention cap (LRU order), not
-    /// because of age.
+    /// because of age; aged-out unreferenced snapshots are always
+    /// grace removals.
     pub snapshot_cap_evicted: u64,
     /// True when a malformed mirror inside the grace window deferred
     /// all deletion this pass.

@@ -7,9 +7,11 @@
 //! directly: real published snapshots under `<store>/snapshots/`,
 //! last-use stamps in the `lru.tsv` sidecar, and directory mtimes
 //! backdated past the grace window. The safety rules under test:
-//! only unreferenced AND aged-out snapshots are eligible, referenced
-//! ones never count against the cap, and inside-grace directories
-//! are never touched however tight the cap.
+//! aged-out unreferenced snapshots are ALWAYS collected (the grace
+//! rule dominates), the cap bounds how many unreferenced snapshots
+//! may pile up inside the grace window (LRU-first eviction),
+//! referenced ones never count against the cap and are never
+//! collected whatever their age.
 
 use std::fs;
 use std::fs::FileTimes;
@@ -106,7 +108,7 @@ fn cap_evicts_least_recently_used_and_keeps_most_recent() {
     let base = tempfile::tempdir().unwrap();
     let mut store = DiskStore::open(base.path().join("store")).unwrap();
 
-    // Five unreferenced snapshots, last uses 100..500.
+    // Five young unreferenced snapshots, last uses 100..500.
     let hashes: Vec<ContentId> = ["a", "b", "c", "d", "e"]
         .iter()
         .map(|t| publish_snapshot(&mut store, t.as_bytes()))
@@ -117,11 +119,14 @@ fn cap_evicts_least_recently_used_and_keeps_most_recent() {
         .map(|(i, h)| (*h, 100 * (i as u64 + 1)))
         .collect();
     stamp_lru(store.root(), &stamps);
-    age_all_snapshots(store.root());
 
     let swept = sweep(&mut store, 2);
-    assert_eq!(surviving_snapshots(store.root()).len(), 2);
+    assert_eq!(
+        swept.snapshot_dirs_removed, 3,
+        "cap evictions count toward dirs removed"
+    );
     assert_eq!(swept.snapshot_cap_evicted, 3);
+    assert_eq!(surviving_snapshots(store.root()).len(), 2);
 
     // Exactly the two most-recently-used survive.
     let mut expected: Vec<String> = hashes[3..].iter().map(|h| h.to_string()).collect();
@@ -146,25 +151,30 @@ fn referenced_snapshots_survive_any_cap() {
     reference_snapshot(&store, base.path(), "wt-a", &hashes[0]);
     reference_snapshot(&store, base.path(), "wt-b", &hashes[1]);
 
-    let stamps: Vec<(ContentId, u64)> = hashes
-        .iter()
-        .enumerate()
-        .map(|(i, h)| (*h, 100 * (i as u64 + 1)))
-        .collect();
-    stamp_lru(store.root(), &stamps);
+    stamp_lru(
+        store.root(),
+        &hashes
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (*h, 100 * (i as u64 + 1)))
+            .collect::<Vec<_>>(),
+    );
     age_all_snapshots(store.root());
 
-    // Cap zero: every unreferenced aged-out snapshot must go, yet
-    // the referenced pair survives untouched.
+    // Cap zero: every aged-out unreferenced snapshot goes (via the
+    // grace rule, not the cap), yet the referenced pair survives
+    // untouched despite being older still.
     let swept = sweep(&mut store, 0);
-    assert_eq!(swept.snapshot_cap_evicted, 2);
+    // 2 grace removals + the aged tmp staging root (debris).
+    assert_eq!(swept.snapshot_dirs_removed, 3);
+    assert_eq!(swept.snapshot_cap_evicted, 0);
     let mut expected: Vec<String> = hashes[..2].iter().map(|h| h.to_string()).collect();
     expected.sort();
     assert_eq!(surviving_snapshots(store.root()), expected);
 }
 
 #[test]
-fn snapshots_inside_grace_are_never_capped_or_collected() {
+fn young_unreferenced_surplus_is_capped_but_referenced_young_survive() {
     let base = tempfile::tempdir().unwrap();
     let mut store = DiskStore::open(base.path().join("store")).unwrap();
 
@@ -172,6 +182,9 @@ fn snapshots_inside_grace_are_never_capped_or_collected() {
         .iter()
         .map(|t| publish_snapshot(&mut store, t.as_bytes()))
         .collect();
+    reference_snapshot(&store, base.path(), "wt-a", &hashes[0]);
+
+    // Stamps: referenced one is the OLDEST user, yet survives cap 0.
     stamp_lru(
         store.root(),
         &hashes
@@ -181,18 +194,15 @@ fn snapshots_inside_grace_are_never_capped_or_collected() {
             .collect::<Vec<_>>(),
     );
 
-    // Only the first snapshot ages out; the others stay inside the
-    // grace window (fresh mtimes).
-    age_dir(&store.snapshot_path(&hashes[0]));
-
-    // Cap zero cannot touch the young pair: the grace rule dominates
-    // the cap, always.
+    // Cap zero cannot touch the referenced snapshot even though it is
+    // the least recently used; the two young unreferenced ones are
+    // capped away inside the grace window.
     let swept = sweep(&mut store, 0);
-    assert_eq!(swept.snapshot_dirs_removed, 1);
-    assert_eq!(surviving_snapshots(store.root()).len(), 2);
-    assert!(store.snapshot_path(&hashes[1]).is_dir());
-    assert!(store.snapshot_path(&hashes[2]).is_dir());
-    assert!(!store.snapshot_path(&hashes[0]).exists());
+    assert_eq!(swept.snapshot_dirs_removed, 2);
+    assert_eq!(swept.snapshot_cap_evicted, 2);
+    assert!(store.snapshot_path(&hashes[0]).is_dir());
+    assert!(!store.snapshot_path(&hashes[1]).exists());
+    assert!(!store.snapshot_path(&hashes[2]).exists());
 }
 
 #[test]
@@ -204,14 +214,14 @@ fn missing_lru_stamps_fall_back_to_publish_mtime_order() {
         .iter()
         .map(|t| publish_snapshot(&mut store, t.as_bytes()))
         .collect();
-    // No sidecar at all: both candidates fall back to their
-    // directory mtimes. Stamp only the NEWER one explicitly with a
-    // very recent time; the unstamped one's backdated mtime counts
-    // as ancient, so it must be the cap's victim.
+    // No sidecar entry for hashes[0]: it falls back to its directory
+    // mtime (publish time). The other is stamped far in the future,
+    // so the unstamped one counts as older and must be the cap's
+    // victim.
     stamp_lru(store.root(), &[(hashes[1], u64::MAX)]);
-    age_all_snapshots(store.root());
 
     let swept = sweep(&mut store, 1);
+    assert_eq!(swept.snapshot_dirs_removed, 1);
     assert_eq!(swept.snapshot_cap_evicted, 1);
     assert!(!store.snapshot_path(&hashes[0]).exists());
     assert!(store.snapshot_path(&hashes[1]).is_dir());

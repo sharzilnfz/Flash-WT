@@ -12,9 +12,7 @@
 mod common;
 
 use std::fs;
-use std::fs::FileTimes;
 use std::path::Path;
-use std::time::{Duration, UNIX_EPOCH};
 
 use common::Fixture;
 use wt_store::{ContentId, DiskStore, Manifest, PublishOutcome, SnapshotEntry, SnapshotLru};
@@ -33,12 +31,6 @@ fn publish_snapshot(store: &mut DiskStore, tag: &[u8]) -> ContentId {
     manifest.hash
 }
 
-fn age_dir(path: &Path) {
-    let f = fs::OpenOptions::new().read(true).open(path).unwrap();
-    f.set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1000)))
-        .unwrap();
-}
-
 /// Hex-named snapshot directories still on disk, sorted.
 fn surviving_snapshots(store: &Path) -> Vec<String> {
     let mut names = Vec::new();
@@ -52,8 +44,8 @@ fn surviving_snapshots(store: &Path) -> Vec<String> {
     names
 }
 
-/// A mark-sweep store holding `count` aged-out unreferenced
-/// snapshots with strictly increasing last-use stamps.
+/// A mark-sweep store holding `count` YOUNG (inside-grace)
+/// unreferenced snapshots with strictly increasing last-use stamps.
 fn capped_store(count: usize) -> (tempfile::TempDir, Vec<ContentId>) {
     let base = tempfile::tempdir().unwrap();
     let mut store = DiskStore::open(base.path().join("store")).unwrap();
@@ -69,12 +61,6 @@ fn capped_store(count: usize) -> (tempfile::TempDir, Vec<ContentId>) {
     }
     .save(store.root())
     .unwrap();
-    for entry in fs::read_dir(store.root().join("snapshots")).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            age_dir(&path);
-        }
-    }
     fs::write(base.path().join("store").join("gc-mode"), "mark-sweep\n").unwrap();
     (base, hashes)
 }
@@ -85,7 +71,7 @@ fn without_the_env_the_generous_default_keeps_every_snapshot() {
     let (base, hashes) = capped_store(4);
     let store = base.path().join("store");
 
-    let swept = fx.wt_with_store(&["sweep", "--age", "0s"], &store);
+    let swept = fx.wt_with_store(&["sweep", "--age", "1h"], &store);
     assert!(
         swept.status.success(),
         "{}",
@@ -107,7 +93,7 @@ fn env_override_caps_unreferenced_snapshots_keeping_mru() {
     let store = base.path().join("store");
 
     let swept = fx.wt_with_store_env(
-        &["sweep", "--age", "0s"],
+        &["sweep", "--age", "1h"],
         &store,
         &[("WT_SNAPSHOT_CAP", "2")],
     );
