@@ -3,6 +3,8 @@
 .worktrees/
 # internal agent-workflow notes; not part of the public repo
 .scratch/
+.agents/
+skills-lock.json
 AGENT_HANDOFF_PLAN_REVISED.md
 step0-instrumentation-ticket.md
 v2-diff-rebuild-design-note-revised.md
