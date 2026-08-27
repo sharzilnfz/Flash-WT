@@ -8,143 +8,157 @@ Instant git worktrees with heavy directories already hydrated.
 wt create my-feature
 ```
 
-One command gives you a new worktree on a new branch with `node_modules/`,
-`target/`, and friends already in place — no reinstall, no rebuild. Files
-come out of a local content-addressed store as private copy-on-write
-clones, so a 40,000-file environment materializes in about a second
-instead of minutes.
+One command gives you a new worktree on a new branch with `node_modules/`, `target/`, `.venv/`, and build caches already in place. No reinstalling. No rebuilding. Files materialize from a local content-addressed store as private copy-on-write clones. A 40,000-file project environment appears in 1.5 seconds instead of minutes.
 
-## Why
+## The problem
 
-Every fresh checkout pays the same tax: `npm install`, `cargo build`,
-cache warm-up — repeated for every branch, every agent session, every
-parallel task. The contents already exist on your disk; wt stores each
-unique file once and links it everywhere it's needed.
+Parallel development multiplies environment overhead. Every feature branch, quick experiment, and autonomous AI coding agent wants an isolated checkout. Every fresh checkout pays the full setup tax:
 
-Measured against a fresh-install baseline (40k files / 800 packages):
+- `npm install` or `pnpm install` into a fresh `node_modules` directory takes minutes and hundreds of megabytes.
+- `cargo build` from scratch into an empty `target` directory wastes CPU and time.
+- Python virtual environments and build caches rebuild from zero every time.
+- Five parallel agent tasks create five identical copies of the same dependencies, consuming gigabytes of disk.
 
-| Scenario | Without wt | With wt |
+Standard `git worktree add` checks out tracked source files instantly, but leaves untracked dependencies empty. `wt` eliminates this gap.
+
+## Why wt
+
+`wt` stores each unique file once in a central content-addressed store. When you create a worktree, `wt` materializes heavy directories using APFS copy-on-write clones on macOS or hardlinks on Linux.
+
+Files in your worktree share storage blocks with the store until modified. They are private, fully writable, normal files. Editors, compilers, and language servers treat them like regular files on disk.
+
+### Measured performance (40,000 files / 800 packages fixture)
+
+Measured on macOS APFS against a clean dependency install baseline:
+
+| Scenario | Without wt | With wt | Speedup |
+|---|---|---|---|
+| Warm worktree creation | 11.4s (fresh install) | **1.5s** | **7.6x** |
+| Directory clone vs raw `cp -Rc` | 7.9s | **1.5s** | **5.3x** |
+| Rebuild after dependency bump (3 of 800 packages changed) | 17.8s (full rebuild) | **5.3s** | **3.4x** |
+| Rebuild after cache poisoning (.DS_Store added) | 18.0s (full rebuild) | **5.7s** | **3.2x** |
+
+## How wt compares to alternatives
+
+| Alternative | What it does | Where wt differs |
 |---|---|---|
-| Warm environment create | 11.4s | **~1.5s** |
-| Rebuild after dependency bump | 17.8s | **5.3s** |
-| Same after junk file poisons the tree | 18.0s | **5.7s** |
+| `git worktree add` | Creates isolated branches for tracked files. | Leaves `node_modules/` and build directories empty. `wt` hydrates them instantly. |
+| `pnpm` / `uv` | Optimizes package installation for one language. | Language-specific. `wt` is language-agnostic and handles `target/`, `.venv/`, caches, and build outputs together. |
+| `cp -Rc` shell scripts | Bare recursive APFS copies. | Takes ~8 seconds at 40k scale, lacks cross-project deduplication, lacks garbage collection, and breaks on dirty trees. |
+| Docker / Devcontainers | Full containerized sandboxes. | Heavyweight, high memory overhead, and requires complex file synchronization on macOS. `wt` runs natively on host files. |
 
-## Install
+## Installation
 
-**curl** (macOS arm64/x86_64, Linux x86_64):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/sharzilnfz/wt/main/install.sh | sh
-```
-
-Downloads the release tarball for your platform, verifies its SHA-256
-checksum, installs to `~/.local/bin`, and confirms `wt --version` works.
-
-**Homebrew:**
+### Homebrew (macOS)
 
 ```sh
 brew install https://github.com/sharzilnfz/wt/releases/latest/download/wt.rb
 ```
 
-Upgrades follow the usual `brew upgrade wt`. The formula carries
-checksums for all three release targets.
+Upgrades follow standard Homebrew workflow:
 
-**From source:**
+```sh
+brew upgrade wt
+```
+
+### curl installer (macOS and Linux)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sharzilnfz/wt/main/install.sh | sh
+```
+
+The script downloads the prebuilt static binary for your architecture, verifies its SHA-256 checksum, and installs to `~/.local/bin`.
+
+### Build from source
 
 ```sh
 cargo install --locked --path crates/wt-cli
 ```
 
-Both install paths end at the same place: one static binary called `wt`
-with no runtime dependencies beyond git.
+`wt` compiles into a single static binary with no runtime dependencies beyond git.
 
-## Usage
+## Quick start
 
-From inside any git repository:
+Run `wt` from inside any git repository:
 
 ```sh
-wt create my-feature     # worktree at <repo>-my-feature, branch my-feature
-wt remove my-feature     # remove it and release its store references
-wt sweep                 # collect store entries nothing references anymore
+# Create a worktree at ../<repo>-feature on branch feature with hydrated directories
+wt create feature
+
+# Remove the worktree and release its store references
+wt remove feature
+
+# Reclaim space from deleted worktrees and stale cache data
+wt sweep
 ```
 
-Hydrated directories are controlled by a `.wtinclude` manifest in the
-repo root (gitignore syntax). If none exists, sensible defaults apply
-(`node_modules/`, `target/`, `dist/`, `build/`, `.cache/`, `.venv/`,
-`__pycache__/`) and a starter manifest is written for you to edit:
+### Configure what gets hydrated
+
+`wt` reads `.wtinclude` in your repository root using gitignore pattern syntax. If no `.wtinclude` file exists, `wt` creates one with sensible defaults:
 
 ```gitignore
 node_modules/
 target/
+.venv/
+dist/
+build/
+.cache/
+__pycache__/
 ```
 
-Point it at whatever your project rebuilds most and never wait on an
-install again.
+Edit `.wtinclude` to match your project's heaviest rebuild artifacts.
 
-### Faster still (macOS/APFS)
+### Fast path on macOS (APFS)
+
+Enable whole-directory snapshots and incremental rebuilds in your shell:
 
 ```sh
-export WT_SNAPSHOTS=1        # whole-directory snapshot hits: one clonefile per heavy dir
-export WT_SNAPSHOTS_V2=1     # incremental rebuilds after small changes
+export WT_SNAPSHOTS=1
+export WT_SNAPSHOTS_V2=1
 ```
 
-With both set, a dependency bump that touches 3 of 800 packages
-rebuilds in ~5s instead of ~18s: the previous snapshot tree is cloned
-wholesale and only the changed paths are relinked inside the private
-copy.
+- `WT_SNAPSHOTS=1` activates directory-level APFS cloning (~0.45s to hydrate 40,000 files).
+- `WT_SNAPSHOTS_V2=1` activates diff-based rebuilds. When dependencies change slightly, `wt` clones the previous snapshot and patches only modified files.
 
 ## How it works
 
-- **Store**: unique file contents live exactly once under
-  `~/.cache/wt/store` (override with `WT_STORE`), addressed by SHA-256,
-  like git's object database.
-- **Hydration**: files are materialized as APFS copy-on-write clones or
-  hardlinks — private, fully writable, byte-identical to the originals.
-  Filesystems without clone support get plain copies automatically.
-- **Snapshots**: whole directory trees are cached; a matching hydrate is
-  one recursive `clonefile(2)` (~0.45s for 40k files). A v2 incremental
-  rebuild clones that tree and applies just the diff.
-- **GC**: mark-and-sweep with a grace period (`WT_GC_GRACE`, default
-  15m). Crash-tested: a kill at any instant can leak reclaimable cache
-  data, never destroy live data.
-- **Integrity**: blobs are hash-verified once, then trusted while size
-  and mtime hold (`WT_VERIFY=1` re-hashes everything for paranoid runs).
+- **Content-addressed store**: Unique file contents live once under `~/.cache/wt/store`, addressed by SHA-256 hash.
+- **Copy-on-write hydration**: Files materialize through `clonefile(2)` on APFS or hardlinks. They share storage with the store until written.
+- **Directory snapshots**: Whole directory trees are cached by manifest hash. Hydration is a single recursive APFS clone.
+- **Incremental rebuilds**: A flat manifest diff engine identifies unchanged subtrees, cloning stable packages and relinking only changed files.
+- **Crash-safe garbage collection**: Mark-and-sweep GC uses store-local mirror files as roots. A default 15-minute grace period (`WT_GC_GRACE`) ensures concurrent builds and unexpected interruptions never delete live data.
+- **Integrity verification**: Blobs are verified on ingest and tracked via a verification ledger. `WT_VERIFY=1` forces full cryptographic re-hashing on every run.
 
-More detail: [docs/product-handoff.md](docs/product-handoff.md) and the
-ADRs under [docs/adr/](docs/adr/).
+Read [docs/product-handoff.md](docs/product-handoff.md) and the [Architecture Decision Records](docs/adr/) for full implementation details.
 
-## Environment knobs
+## Environment configuration
 
-| Variable | Effect |
-|---|---|
-| `WT_STORE` | Store location |
-| `WT_SNAPSHOTS=1` | Enable directory snapshots (macOS/APFS) |
-| `WT_SNAPSHOTS_V2=1` | Enable diff-based incremental snapshot rebuilds |
-| `WT_VERIFY=1` | Full re-hash of every blob / staged file |
-| `WT_HARDLINK=1` | Experimental hardlinked materialization (max sharing) |
-| `WT_NO_HARDLINK=1` | Force plain byte copies |
-| `WT_GC_GRACE` | GC grace period (default `15m`) |
-| `WT_TIMING=1` | Per-stage timings on stderr |
+| Variable | Default | Description |
+|---|---|---|
+| `WT_STORE` | `~/.cache/wt/store` | Directory for the content-addressed object store |
+| `WT_SNAPSHOTS` | `0` | Enable whole-directory APFS snapshot caching (macOS only) |
+| `WT_SNAPSHOTS_V2` | `0` | Enable diff-based incremental snapshot rebuilds |
+| `WT_VERIFY` | `0` | Force full cryptographic re-verification of all blobs |
+| `WT_HARDLINK` | `0` | Enable hardlink materialization mode |
+| `WT_NO_HARDLINK` | `0` | Force byte-by-byte copies instead of links |
+| `WT_GC_GRACE` | `15m` | Retention grace period before unreferenced data is collected |
+| `WT_TIMING` | `0` | Emit stage timing breakdowns to stderr |
 
-## Requirements
-
-- git. That's all.
-
-Snapshot fast paths additionally need macOS on APFS; elsewhere wt uses
-its fallback backends and stays correct, just slower on cold paths.
-
-## Development
+## Development and testing
 
 ```sh
-cargo test                      # unit + integration tests (167)
-cargo clippy --all-targets -- -D warnings
-./benchmarks/run.sh --verify    # four scenarios, deep-verified
-./benchmarks/v2-bench.sh        # v1-vs-v2 rebuild comparison at scale
-./scripts/smoke-install.sh      # exercises both install paths locally
-```
+# Run all unit, integration, and crash recovery tests (167 tests)
+cargo test
 
-Releases are cut by pushing a `v*` tag; CI builds, signs (macOS),
-checksums, and publishes binaries plus the brew formula.
+# Run linter checks
+cargo clippy --all-targets -- -D warnings
+
+# Run benchmark suite with full byte verification
+./benchmarks/run.sh --verify
+
+# Run v1 versus v2 incremental rebuild benchmarks
+./benchmarks/v2-bench.sh
+```
 
 ## License
 
