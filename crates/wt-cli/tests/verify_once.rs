@@ -1,3 +1,7 @@
+// Tests assert with unwrap/expect by design: a panic IS the failure
+// signal under test, so the workspace restriction lints stay off here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Fast-hydration ticket 05: trust-once materialization, asserted
 //! end to end through the CLI seam.
 //!
@@ -13,7 +17,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use common::{list_files, Fixture};
+use common::{Fixture, list_files};
 
 /// Flip the first byte of one stored blob. When `restore_mtime` is
 /// set, put the original mtime back exactly afterwards: size never

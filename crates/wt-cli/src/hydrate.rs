@@ -33,71 +33,74 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 #[cfg(target_os = "macos")]
 use wt_copy::CloneOut;
-use wt_copy::{placement_refused, FileMaterialize, HardlinkOut};
+use wt_copy::{FileMaterialize, HardlinkOut, placement_refused};
 #[cfg(target_os = "macos")]
 use wt_store::bulkwalk;
 use wt_store::{ContentId, DiskStore, Entry as CacheEntry, GcMode, Store, ValidationCache};
 
+use crate::config::{RunConfig, StrategyPolicy};
+use crate::error::{Error, Result};
+use crate::gitops;
+
 /// Where the per-machine store lives. `$WT_STORE` wins (tests use it
 /// for isolation); otherwise XDG cache conventions.
-fn store_dir() -> Result<PathBuf, String> {
+fn store_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("WT_STORE") {
         return Ok(PathBuf::from(dir));
     }
     let base = match std::env::var_os("XDG_CACHE_HOME") {
         Some(xdg) => PathBuf::from(xdg),
         None => {
-            let home =
-                std::env::var_os("HOME").ok_or("cannot locate a home directory for the store")?;
+            let home = std::env::var_os("HOME").ok_or_else(|| {
+                Error::Usage("cannot locate a home directory for the store".into())
+            })?;
             PathBuf::from(home).join(".cache")
         }
     };
     Ok(base.join("wt").join("store"))
 }
 
-pub fn open_store() -> Result<DiskStore, String> {
+pub fn open_store() -> Result<DiskStore> {
     let dir = store_dir()?;
-    DiskStore::open(&dir).map_err(|e| format!("cannot open store at {}: {e}", dir.display()))
+    DiskStore::open(&dir)
+        .map_err(|e| Error::Store(format!("cannot open store at {}: {e}", dir.display())))
 }
 
 /// Everything one heavy directory contributed to the store.
 pub struct Ingested {
     /// Repo-relative directory paths to recreate even when empty.
     pub dirs: Vec<String>,
+    /// Repo-relative directory path -> on-disk mode (`& 0o7777`).
+    /// Recorded on every ingest; materialize restores these bits
+    /// after placement, because `create_dir_all` normalizes new
+    /// directories through the process umask just like it once did
+    /// for files.
+    pub dir_modes: BTreeMap<String, u32>,
     /// Repo-relative file path -> stored content address.
     pub files: BTreeMap<String, ContentId>,
-    /// Ticket 08 (only populated when `WT_SNAPSHOTS=1`): repo-relative
-    /// symlink path -> raw target. Symlinks are recorded, never
-    /// followed or stored as blobs; only the snapshot manifest
-    /// consumes them.
+    /// Repo-relative symlink path -> raw target (possibly dangling;
+    /// targets are never followed or stored as blobs). Recorded on
+    /// every ingest so both the fallback ladder and the snapshot
+    /// manifest can recreate the link verbatim.
     pub symlinks: BTreeMap<String, String>,
-    /// Ticket 08 (same gate): repo-relative file path -> on-disk mode.
-    /// Only the snapshot manifest consumes these; the per-file ladder
-    /// keeps its existing normalized-mode behavior untouched.
+    /// Repo-relative file path -> on-disk mode (`& 0o7777`). Recorded
+    /// on every ingest; the fallback ladder restores it after
+    /// placement, the snapshot manifest consumes it too.
     pub modes: BTreeMap<String, u32>,
 }
 
-/// Ticket 08 feature gate: `WT_SNAPSHOTS=1` enables whole-directory
-/// snapshots. Anything else — including unset — keeps the existing
-/// per-file materialization. Default stays OFF until parity and
-/// benchmark gates pass (ADR-0005).
-pub fn snapshots_enabled() -> bool {
-    std::env::var("WT_SNAPSHOTS").as_deref() == Ok("1")
-}
-
 /// Walk `src`, storing every regular file's bytes. Symlinks are never
-/// followed out of `src`; with the snapshot gate off they are skipped
-/// for now rather than misinterpreted (matching the copy-backend
-/// trait's stance). With `WT_SNAPSHOTS=1` they are recorded for the
-/// manifest instead, and non-regular files fail loudly rather than
-/// silently vanishing from a snapshot.
+/// followed out of `src`; they are recorded with their raw targets
+/// (dangling ones included) so materialize can recreate them
+/// verbatim, and non-regular files are skipped — except under
+/// `WT_SNAPSHOTS=1`, where anything a manifest cannot represent fails
+/// loudly rather than silently vanishing from a snapshot.
 ///
 /// Ticket 02: a validation cache beside the store remembers each
 /// path's size, mtime, and content id from the previous ingest. A
@@ -108,10 +111,16 @@ pub fn snapshots_enabled() -> bool {
 /// never wronger: materialize proves every blob before placing it
 /// (`ensure_verified`, ticket 05), so lying cached metadata fails
 /// loudly instead of landing bad bytes in a fresh tree.
-pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<Ingested, String> {
-    let snapshots = snapshots_enabled();
+pub fn ingest_dir(
+    store: &mut DiskStore,
+    src_root: &Path,
+    src: &Path,
+    cfg: &RunConfig,
+) -> Result<Ingested> {
+    let snapshots = cfg.snapshots;
     let mut ingested = Ingested {
         dirs: Vec::new(),
+        dir_modes: BTreeMap::new(),
         files: BTreeMap::new(),
         symlinks: BTreeMap::new(),
         modes: BTreeMap::new(),
@@ -140,7 +149,14 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
             // Bulk entries are relative to `src`; every consumer (and
             // the legacy walk) speaks repo-relative paths, so prefix
             // with the heavy directory's own repo-relative name.
-            let base = rel_text(src_root, src);
+            let base = rel_text(src_root, src)?;
+            // The heavy root itself is a directory the manifest must
+            // carry (its clone replaces it wholesale on the snapshot
+            // path, but the per-file ladder recreates it).
+            let root_meta = fs::symlink_metadata(src).map_err(|e| Error::io("stat", src, e))?;
+            ingested
+                .dir_modes
+                .insert(base.clone(), root_meta.mode() & 0o7777);
             ingested.dirs.push(base.clone());
             for entry in entries {
                 let rel = if base.is_empty() {
@@ -150,23 +166,24 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
                 };
                 let path = src.join(&entry.rel_path);
                 if entry.is_symlink {
-                    let target = fs::read_link(&path)
-                        .map_err(|e| format!("cannot read symlink {}: {e}", path.display()))?;
+                    let target =
+                        fs::read_link(&path).map_err(|e| Error::io("read symlink", &path, e))?;
                     ingested
                         .symlinks
-                        .insert(rel.clone(), target.to_string_lossy().into_owned());
+                        .insert(rel, target.to_string_lossy().into_owned());
                     continue;
                 }
                 if entry.is_dir {
+                    ingested.dir_modes.insert(rel.clone(), entry.mode & 0o7777);
                     ingested.dirs.push(rel);
                     continue;
                 }
                 if !entry.is_file {
                     if snapshots {
-                        return Err(format!(
+                        return Err(Error::Store(format!(
                             "{} is not a regular file (fifos/sockets/devices are unsupported)",
                             path.display()
-                        ));
+                        )));
                     }
                     continue;
                 }
@@ -178,9 +195,8 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
                 let id = match cache.lookup(&rel, entry.size, mtime) {
                     Some(id) if store.contains(&id) => id,
                     _ => {
-                        let bytes = fs::read(&path)
-                            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-                        let id = store.put(&bytes).map_err(|e| e.to_string())?;
+                        let bytes = fs::read(&path).map_err(|e| Error::io("read", &path, e))?;
+                        let id = store.put(&bytes)?;
                         cache.record(
                             rel.clone(),
                             CacheEntry {
@@ -202,7 +218,7 @@ pub fn ingest_dir(store: &mut DiskStore, src_root: &Path, src: &Path) -> Result<
     ingested.dirs.dedup();
     cache
         .save()
-        .map_err(|e| format!("cannot update ingest cache: {e}"))?;
+        .map_err(|e| Error::io_unanchored("update ingest cache", store.root(), e))?;
     Ok(ingested)
 }
 
@@ -216,30 +232,33 @@ fn ingest_dir_walk(
     src_root: &Path,
     src: &Path,
     snapshots: bool,
-) -> Result<(), String> {
+) -> Result<()> {
     let mut stack = vec![src.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries =
-            fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
-        ingested.dirs.push(rel_text(src_root, &dir));
+        let entries = fs::read_dir(&dir).map_err(|e| Error::io("read", &dir, e))?;
+        let rel = rel_text(src_root, &dir)?;
+        // One extra stat per DIRECTORY (not per file): its permission
+        // bits must survive hydration, since create_dir_all cannot
+        // carry them through the umask.
+        let dir_meta = fs::symlink_metadata(&dir).map_err(|e| Error::io("stat", &dir, e))?;
+        ingested
+            .dir_modes
+            .insert(rel.clone(), dir_meta.mode() & 0o7777);
+        ingested.dirs.push(rel);
         for entry in entries.flatten() {
             let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+            let file_type = entry.file_type().map_err(|e| Error::io("stat", &path, e))?;
             if file_type.is_symlink() {
-                // Ticket 08: with snapshots on, symlinks are recorded
-                // faithfully in the manifest (target only — targets are
-                // never stored as blobs). With the gate off, the long-
-                // standing skip applies unchanged.
-                if snapshots {
-                    let target = fs::read_link(&path)
-                        .map_err(|e| format!("cannot read symlink {}: {e}", path.display()))?;
-                    ingested.symlinks.insert(
-                        rel_text(src_root, &path),
-                        target.to_string_lossy().into_owned(),
-                    );
-                }
+                // The raw target is what gets recorded, dangling or
+                // not: materialize recreates it verbatim via
+                // symlink(2), which never resolves the target. (With
+                // snapshots on the manifest consumes the same record.)
+                let target =
+                    fs::read_link(&path).map_err(|e| Error::io("read symlink", &path, e))?;
+                ingested.symlinks.insert(
+                    rel_text(src_root, &path)?,
+                    target.to_string_lossy().into_owned(),
+                );
                 continue;
             }
             if file_type.is_dir() {
@@ -251,32 +270,26 @@ fn ingest_dir_walk(
                 // fail loudly before placement rather than silently
                 // dropping content the manifest cannot represent.
                 if snapshots {
-                    return Err(format!(
+                    return Err(Error::Store(format!(
                         "{} is not a regular file (fifos/sockets/devices are unsupported)",
                         path.display()
-                    ));
+                    )));
                 }
                 continue;
             }
-            let rel = rel_text(src_root, &path);
-            let meta =
-                fs::metadata(&path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
-            if snapshots {
-                ingested.modes.insert(rel.clone(), meta.mode() & 0o7777);
-            }
+            let rel = rel_text(src_root, &path)?;
+            let meta = fs::metadata(&path).map_err(|e| Error::io("stat", &path, e))?;
+            ingested.modes.insert(rel.clone(), meta.mode() & 0o7777);
             let size = meta.len();
-            let mtime = meta
-                .modified()
-                .map_err(|e| format!("cannot stat {}: {e}", rel))?;
+            let mtime = meta.modified().map_err(|e| Error::io("stat", &rel, e))?;
             let id = match cache.lookup(&rel, size, mtime) {
                 // Cache hit: same size and same mtime as last time.
                 // Trust it only while the blob is actually still here.
                 Some(id) if store.contains(&id) => id,
                 _ => {
                     // Miss (or a swept blob): pay for read and hash.
-                    let bytes = fs::read(&path)
-                        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-                    let id = store.put(&bytes).map_err(|e| e.to_string())?;
+                    let bytes = fs::read(&path).map_err(|e| Error::io("read", &path, e))?;
+                    let id = store.put(&bytes)?;
                     // An mtime before the epoch cannot round-trip
                     // through the cache format; skip caching rather
                     // than fail, so such a file just stays cold.
@@ -292,11 +305,17 @@ fn ingest_dir_walk(
     Ok(())
 }
 
-fn rel_text(root: &Path, path: &Path) -> String {
+/// Repo-relative text of `path` under `root`, or a loud error when a
+/// pattern somehow matched outside the ingestion root.
+fn rel_text(root: &Path, path: &Path) -> Result<String> {
     path.strip_prefix(root)
-        .expect("path under ingestion root")
-        .to_string_lossy()
-        .into_owned()
+        .map_err(|_| {
+            Error::Store(format!(
+                "pattern matched path outside repository root: {}",
+                path.display()
+            ))
+        })
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Outcome of materializing one heavy directory.
@@ -304,7 +323,9 @@ pub struct MaterializeReport {
     /// Total files placed.
     pub files: usize,
     /// Files written as plain byte copies because the selected
-    /// strategy was disabled or refused by the filesystem.
+    /// strategy was disabled, refused by the filesystem, or could not
+    /// carry the recorded mode (a hardlink whose exec bits mismatched
+    /// is replaced by a private copy — that replacement counts here).
     pub copied: usize,
     /// Strategy attempted for this directory: `"copy-on-write"`
     /// (default), `"hardlink"` (`WT_HARDLINK=1`), or `"byte-copy"`
@@ -322,29 +343,29 @@ pub struct MaterializeReport {
     pub place_ms: u128,
 }
 
-/// Which placement strategy this run uses, from the environment:
+/// Which placement strategy this run uses, from the startup policy:
 ///
-/// - `WT_NO_HARDLINK` present: forced byte copies (the escape hatch).
-///   Kept for compatibility with the ticket 07 flag.
-/// - `WT_HARDLINK=1`: experimental hardlinked materialization —
-///   maximum space sharing, but linked inodes are made read-only, so
-///   tools that rewrite files in place fail loudly.
-/// - otherwise: per-file CoW clones on macOS; byte copies elsewhere
+/// - `ForceByteCopy` (`WT_NO_HARDLINK` on): forced byte copies (the
+///   escape hatch). Kept for compatibility with the ticket 07 flag.
+/// - `Hardlink` (`WT_HARDLINK` on): experimental hardlinked
+///   materialization — maximum space sharing, but linked inodes are
+///   made read-only, so tools that rewrite files in place fail loudly.
+/// - `Default`: per-file CoW clones on macOS; byte copies elsewhere
 ///   until Linux reflink is validated for store materialization.
-fn select_strategy() -> Option<Box<dyn FileMaterialize>> {
-    if std::env::var_os("WT_NO_HARDLINK").is_some() {
-        return None;
-    }
-    if std::env::var_os("WT_HARDLINK").is_some() {
-        return Some(Box::new(HardlinkOut));
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Some(Box::new(CloneOut))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
+fn select_strategy(policy: StrategyPolicy) -> Option<Box<dyn FileMaterialize>> {
+    match policy {
+        StrategyPolicy::ForceByteCopy => None,
+        StrategyPolicy::Hardlink => Some(Box::new(HardlinkOut)),
+        StrategyPolicy::Default => {
+            #[cfg(target_os = "macos")]
+            {
+                Some(Box::new(CloneOut))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                None
+            }
+        }
     }
 }
 
@@ -352,33 +373,37 @@ fn select_strategy() -> Option<Box<dyn FileMaterialize>> {
 ///
 /// Per file: verify first, and only then place anything — a corrupt
 /// blob never lands in a fresh tree. Verification is
-/// `Store::get`'s read-and-hash when `WT_VERIFY` is set (env policy
-/// lives in the CLI layer, like `select_strategy`), and
+/// `Store::get`'s read-and-hash when `RunConfig::verify` is set, and
 /// `DiskStore::ensure_verified` otherwise: a blob whose verified
 /// ledger fingerprint still matches its stat is trusted without
 /// reading a byte; everything else is hashed once and remembered.
 ///
 /// Placement tries the selected strategy (CoW clone by default)
 /// against the verified blob; filesystem refusals fall back silently
-/// to a byte copy from the blob itself. Directories are pre-created
-/// once from the ingested dir list — there is no per-file
-/// `create_dir_all`; if placement still hits ENOENT (a directory the
-/// manifest's walk never saw), it recreates the parent and retries
-/// exactly once, EAFP-style. Permission problems on the destination
-/// are real failures and stay loud.
+/// to a byte copy from the blob itself. After placement each file
+/// gets the mode recorded at ingest time (the exec bit survives even
+/// though blobs themselves are normalized), and every ingested
+/// symlink is recreated verbatim from its raw target, dangling or
+/// not. Directories are pre-created once from the ingested dir
+/// list — there is no per-file `create_dir_all`; if placement still
+/// hits ENOENT (a directory the manifest's walk never saw), it
+/// recreates the parent and retries exactly once, EAFP-style.
+/// Permission problems on the destination are real failures and stay
+/// loud.
 pub fn materialize(
     store: &DiskStore,
     ingested: &Ingested,
     dest_root: &Path,
-) -> Result<MaterializeReport, String> {
-    let backend = select_strategy();
-    let paranoid = std::env::var_os("WT_VERIFY").is_some();
+    cfg: &RunConfig,
+) -> Result<MaterializeReport> {
+    let backend = select_strategy(cfg.strategy_policy);
+    let paranoid = cfg.verify;
     let mut copied = 0usize;
     let mut verify_ms = 0u128;
     let mut place_ms = 0u128;
     for rel in &ingested.dirs {
         fs::create_dir_all(dest_root.join(rel))
-            .map_err(|e| format!("cannot prepare {}: {e}", dest_root.join(rel).display()))?;
+            .map_err(|e| Error::io("prepare", dest_root.join(rel), e))?;
     }
     for (rel, id) in &ingested.files {
         // Hash verification happens here, before any placement: with
@@ -391,13 +416,13 @@ pub fn materialize(
             let stage = Instant::now();
             store
                 .get(id)
-                .map_err(|e| format!("materialize {rel}: {e}"))?;
+                .map_err(|e| Error::Store(format!("materialize {rel}: {e}")))?;
             verify_ms += stage.elapsed().as_millis();
         } else {
             let stage = Instant::now();
             store
                 .ensure_verified(id)
-                .map_err(|e| format!("materialize {rel}: {e}"))?;
+                .map_err(|e| Error::Store(format!("materialize {rel}: {e}")))?;
             verify_ms += stage.elapsed().as_millis();
         }
         let src = store.blob_path(id);
@@ -405,27 +430,73 @@ pub fn materialize(
 
         // The ENOENT parent-repair retry is part of placement cost.
         let stage = Instant::now();
-        match place(backend.as_deref(), &src, &dest) {
-            Ok(true) => {}
-            Ok(false) => copied += 1,
+        let placed = match place(backend.as_deref(), &src, &dest) {
+            Ok(placed) => placed,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // The heavy directories themselves were just
                 // recreated above; only an unexpected gap should ever
                 // land here. Recreate the parent once and retry.
                 let parent = dest
                     .parent()
-                    .ok_or_else(|| format!("{rel} has no parent"))?;
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("cannot prepare {}: {e}", parent.display()))?;
+                    .ok_or_else(|| Error::Store(format!("{rel} has no parent")))?;
+                fs::create_dir_all(parent).map_err(|e| Error::io("prepare", parent, e))?;
                 match place(backend.as_deref(), &src, &dest) {
-                    Ok(true) => {}
-                    Ok(false) => copied += 1,
-                    Err(e) => return Err(format!("materialize {rel}: {e}")),
+                    Ok(placed) => placed,
+                    Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
                 }
             }
-            Err(e) => return Err(format!("materialize {rel}: {e}")),
+            Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
+        };
+        if !placed {
+            copied += 1;
+        }
+        if let Some(&mode) = ingested.modes.get(rel) {
+            // A mode can only be applied in place when the placement
+            // owns its inode; see `finalize_mode` for the shared case.
+            let shared_inode = placed
+                && backend
+                    .as_deref()
+                    .is_some_and(|b| b.shares_inode_with_source());
+            match finalize_mode(shared_inode, mode, &src, &dest) {
+                Ok(repaired) => {
+                    // The shared-inode repair IS a byte copy: count it
+                    // so `copied` reports honestly how much of the
+                    // hardlink strategy actually stuck.
+                    if repaired {
+                        copied += 1;
+                    }
+                }
+                Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
+            }
         }
         place_ms += stage.elapsed().as_millis();
+    }
+    for (rel, target) in &ingested.symlinks {
+        let dest = dest_root.join(rel);
+        // The dirs pass created every walked directory; this only
+        // covers a parent that somehow escaped the walk (same EAFP
+        // stance as the files above).
+        if let Some(parent) = dest.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent).map_err(|e| Error::io("prepare", parent, e))?;
+            }
+        }
+        std::os::unix::fs::symlink(target, &dest)
+            .map_err(|e| Error::io("place symlink", &dest, e))?;
+    }
+    // Restore directory permission bits AFTER placement (a restrictive
+    // parent must not block file creation) and deepest-first: sorted
+    // ascending puts every ancestor before its descendants, so the
+    // reverse walk fixes children while their ancestors can still be
+    // traversed. Without this pass, `create_dir_all` leaves every
+    // directory umask-normalized and modes like 0700 or 0500 are lost.
+    for rel in ingested.dirs.iter().rev() {
+        let Some(&mode) = ingested.dir_modes.get(rel) else {
+            continue;
+        };
+        let path = dest_root.join(rel);
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode))
+            .map_err(|e| Error::io("restore dir mode", &path, e))?;
     }
     Ok(MaterializeReport {
         files: ingested.files.len(),
@@ -434,6 +505,37 @@ pub fn materialize(
         verify_ms,
         place_ms,
     })
+}
+
+/// Bring one freshly placed file to the mode recorded at ingest time.
+///
+/// Blobs are normalized (0644) and deduped by content only, so the
+/// recorded mode is per PATH and must be applied after placement. On
+/// a private inode that is a plain chmod. A hardlinked placement
+/// shares its inode with the store blob and every sibling tree —
+/// chmod there would leak both directions, and re-adding write bits
+/// would defeat the read-only guard — so a link whose exec bits do
+/// not match the record is replaced by a private byte copy first,
+/// which then takes any mode safely. Exec-bit parity is all a shared
+/// inode can ever carry faithfully; the stripped write bits stay.
+///
+/// Returns `true` when that replacement happened: the caller counts
+/// it as a byte copy in [`MaterializeReport::copied`].
+fn finalize_mode(shared_inode: bool, mode: u32, src: &Path, dest: &Path) -> io::Result<bool> {
+    let current = fs::metadata(dest)?.permissions().mode();
+    if shared_inode {
+        if current & 0o111 == mode & 0o111 {
+            return Ok(false);
+        }
+        fs::remove_file(dest)?;
+        fs::copy(src, dest)?;
+        fs::set_permissions(dest, fs::Permissions::from_mode(mode))?;
+        return Ok(true);
+    }
+    if current & 0o7777 != mode {
+        fs::set_permissions(dest, fs::Permissions::from_mode(mode))?;
+    }
+    Ok(false)
 }
 
 /// One placement attempt for one file. Returns whether the selected
@@ -460,18 +562,8 @@ fn place(backend: Option<&dyn FileMaterialize>, src: &Path, dest: &Path) -> std:
 // real failure.
 
 /// Resolve the (absolute) git dir of a freshly created worktree.
-fn worktree_git_dir(worktree: &Path) -> Result<PathBuf, String> {
-    let git_dir = Command::new("git")
-        .current_dir(worktree)
-        .args(["rev-parse", "--absolute-git-dir"])
-        .output()
-        .map_err(|e| format!("cannot query git dir: {e}"))?;
-    if !git_dir.status.success() {
-        return Err("newly created worktree is not a git worktree".into());
-    }
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&git_dir.stdout).trim(),
-    ))
+fn worktree_git_dir(worktree: &Path) -> Result<PathBuf> {
+    gitops::git_dir(worktree)
 }
 
 /// Give this worktree one reference on every distinct blob it uses,
@@ -485,11 +577,11 @@ pub fn claim_references(
     store: &mut DiskStore,
     worktree: &Path,
     ingested: &Ingested,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf> {
     let distinct: BTreeSet<&ContentId> = ingested.files.values().collect();
     if store.gc_mode() != GcMode::MarkSweepNoRefs {
         for id in &distinct {
-            store.add_ref(id).map_err(|e| e.to_string())?;
+            store.add_ref(id)?;
         }
     }
 
@@ -498,17 +590,21 @@ pub fn claim_references(
         .create(true)
         .append(true)
         .open(git_dir.join("wt-hydrated.tsv"))
-        .map_err(|e| format!("cannot open hydration ledger: {e}"))?;
+        .map_err(|e| {
+            Error::io_unanchored("open hydration ledger", git_dir.join("wt-hydrated.tsv"), e)
+        })?;
     // 40k one-line writes through an unbuffered handle cost 40k
     // write(2) syscalls; a BufWriter turns that into a handful of
     // large ones.
     let mut sidecar = io::BufWriter::with_capacity(128 * 1024, sidecar_file);
     for (rel, id) in &ingested.files {
-        writeln!(sidecar, "{rel}\t{id}").map_err(|e| format!("cannot write ledger: {e}"))?;
+        writeln!(sidecar, "{rel}\t{id}").map_err(|e| {
+            Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e)
+        })?;
     }
     sidecar
         .flush()
-        .map_err(|e| format!("cannot write ledger: {e}"))?;
+        .map_err(|e| Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e))?;
     Ok(git_dir)
 }
 
@@ -524,12 +620,12 @@ pub fn publish_mirror(
     git_dir: &Path,
     ingested: &Ingested,
     snapshots: &[ContentId],
-) -> Result<(), String> {
+) -> Result<()> {
     let distinct: BTreeSet<&ContentId> = ingested.files.values().collect();
     store
         .publish_worktree_mirror(worktree, git_dir, distinct, snapshots.iter())
         .map(|_| ())
-        .map_err(|e| format!("cannot publish worktree mirror: {e}"))
+        .map_err(|e| Error::Store(format!("cannot publish worktree mirror: {e}")))
 }
 
 /// Ticket 08: give a snapshot-hydrated worktree its bookkeeping.
@@ -552,13 +648,13 @@ pub fn claim_snapshot_references(
     worktree: &Path,
     ingested: &Ingested,
     snapshot: ContentId,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf> {
     use wt_store::Store as _;
 
     let distinct: BTreeSet<&ContentId> = ingested.files.values().collect();
     if store.gc_mode() != GcMode::MarkSweepNoRefs {
         for id in &distinct {
-            store.add_ref(id).map_err(|e| e.to_string())?;
+            store.add_ref(id)?;
         }
     }
 
@@ -567,16 +663,20 @@ pub fn claim_snapshot_references(
         .create(true)
         .append(true)
         .open(git_dir.join("wt-hydrated.tsv"))
-        .map_err(|e| format!("cannot open hydration ledger: {e}"))?;
+        .map_err(|e| {
+            Error::io_unanchored("open hydration ledger", git_dir.join("wt-hydrated.tsv"), e)
+        })?;
     // Same buffering rationale as claim_references.
     let mut sidecar = io::BufWriter::with_capacity(128 * 1024, sidecar_file);
     for (rel, id) in &ingested.files {
-        writeln!(sidecar, "{rel}\tblob\t{id}").map_err(|e| format!("cannot write ledger: {e}"))?;
+        writeln!(sidecar, "{rel}\tblob\t{id}").map_err(|e| {
+            Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e)
+        })?;
     }
     writeln!(sidecar, "-\tsnapshot\t{snapshot}")
-        .map_err(|e| format!("cannot write ledger: {e}"))?;
+        .map_err(|e| Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e))?;
     sidecar
         .flush()
-        .map_err(|e| format!("cannot write ledger: {e}"))?;
+        .map_err(|e| Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e))?;
     Ok(git_dir)
 }

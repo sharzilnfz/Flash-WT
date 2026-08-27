@@ -1,3 +1,7 @@
+// Tests assert with unwrap/expect by design: a panic IS the failure
+// signal under test, so the workspace restriction lints stay off here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Ticket 06: garbage collection. Removing a worktree releases its
 //! references, and an age-based sweep reclaims unreferenced store
 //! entries, so the store never grows without bound. Everything is
@@ -10,7 +14,7 @@ use std::fs;
 use std::path::Path;
 use std::thread;
 
-use common::{list_files, Fixture};
+use common::{Fixture, list_files};
 
 /// Total file count under the store root — how much content it holds.
 /// The ingest validation cache and the verified-blob ledger beside the

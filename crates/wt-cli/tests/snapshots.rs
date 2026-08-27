@@ -1,3 +1,7 @@
+// Tests assert with unwrap/expect by design: a panic IS the failure
+// signal under test, so the workspace restriction lints stay off here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Whole-directory snapshot hydration, end to end (fast-hydration
 //! ticket 08).
 //!
@@ -234,7 +238,7 @@ fn miss_builds_publishes_and_second_create_hits_with_private_files() {
     let published: Vec<String> = fs::read_dir(&snapshots_dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| n != "tmp")
+        .filter(|n| n != "tmp" && n != "index.tsv" && n != "lru.tsv")
         .collect();
     assert_eq!(published.len(), 1, "exactly one snapshot expected");
 
@@ -422,7 +426,7 @@ fn concurrent_identical_creates_one_publish_wins_loser_consumes_winner() {
     let published: Vec<String> = fs::read_dir(&snapshots_dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| n != "tmp")
+        .filter(|n| n != "tmp" && n != "index.tsv" && n != "lru.tsv")
         .collect();
     assert_eq!(
         published.len(),
@@ -452,7 +456,7 @@ fn evicted_snapshot_referenced_by_mirror_rebuilds_on_next_create() {
     let hash = fs::read_dir(&snapshots_dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .find(|n| *n != "tmp")
+        .find(|n| *n != "tmp" && *n != "index.tsv" && *n != "lru.tsv")
         .expect("published snapshot");
     fs::remove_dir_all(snapshots_dir.join(&hash)).unwrap();
 
@@ -513,10 +517,11 @@ fn fifo_fails_loudly_under_gate_and_is_skipped_without_it() {
     // succeeds exactly as it always did.
     let out = fx.wt(&["create", "two"], &[], "origin-two");
     assert_created(&out);
-    assert!(fx
-        .worktree_path("origin-two")
-        .join("heavy/pkg00/nested/file-0.txt")
-        .exists());
+    assert!(
+        fx.worktree_path("origin-two")
+            .join("heavy/pkg00/nested/file-0.txt")
+            .exists()
+    );
 }
 
 unsafe fn c_fifo(path: &Path) -> *const std::ffi::c_char {
@@ -577,9 +582,8 @@ fn invalid_winner_debris_falls_back_to_per_file_ladder() {
         "debris is left untouched"
     );
 
-    // The per-file ladder preserves gate-off semantics for everything
-    // it can place (symlinks are skipped there — long-standing v1
-    // behavior, recorded in ADR-0005).
+    // The per-file ladder places everything the fixture holds, gate
+    // or no gate.
     let heavy = fx.worktree_path("origin-one").join("heavy");
     assert_eq!(
         fs::read_to_string(heavy.join("pkg00/nested/file-0.txt")).unwrap(),
@@ -607,7 +611,7 @@ fn gc_marks_through_valid_manifests_only() {
     let m = Manifest::new(entries).unwrap();
     assert_eq!(
         store.publish_snapshot(m.entries.clone(), false).unwrap(),
-        Ok(wt_store::PublishOutcome::Published)
+        wt_store::PublishOutcome::Published
     );
 
     let wt_dir = base.path().join("wt");
@@ -642,10 +646,9 @@ fn gc_marks_through_valid_manifests_only() {
 }
 
 #[test]
-fn snapshot_covers_everything_the_ladder_places_plus_symlinks() {
-    // The per-file ladder skips symlinks (long-standing behavior);
-    // the snapshot path represents them faithfully. So the snapshot
-    // tree must be exactly the ladder's tree PLUS the symlink.
+fn ladder_and_snapshot_hydrate_identical_trees() {
+    // Both hydration paths represent every manifest kind faithfully,
+    // so their trees must be the same path set — symlink included.
     let fx = RichFixture::new();
     assert_created(&fx.wt(&["create", "plain"], &[], "origin-plain"));
     assert_created(&fx.wt(&["create", "snap"], SNAPSHOTS_ON, "origin-snap"));
@@ -659,17 +662,9 @@ fn snapshot_covers_everything_the_ladder_places_plus_symlinks() {
     let plain = rel_prefix(&fx.worktree_path("origin-plain").join("heavy"));
     let snap = rel_prefix(&fx.worktree_path("origin-snap").join("heavy"));
 
-    // Every path the ladder places, the snapshot places too.
-    for p in &plain {
-        assert!(
-            snap.contains(p),
-            "snapshot must place {p:?} like the ladder does"
-        );
-    }
-    // And only the snapshot carries the symlink.
+    assert_eq!(plain, snap, "ladder and snapshot must place the same paths");
     assert!(
-        !plain.contains(&PathBuf::from("bin-link")),
-        "ladder skips symlinks (pre-existing behavior)"
+        plain.contains(&PathBuf::from("bin-link")),
+        "both paths must carry the symlink"
     );
-    assert!(snap.contains(&PathBuf::from("bin-link")));
 }

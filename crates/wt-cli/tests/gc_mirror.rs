@@ -1,3 +1,7 @@
+// Tests assert with unwrap/expect by design: a panic IS the failure
+// signal under test, so the workspace restriction lints stay off here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Fast-hydration ticket 07: store-local mark-and-sweep. The store
 //! mirror written once per create is the GC root; sweep modes are
 //! gated by `<store>/gc-mode` (`wt store migrate`). Everything is
@@ -11,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
-use common::{list_files, Fixture};
+use common::{Fixture, list_files};
 
 /// Regular files under the store root that are not content and never
 /// swept (mirrors live under worktrees/, which these tests inspect
@@ -208,10 +212,11 @@ fn torn_final_line_is_ignored_and_live_content_survives() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx
-        .wt_with_store(&["create", "one"], &store)
-        .status
-        .success());
+    assert!(
+        fx.wt_with_store(&["create", "one"], &store)
+            .status
+            .success()
+    );
     let ids = ledger_ids(&fx.repo.parent().unwrap().join("origin-one"));
 
     let mirror = &mirror_files(&store)[0];
@@ -221,10 +226,11 @@ fn torn_final_line_is_ignored_and_live_content_survives() {
     fs::write(mirror, text).expect("tear the mirror");
     let _ = mirror;
 
-    assert!(fx
-        .wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
-        .status
-        .success());
+    assert!(
+        fx.wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
+            .status
+            .success()
+    );
     age_objects(&store);
 
     let swept = fx.wt_with_store(&["sweep", "--age", "0s"], &store);
@@ -248,10 +254,11 @@ fn malformed_young_mirror_defers_deletion_and_is_reported() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx
-        .wt_with_store(&["create", "one"], &store)
-        .status
-        .success());
+    assert!(
+        fx.wt_with_store(&["create", "one"], &store)
+            .status
+            .success()
+    );
     let ids = ledger_ids(&fx.repo.parent().unwrap().join("origin-one"));
 
     // A corrupted mirror: garbage where the v1 header should be. Its
@@ -262,10 +269,11 @@ fn malformed_young_mirror_defers_deletion_and_is_reported() {
     let mirror = mirrors.remove(0);
     fs::write(&mirror, "not a mirror at all\n").expect("corrupt mirror");
 
-    assert!(fx
-        .wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
-        .status
-        .success());
+    assert!(
+        fx.wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
+            .status
+            .success()
+    );
     age_objects(&store);
 
     let swept = fx.wt_with_store(&["sweep", "--age", "1h"], &store);
@@ -296,10 +304,11 @@ fn missing_mirror_still_allows_remove_and_leaves_no_mirror_behind() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx
-        .wt_with_store(&["create", "one"], &store)
-        .status
-        .success());
+    assert!(
+        fx.wt_with_store(&["create", "one"], &store)
+            .status
+            .success()
+    );
     let wt_root = fx.repo.parent().unwrap().join("origin-one");
     let refs_before = ledger_ids(&wt_root);
 
@@ -336,14 +345,16 @@ fn interrupted_mark_sweep_state_reconciles_on_the_next_sweep() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx
-        .wt_with_store(&["create", "one"], &store)
-        .status
-        .success());
-    assert!(fx
-        .wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
-        .status
-        .success());
+    assert!(
+        fx.wt_with_store(&["create", "one"], &store)
+            .status
+            .success()
+    );
+    assert!(
+        fx.wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
+            .status
+            .success()
+    );
 
     // Kill mid-sweep, simulated: one blob already unlinked, its
     // siblings not yet. The next sweep reconciles without touching
@@ -474,19 +485,21 @@ fn dual_write_keeps_refs_maintained_until_explicit_cutover() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx
-        .wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
-        .status
-        .success());
+    assert!(
+        fx.wt_with_store(&["store", "migrate", "--activate-mark-sweep"], &store)
+            .status
+            .success()
+    );
     assert_eq!(
         fs::read_to_string(store.join("gc-mode")).unwrap().trim(),
         "mark-sweep"
     );
 
-    assert!(fx
-        .wt_with_store(&["create", "one"], &store)
-        .status
-        .success());
+    assert!(
+        fx.wt_with_store(&["create", "one"], &store)
+            .status
+            .success()
+    );
     let ids = ledger_ids(&fx.repo.parent().unwrap().join("origin-one"));
     for id in &ids {
         assert!(
@@ -513,10 +526,11 @@ fn drop_legacy_refs_warns_loudly_purges_refs_and_creates_stop_writing_them() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx
-        .wt_with_store(&["create", "one"], &store)
-        .status
-        .success());
+    assert!(
+        fx.wt_with_store(&["create", "one"], &store)
+            .status
+            .success()
+    );
     let dropped = fx.wt_with_store(&["store", "migrate", "--drop-legacy-refs"], &store);
     assert!(
         dropped.status.success(),
@@ -550,10 +564,11 @@ fn drop_legacy_refs_warns_loudly_purges_refs_and_creates_stop_writing_them() {
     }
 
     // New creates stop touching refs/ entirely.
-    assert!(fx
-        .wt_with_store(&["create", "two"], &store)
-        .status
-        .success());
+    assert!(
+        fx.wt_with_store(&["create", "two"], &store)
+            .status
+            .success()
+    );
     assert!(
         fs::read_dir(store.join("refs")).unwrap().next().is_none(),
         "create wrote ref files after --drop-legacy-refs"

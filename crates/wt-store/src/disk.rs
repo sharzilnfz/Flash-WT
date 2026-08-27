@@ -18,6 +18,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
@@ -27,6 +28,7 @@ use sha2::{Digest, Sha256};
 use crate::verified::VerifiedLedger;
 use crate::{ContentId, Error, Result, Store};
 
+/// On-disk [`Store`]: a git-style object database under one root.
 pub struct DiskStore {
     root: PathBuf,
     /// Fast-hydration ticket 05: fingerprints of blobs whose hash has
@@ -34,6 +36,20 @@ pub struct DiskStore {
     /// store handle stays shareable behind `&self` (materialization
     /// only borrows it); the ledger is persisted once per run.
     ledger: Mutex<VerifiedLedger>,
+}
+
+/// Held `flock(2)` on the `refs/` directory for the lifetime of the
+/// guard; released on drop.
+struct RefsLock {
+    _file: fs::File,
+}
+
+impl Drop for RefsLock {
+    fn drop(&mut self) {
+        // SAFETY: the fd is valid for as long as `_file` is alive,
+        // i.e. through the end of this drop.
+        unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+    }
 }
 
 /// What one sweep pass observed.
@@ -62,6 +78,27 @@ impl DiskStore {
         self.ledger.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Take the exclusive advisory lock (`flock(2)`) over refcount
+    /// updates by locking the `refs/` DIRECTORY itself. Every
+    /// read-modify-write of a refcount runs under this lock so
+    /// concurrent processes cannot lose increments (which would let
+    /// legacy sweeps collect live content) or decrements (which strand
+    /// blobs forever). Locks are per open file description, so
+    /// separate handles (threads or processes) genuinely contend.
+    ///
+    /// Deliberately locks the directory rather than a `.lock` file
+    /// inside it: same exclusion semantics with no artifact left in
+    /// the store layout.
+    fn lock_refs(&self) -> io::Result<RefsLock> {
+        let dir = fs::File::open(self.root.join("refs"))?;
+        // SAFETY: flock(2) takes only an fd and constants; the fd is
+        // valid for as long as `dir` is alive.
+        if unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(RefsLock { _file: dir })
+    }
+
     /// Persist any pending verified-ledger updates. Called once at the
     /// end of a run (also from `Drop`, best-effort); a failure here
     /// only costs verification speed next run, never correctness.
@@ -74,8 +111,9 @@ impl DiskStore {
     ///
     /// A matching (size, mtime) fingerprint in the verified ledger —
     /// recorded when this blob's hash was last checked — returns
-    /// without reading a single byte. Otherwise the bytes are read and
-    /// hashed exactly like [`Store::get`]: mismatch fails loudly with
+    /// without reading a single byte. Otherwise the blob is STREAMED
+    /// through a fixed-size window into an incremental SHA-256 (see
+    /// [`Self::verify_digest`]): mismatch fails loudly with
     /// [`Error::Corrupted`] and records nothing; match records the
     /// fingerprint. A missing blob stays [`Error::UnknownContent`].
     pub fn ensure_verified(&self, id: &ContentId) -> Result<()> {
@@ -83,7 +121,7 @@ impl DiskStore {
         let meta = match fs::metadata(&path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(Error::UnknownContent(*id))
+                return Err(Error::UnknownContent(*id));
             }
             Err(e) => return Err(e.into()),
         };
@@ -92,15 +130,44 @@ impl DiskStore {
         if self.ledger().matches(id, size, mtime) {
             return Ok(());
         }
-        let content = fs::read(&path)?;
-        if ContentId(Sha256::digest(&content).into()) != *id {
-            return Err(Error::Corrupted(*id));
-        }
-        drop(content);
+        self.verify_digest(id)?;
         // Fingerprint AFTER the successful check. Chmod elsewhere does
         // not touch mtime, so what was stat'd is what was hashed.
         self.ledger()
             .record(*id, crate::verified::Fingerprint { size, mtime });
+        Ok(())
+    }
+
+    /// Prove the blob at `id` hashes to its own address by streaming
+    /// it through [`Self::verify_file`]: constant memory regardless
+    /// of blob size, so paranoid verification of huge content can
+    /// never look like a mysterious OOM kill.
+    ///
+    /// Unlike [`Self::ensure_verified`] this ignores the verified
+    /// ledger entirely — it always reads and hashes. Missing blobs are
+    /// [`Error::UnknownContent`]; mismatches are [`Error::Corrupted`].
+    pub fn verify_digest(&self, id: &ContentId) -> Result<()> {
+        Self::verify_file(&self.object_path(id), id)
+    }
+
+    /// Stream-hash the file at `path` in 1 MiB chunks and compare
+    /// against `expected`. Never holds more than one chunk plus the
+    /// hash state in memory. Shared by [`Self::verify_digest`],
+    /// placement, and the snapshot paranoid pass.
+    pub(crate) fn verify_file(path: &Path, expected: &ContentId) -> Result<()> {
+        let file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(Error::UnknownContent(*expected));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let mut reader = io::BufReader::with_capacity(1024 * 1024, file);
+        let mut hasher = Sha256::new();
+        io::copy(&mut reader, &mut hasher)?;
+        if ContentId(hasher.finalize().into()) != *expected {
+            return Err(Error::Corrupted(*expected));
+        }
         Ok(())
     }
 
@@ -138,10 +205,20 @@ impl DiskStore {
     }
 
     fn write_ref_count(&self, id: &ContentId, count: u64) -> Result<()> {
-        let path = self.ref_path(id);
-        let mut tmp = tempfile::NamedTempFile::new_in(path.parent().expect("refs dir"))?;
+        let dir = self.root.join("refs");
+        let path = dir.join(id.to_string());
+        let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
         writeln!(tmp, "{count}")?;
+        // Durability ordering mirrors fsutil::durable_write_then_rename
+        // (fsync the FILE before the rename, fsync the parent after):
+        // refcounts gate legacy sweeps, so a rename that landed over
+        // never-written data could silently drop an increment below
+        // what live trees hold and let a later sweep collect content
+        // still in use. This runs once per distinct blob per create,
+        // not per byte, so the fsync cost is bounded by fan-in.
+        tmp.as_file().sync_all()?;
         tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
+        crate::fsutil::sync_parent_dir(&path)?;
         Ok(())
     }
     /// Every content id currently stored, in stable order. Malformed
@@ -188,7 +265,11 @@ impl DiskStore {
             Err(e) => return Err(e.into()),
         }
         fs::remove_file(self.object_path(id))?;
-        // Best-effort cleanup of an emptied shard directory.
+        // Best-effort cleanup of an emptied shard directory. Ignoring
+        // failure is safe by construction: the shard may still hold
+        // other blobs (ENOTEMPTY), and leaving an empty shard behind
+        // only costs one readdir slot — enumeration keys off blob file
+        // names, never off shard directories.
         if let Some(shard) = self.object_path(id).parent() {
             let _ = fs::remove_dir(shard);
         }
@@ -250,7 +331,9 @@ impl DiskStore {
     /// just get their own copy. The store object becomes read-only
     /// along with the link: permissions live on the inode.
     pub fn link_out(&self, id: &ContentId, dest: &Path) -> Result<()> {
-        self.get(id)?;
+        // Streaming verify: same guarantee as Store::get's read-and-
+        // hash, without ever holding the whole blob in memory.
+        self.verify_digest(id)?;
         fs::hard_link(self.object_path(id), dest)?;
         let mut perms = fs::metadata(dest)?.permissions();
         perms.set_mode(perms.mode() & !0o222);
@@ -263,25 +346,45 @@ impl Store for DiskStore {
         let id = ContentId(Sha256::digest(content).into());
         let path = self.object_path(&id);
         if !path.exists() {
-            fs::create_dir_all(path.parent().expect("object parent dir"))?;
-            let mut tmp = tempfile::NamedTempFile::new_in(path.parent().expect("object dir"))?;
+            // object_path is always <root>/objects/<2 hex>/<62 hex>, so
+            // the shard directory is computable without unwrapping.
+            let hex = id.to_string();
+            let shard_dir = self.root.join("objects").join(&hex[..2]);
+            fs::create_dir_all(&shard_dir)?;
+            let mut tmp = tempfile::NamedTempFile::new_in(&shard_dir)?;
             tmp.write_all(content)?;
+            // Durability: fsync the blob's bytes BEFORE the rename.
+            // A crash after the rename without this could leave the
+            // final address naming empty/truncated content — and a
+            // content-addressed store cannot tell that from a valid
+            // empty file. The parent-dir fsync after persist makes
+            // the new directory entry itself durable too.
+            tmp.as_file().sync_all()?;
             // Rename is atomic; a second handle putting the same
             // content races harmlessly because both write identical
             // bytes to the same final name.
             tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
-            // Temp files carry restrictive modes; normalize the blob to
-            // what open(O_CREAT) would have produced (ticket 05). CoW
-            // clones then inherit normal writable permissions, so the
-            // placement path needs no per-file chmod. Blobs written by
-            // older versions keep their 0600 mode until re-ingested —
-            // their clones are owner-rw-only, which is acceptable and
-            // cheaper than a chmod walk over every hydrated file.
+            crate::fsutil::sync_parent_dir(&path)?;
+            // Temp files carry restrictive modes; normalize the blob
+            // to plain 0644 (ticket 05). CoW clones then inherit
+            // normal writable permissions, so the placement path needs
+            // no per-file chmod. Blobs written by older versions keep
+            // their 0600 mode until re-ingested — their clones are
+            // owner-rw-only, which is acceptable and cheaper than a
+            // chmod walk over every hydrated file.
             //
             // The fingerprint is recorded here too: the address IS the
             // hash of the bytes just written through an atomic rename,
             // so a fresh blob is verified by construction.
-            let perms = fs::Permissions::from_mode(default_file_mode());
+            let perms = fs::Permissions::from_mode(0o644);
+            // Failure is deliberately swallowed here, and only here:
+            // the worst case is a blob left at the temp file's 0600
+            // mode, exactly the accepted state of blobs written by
+            // older versions (their clones come out owner-rw-only).
+            // Correctness is untouched — materialize applies the
+            // per-path mode recorded at ingest time — and failing the
+            // put over a cosmetic chmod would strand already-durable
+            // content.
             let _ = fs::set_permissions(&path, perms);
             if let Ok(meta) = fs::metadata(&path) {
                 if let Ok(mtime) = meta.modified() {
@@ -315,6 +418,10 @@ impl Store for DiskStore {
     }
 
     fn add_ref(&mut self, id: &ContentId) -> Result<()> {
+        // The flock makes the read-modify-write below atomic across
+        // processes; a lost increment here could let a legacy sweep
+        // collect live content.
+        let _lock = self.lock_refs()?;
         // Fast-hydration ticket 05: claim_references calls this once
         // per distinct blob, so skip the redundant existence stat when
         // a readable ref file already proves the blob was put before.
@@ -328,10 +435,19 @@ impl Store for DiskStore {
             }
             Err(e) => return Err(e.into()),
         };
-        self.write_ref_count(id, current + 1)
+        // checked_add: a wrapping increment in release mode would
+        // publish a zero refcount for live content — exactly the state
+        // a sweep collects. u64::MAX references cannot happen honestly.
+        let next = current.checked_add(1).ok_or_else(|| {
+            Error::Io(io::Error::other(format!(
+                "reference count overflow for {id}"
+            )))
+        })?;
+        self.write_ref_count(id, next)
     }
 
     fn release_ref(&mut self, id: &ContentId) -> Result<()> {
+        let _lock = self.lock_refs()?;
         if !self.contains(id) {
             return Err(Error::RefCountUnderflow(*id));
         }
@@ -354,18 +470,6 @@ impl Store for DiskStore {
             Err(_) => Ok(0),
         }
     }
-}
-
-/// The mode `open(O_CREAT)` would give a new file: 0o666 minus the
-/// process umask. Read twice and restored immediately; wt runs
-/// single-threaded per store handle, so the window cannot race
-/// anything meaningful.
-fn default_file_mode() -> u32 {
-    // SAFETY: umask(2) has no failure mode; both calls only read and
-    // restore the process mask.
-    let mask = unsafe { libc::umask(0) };
-    unsafe { libc::umask(mask) };
-    0o666 & !(mask as u32)
 }
 
 impl Drop for DiskStore {

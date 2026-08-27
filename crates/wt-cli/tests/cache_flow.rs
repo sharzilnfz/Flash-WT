@@ -1,3 +1,7 @@
+// Tests assert with unwrap/expect by design: a panic IS the failure
+// signal under test, so the workspace restriction lints stay off here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Ticket 02: staleness behavior through the CLI seam. The validation
 //! cache beside the store must make warm creates cheaper without ever
 //! changing what lands in a hydrated tree: edits arrive, touches stay
@@ -147,9 +151,28 @@ fn warm_create_reads_no_unchanged_file_bytes() {
         "warm create must skip reading unchanged files",
     );
 
-    // And the hydrated tree still has exactly the right bytes.
+    // And the hydrated tree still has exactly the right bytes. The
+    // sources were made unreadable above and hydration restores
+    // recorded modes faithfully, so grant read permission on the
+    // HYDRATED copies before comparing — a chmod cannot alter bytes.
     let expected = |i: usize| format!("fake-heavy file {i} of 12\n");
     let dest = fx.repo.parent().unwrap().join("origin-two/heavy");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut stack = vec![dest.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).expect("read heavy") {
+                let p = entry.expect("entry").path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    let mut perms = fs::metadata(&p).unwrap().permissions();
+                    perms.set_mode(0o644);
+                    fs::set_permissions(&p, perms).unwrap();
+                }
+            }
+        }
+    }
     for i in 0..12 {
         let p = dest.join(format!("pkg{:02}/nested/file-{i}.txt", i % 20));
         assert_eq!(

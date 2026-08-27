@@ -26,13 +26,17 @@ use crate::snapshot::SnapshotEntry;
 /// Classification of one rebuild against an old manifest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SnapshotDiff {
+    /// Entries present only in the new manifest.
     pub added: Vec<SnapshotEntry>,
+    /// Entries in both whose content address changed.
     pub modified: Vec<SnapshotEntry>,
+    /// Entries present only in the old manifest.
     pub deleted: Vec<SnapshotEntry>,
 }
 
 impl SnapshotDiff {
     /// Sorted merge of two canonically ordered flat entry lists.
+    #[must_use]
     pub fn compute(old: &[SnapshotEntry], new: &[SnapshotEntry]) -> SnapshotDiff {
         let mut diff = SnapshotDiff::default();
         let (mut i, mut j) = (0usize, 0usize);
@@ -68,14 +72,21 @@ impl SnapshotDiff {
 
     /// Entries needing any work at all. The v2 gate uses this as its
     /// cost heuristic against the NEW entry count.
+    #[must_use]
     pub fn changed_count(&self) -> usize {
         self.added.len() + self.modified.len() + self.deleted.len()
     }
 
     /// Maximal fully-unchanged directory units between two canonical
     /// manifests. Pure function; see the module docs for the rule.
+    ///
+    /// Complexity: one merge for the unchanged set, one sort of the
+    /// merged rels, then O(log n) range lookups per candidate
+    /// directory (prefix sums over dirtiness). The previous
+    /// implementation rescanned every entry under each directory, which
+    /// was quadratic in entries x directories on v2's hot path.
+    #[must_use]
     pub fn unchanged_units(old: &[SnapshotEntry], new: &[SnapshotEntry]) -> Vec<String> {
-        let unchanged = |a: &SnapshotEntry, b: &SnapshotEntry| entries_identical(a, b);
         let mut same: HashSet<&str> = HashSet::new();
         let (mut i, mut j) = (0usize, 0usize);
         while i < old.len() && j < new.len() {
@@ -83,7 +94,7 @@ impl SnapshotDiff {
                 std::cmp::Ordering::Less => i += 1,
                 std::cmp::Ordering::Greater => j += 1,
                 std::cmp::Ordering::Equal => {
-                    if unchanged(&old[i], &new[j]) {
+                    if entries_identical(&old[i], &new[j]) {
                         same.insert(old[i].rel.as_str());
                     }
                     i += 1;
@@ -92,36 +103,60 @@ impl SnapshotDiff {
             }
         }
 
-        // Directories present as dir entries on BOTH sides, deepest
-        // first so maximal units suppress their qualifying descendants.
-        let mut dirs: Vec<&str> = old
+        // Merged, deduped rel list in canonical order.
+        let mut merged: Vec<&str> = Vec::with_capacity(old.len() + new.len());
+        merged.extend(old.iter().map(|e| e.rel.as_str()));
+        merged.extend(new.iter().map(|e| e.rel.as_str()));
+        merged.sort_unstable();
+        merged.dedup();
+
+        // Prefix sums over "dirty" (not identical on both sides): an
+        // entry is dirty iff its rel is absent from `same` — including
+        // rels present on only one side. dirty_prefix[k] counts dirty
+        // entries among merged[..k].
+        let mut dirty_prefix = vec![0usize; merged.len() + 1];
+        for (k, rel) in merged.iter().enumerate() {
+            dirty_prefix[k + 1] = dirty_prefix[k] + usize::from(!same.contains(rel));
+        }
+
+        // Directories present as dir entries on BOTH sides.
+        let old_dirs: HashSet<&str> = old
             .iter()
-            .chain(new.iter())
             .filter(|e| e.kind == crate::snapshot::EntryKind::Dir)
             .map(|e| e.rel.as_str())
-            .filter(|rel| {
-                old.iter()
-                    .any(|e| e.kind == crate::snapshot::EntryKind::Dir && e.rel == *rel)
-                    && new
-                        .iter()
-                        .any(|e| e.kind == crate::snapshot::EntryKind::Dir && e.rel == *rel)
-            })
             .collect();
-        dirs.sort_unstable();
-        dirs.dedup();
+        let new_dirs: HashSet<&str> = new
+            .iter()
+            .filter(|e| e.kind == crate::snapshot::EntryKind::Dir)
+            .map(|e| e.rel.as_str())
+            .collect();
+
+        // Deepest first so maximal units suppress their qualifying
+        // descendants. Stable sort keeps lexicographic order within
+        // equal lengths, exactly like the original pipeline.
+        let mut dirs: Vec<&str> = merged
+            .iter()
+            .copied()
+            .filter(|rel| old_dirs.contains(rel) && new_dirs.contains(rel))
+            .collect();
         dirs.sort_by_key(|d| std::cmp::Reverse(d.len()));
 
-        let mut fully: HashMap<&str, bool> = HashMap::new();
-        for d in &dirs {
-            // Every entry AT or UNDER d/, from either side, unchanged?
-            let prefix = format!("{d}/");
-            let ok = old
-                .iter()
-                .chain(new.iter())
-                .filter(|e| e.rel.as_str() == *d || e.rel.starts_with(&prefix))
-                .all(|e| same.contains(e.rel.as_str()));
-            fully.insert(d, ok);
-        }
+        // A dir d is fully unchanged iff d itself is unchanged AND no
+        // entry under d/ is dirty. All entries carrying the d/
+        // prefix sort in the half-open range ["d/", "d0"): '/' + 1
+        // is '0', so the successor bound is just an appended '0'.
+        // The bounds are compared without materializing either string
+        // (this runs once per candidate directory on the v2 path).
+        let fully: HashMap<&str, bool> = dirs
+            .iter()
+            .map(|d| {
+                let start = merged.partition_point(|rel| rel_before_bound(rel, d, b'/'));
+                let end = merged.partition_point(|rel| rel_before_bound(rel, d, b'0'));
+                debug_assert!(end >= start);
+                let clean_range = end >= start && dirty_prefix[end] - dirty_prefix[start] == 0;
+                (*d, clean_range && same.contains(d))
+            })
+            .collect();
 
         // A unit must be fully unchanged AND have no fully-unchanged
         // ancestor (otherwise it is part of that bigger unit). The
@@ -142,6 +177,22 @@ fn entries_identical(a: &SnapshotEntry, b: &SnapshotEntry) -> bool {
     a.kind == b.kind && a.mode == b.mode && a.blob == b.blob && a.target == b.target
 }
 
+/// Byte-wise `rel < dir + suffix` without allocating the joined bound.
+fn rel_before_bound(rel: &str, dir: &str, suffix: u8) -> bool {
+    let r = rel.as_bytes();
+    let d = dir.as_bytes();
+    let Some(head) = r.get(..d.len()) else {
+        // Shorter than the dir: a proper prefix sorts strictly before
+        // both the dir and anything extending it.
+        return true;
+    };
+    if head == d {
+        r.len() == d.len() || r[d.len()] < suffix
+    } else {
+        head < d
+    }
+}
+
 /// Proper directory ancestors of a relpath, nearest first:
 /// `"deep/a/b"` -> `["deep/a", "deep"]`.
 fn ancestor_dirs(rel: &str) -> Vec<String> {
@@ -154,11 +205,12 @@ fn ancestor_dirs(rel: &str) -> Vec<String> {
     out
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{EntryKind, SnapshotEntry};
     use crate::ContentId;
+    use crate::snapshot::{EntryKind, SnapshotEntry};
 
     fn id(n: u8) -> ContentId {
         let mut bytes = [0u8; 32];

@@ -15,6 +15,13 @@ fn blob(dir: &Path, contents: &[u8]) -> std::path::PathBuf {
 }
 
 #[test]
+fn only_the_hardlink_backend_reports_a_shared_inode() {
+    assert!(HardlinkOut.shares_inode_with_source());
+    #[cfg(target_os = "macos")]
+    assert!(!CloneOut.shares_inode_with_source());
+}
+
+#[test]
 fn hardlink_out_shares_a_read_only_inode() {
     let base = tempfile::tempdir().expect("tempdir");
     let src = blob(base.path(), b"shared bytes\n");
@@ -114,6 +121,20 @@ fn clone_out_refuses_existing_dest() {
         .materialize_file(&src, &dest)
         .expect_err("EEXIST expected");
     assert_eq!(err.raw_os_error(), Some(libc::EEXIST));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn clone_out_reports_invalid_input_instead_of_panicking_on_nameless_dest() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let src = blob(base.path(), b"x\n");
+    // `base/..` has no file_name: the old `.expect` panicked here.
+    let dest = base.path().join("..");
+
+    let err = CloneOut
+        .materialize_file(&src, &dest)
+        .expect_err("InvalidInput expected");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 }
 
 #[test]

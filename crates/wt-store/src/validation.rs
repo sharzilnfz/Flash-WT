@@ -18,6 +18,10 @@
 //! lines are dropped rather than trusted; saving rewrites the whole
 //! file through temp-file-plus-rename so a crash mid-write leaves
 //! either the previous cache or the complete new one, never a mixture.
+//!
+//! Durability status: rebuildable and best-effort by design (losing it
+//! only costs a full re-read-and-hash on the next ingest); NOT
+//! crash-durable — writes are atomic but not fsynced.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -41,7 +45,10 @@ pub struct Entry {
     pub id: ContentId,
 }
 
+/// Ingest-side stat cache: path → (size, mtime, content id).
 pub struct ValidationCache {
+    /// Store root the cache file lives in.
+    root: PathBuf,
     path: PathBuf,
     entries: BTreeMap<String, Entry>,
     /// Set by `record`, cleared by a successful `save`: a warm ingest
@@ -61,6 +68,7 @@ impl ValidationCache {
             .map(|text| parse(&text))
             .unwrap_or_default();
         ValidationCache {
+            root: root.to_path_buf(),
             path,
             entries,
             dirty: false,
@@ -103,8 +111,7 @@ impl ValidationCache {
         if !self.dirty {
             return Ok(());
         }
-        let parent = self.path.parent().expect("cache lives beside a root");
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(&self.root)?;
         for (rel, entry) in &self.entries {
             let since = entry
                 .mtime

@@ -41,3 +41,14 @@ AGENT_HANDOFF_PLAN_REVISED.md (fast-hydration ticket 08).
   the gate is a no-op there rather than a disguised per-file copy.
 - Opt-in via `WT_SNAPSHOTS=1` until parity and benchmark gates pass;
   default stays off.
+
+## Amendment (2026-08-26)
+
+The per-file fallback ladder no longer skips symlinks or normalize away
+permission bits: ingest records symlink targets and file/directory modes
+for every entry, and materialize restores them exactly (hardlinked files
+whose exec bits disagree with the record are replaced by private copies
+rather than chmod-ing the shared blob). Snapshot parity and ladder parity
+are now identical; the benchmark suite's gap tolerance exists only as a
+regression tripwire. Unreferenced snapshots are additionally bounded by
+an LRU retention cap (`WT_SNAPSHOT_CAP`, default 64).

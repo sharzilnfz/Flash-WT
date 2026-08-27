@@ -52,6 +52,7 @@ use sha2::{Digest, Sha256};
 use crate::ContentId;
 
 /// Escape one TSV field: percent-encode the framing bytes.
+#[must_use]
 pub fn escape(field: &str) -> String {
     let mut out = String::with_capacity(field.len());
     for ch in field.chars() {
@@ -95,21 +96,16 @@ pub fn unescape(field: &str) -> Result<String, String> {
 /// `gitdir` must already be canonical ([`std::fs::canonicalize`] at
 /// the write site); this function deliberately does not touch the
 /// filesystem so tests can derive keys for paths that never existed.
+#[must_use]
 pub fn worktree_key(worktree: &str, gitdir: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"version=1\0");
     hasher.update(worktree.as_bytes());
     hasher.update(b"\0");
     hasher.update(gitdir.as_bytes());
-    hex(&hasher.finalize())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
+    // ContentId's Display IS the lowercase hex encoder; no local
+    // hand-rolled one needed.
+    ContentId(hasher.finalize().into()).to_string()
 }
 
 /// The parsed contents of one mirror file.
@@ -130,6 +126,7 @@ pub struct StoreMirror {
 }
 
 impl StoreMirror {
+    /// An empty mirror for the given worktree and its git directory.
     pub fn new(worktree: PathBuf, gitdir: PathBuf) -> StoreMirror {
         StoreMirror {
             worktree,
@@ -139,6 +136,7 @@ impl StoreMirror {
         }
     }
 
+    /// Render the mirror as TSV (see the module-level format docs).
     pub fn serialize(&self) -> String {
         let mut out = String::new();
         out.push_str("v1\tworktree\t");
@@ -216,17 +214,22 @@ pub fn mirror_path(root: &Path, worktree: &Path, gitdir: &Path) -> PathBuf {
     root.join("worktrees").join(format!("{key}.tsv"))
 }
 
-/// Publish a mirror atomically: serialized bytes go to a temp file in
-/// `<root>/worktrees/tmp/`, then one rename lands them at the final
-/// name. A crash before the rename leaves at most an anonymous temp
-/// file — never a half-written root.
+/// Publish a mirror atomically AND crash-durably: serialized bytes go
+/// to a temp file in `<root>/worktrees/tmp/`, are fsynced, then one
+/// rename lands them at the final name and the parent directory is
+/// fsynced. A mirror is THE GC root for a live worktree — a crash
+/// that landed the rename with unwritten data could make a live
+/// worktree's root appear empty and let a sweep collect everything it
+/// names. With this ordering, any crash leaves either the previous
+/// complete mirror or the new complete one at the final name; a kill
+/// before the rename leaves at most an anonymous temp file.
 pub fn publish(root: &Path, mirror: &StoreMirror) -> io::Result<PathBuf> {
     let dir = root.join("worktrees");
     fs::create_dir_all(dir.join("tmp"))?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir.join("tmp"))?;
     tmp.write_all(mirror.serialize().as_bytes())?;
     let final_path = mirror_path(root, &mirror.worktree, &mirror.gitdir);
-    tmp.persist(&final_path).map_err(|e| e.error)?;
+    crate::fsutil::durable_write_then_rename(tmp.path(), &final_path)?;
     Ok(final_path)
 }
 
@@ -243,7 +246,9 @@ pub fn remove(root: &Path, worktree: &Path, gitdir: &Path) -> io::Result<bool> {
 /// One mirror file found on disk, with its mtime and parse verdict.
 #[derive(Debug)]
 pub struct ReadMirror {
+    /// Where the mirror file lives.
     pub path: PathBuf,
+    /// Its modification time, used for grace-window decisions.
     pub modified: SystemTime,
     /// `Err` holds the reason the mirror was rejected; the file is
     /// preserved on disk either way.
@@ -279,6 +284,7 @@ pub fn read_all(root: &Path) -> Vec<ReadMirror> {
     out
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

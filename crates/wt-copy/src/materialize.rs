@@ -37,6 +37,17 @@ pub trait FileMaterialize {
 
     /// Place the contents of `src` at the not-yet-existing `dest`.
     fn materialize_file(&self, src: &Path, dest: &Path) -> io::Result<()>;
+
+    /// Whether a successful placement leaves `dest` sharing one inode
+    /// with the source blob (hardlink), as opposed to owning a private
+    /// inode (clone, byte copy). A caller that applies per-file modes
+    /// after placement must not chmod a shared inode — permissions
+    /// live on the inode, so the store blob and every sibling tree
+    /// would change too. Such callers treat `true` as "replace with a
+    /// private copy before applying any mode the link cannot carry".
+    fn shares_inode_with_source(&self) -> bool {
+        false
+    }
 }
 
 /// Hard-link the blob into place, then strip the write bits.
@@ -59,6 +70,10 @@ impl FileMaterialize for HardlinkOut {
         let mut perms = fs::metadata(dest)?.permissions();
         perms.set_mode(perms.mode() & !0o222);
         fs::set_permissions(dest, perms)
+    }
+
+    fn shares_inode_with_source(&self) -> bool {
+        true
     }
 }
 
@@ -88,7 +103,10 @@ impl FileMaterialize for CloneOut {
         let dir = fs::File::open(dest.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent")
         })?)?;
-        let name = CString::new(dest.file_name().expect("dest has a name").as_bytes())
+        let name = dest.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "destination has no name")
+        })?;
+        let name = CString::new(name.as_bytes())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains NUL byte"))?;
 
         // Flags are 0: CLONE_NOFOLLOW and friends guard against
@@ -106,12 +124,10 @@ impl FileMaterialize for CloneOut {
         // fclonefileat clones the source's attributes, so the
         // destination inherits the blob's permissions. Store blobs are
         // normalized to `default_file_mode()` at put time
-        // (fast-hydration ticket 05), which is exactly what a plain
-        // byte copy would have produced — no per-file chmod here. A
-        // store written by an older version still holds 0600 blobs;
-        // their clones are owner-rw-only until those blobs are
-        // re-ingested. Accepted and documented: one syscall per NEW
-        // blob beats one per hydrated file.
+        // (fast-hydration ticket 05). Any recorded source mode is the
+        // CALLER's business: the clone owns a private inode
+        // (`shares_inode_with_source` is false), so a post-placement
+        // chmod never reaches back into the store.
         Ok(())
     }
 }
@@ -142,5 +158,6 @@ pub fn placement_refused(_e: &io::Error) -> bool {
     true
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests;

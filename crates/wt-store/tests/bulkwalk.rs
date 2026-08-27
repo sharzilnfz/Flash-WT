@@ -1,3 +1,7 @@
+// Tests assert with unwrap/expect by design: a panic IS the failure
+// signal under test, so the workspace restriction lints stay off here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Differential test for the macOS bulk walker (Step 0 follow-up).
 //!
 //! Builds a small but adversarial tree — nested directories, an empty

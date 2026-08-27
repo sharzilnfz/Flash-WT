@@ -8,13 +8,14 @@
 use std::fs;
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use crate::copy_tree::copy_tree;
-use crate::{ensure_dest_free, BackendKind, CopyBackend, Error, Result};
+use crate::{BackendKind, CopyBackend, Error, Result};
 
+/// Copy-on-write clone backend for Linux (`FICLONE` ioctl on
+/// btrfs/XFS). See the module docs for how per-file clones compose.
 #[derive(Debug, Default)]
 pub struct ReflinkBackend;
 
@@ -32,26 +33,17 @@ impl CopyBackend for ReflinkBackend {
     /// True when `dir` sits on btrfs or XFS, the two mainline
     /// filesystems implementing `FICLONE`. Cheap and side-effect free.
     fn supports(&self, dir: &Path) -> bool {
-        let Ok(c_dir) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
-            return false;
-        };
-        // SAFETY: `c_dir` is a valid NUL-terminated path; `st` is a
-        // correctly sized allocation owned by this call. `f_type`
-        // carries the filesystem magic number.
-        let st = unsafe {
-            let mut st: libc::statfs = std::mem::zeroed();
-            if libc::statfs(c_dir.as_ptr(), &mut st) != 0 {
-                return false;
-            }
-            st
-        };
-        REFLINK_MAGICS.contains(&(st.f_type as libc::c_long))
+        match crate::sys::statfs_of(dir) {
+            Ok(st) => REFLINK_MAGICS.contains(&(st.f_type as libc::c_long)),
+            Err(_) => false,
+        }
     }
 
     fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()> {
-        ensure_dest_free(dest)?;
-        let mut clone_file = |from: &Path, to: &Path| reflink_file(from, to);
-        copy_tree(src, dest, &mut clone_file).map_err(Error::Io)
+        crate::copy_tree::staged_copy(dest, self.safety(), &mut |staging| {
+            let mut clone_file = |from: &Path, to: &Path| reflink_file(from, to);
+            copy_tree(src, staging, &mut clone_file).map_err(Error::Io)
+        })
     }
 }
 
@@ -76,8 +68,12 @@ fn reflink_file(from: &Path, to: &Path) -> io::Result<()> {
         drop(fs::remove_file(to));
         return Err(err);
     }
-    Ok(())
+    // Mode parity with fs::copy: OpenOptions' .mode() passes through
+    // the umask, so a 0755 script would land as 0755 & !umask. Set
+    // the final mode explicitly once FICLONE has succeeded.
+    fs::set_permissions(to, fs::Permissions::from_mode(mode))
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests;

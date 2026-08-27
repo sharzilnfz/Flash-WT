@@ -52,8 +52,11 @@ pub struct BulkEntry {
     /// Slash-separated path relative to the walk root. The root
     /// directory itself is NOT among the entries.
     pub rel_path: String,
+    /// True for directory entries.
     pub is_dir: bool,
+    /// True for symlink entries; targets are never followed.
     pub is_symlink: bool,
+    /// True for regular-file entries.
     pub is_file: bool,
     /// Data length in bytes (regular files only; 0 otherwise).
     pub size: u64,
@@ -116,7 +119,16 @@ struct AttrList {
     forkattr: u32,
 }
 
-extern "C" {
+// SAFETY contract for every call below: each function is called with
+// pointers derived from valid, NUL-terminated C strings or valid
+// buffers for the duration of the call only; none of the three keep
+// references after returning. The declarations are repeated locally
+// (instead of via the `libc` crate) so the fast path does not depend
+// on the crate version carrying them.
+unsafe extern "C" {
+    /// SAFETY (callers): `fd` must be an open directory file
+    /// descriptor; `attr_list`/`attr_buf` must be valid for
+    /// `attr_buf_size` bytes.
     fn getattrlistbulk(
         fd: i32,
         attr_list: *const AttrList,
@@ -124,7 +136,12 @@ extern "C" {
         attr_buf_size: usize,
         options: u64,
     ) -> i32;
+    /// SAFETY (callers): `path` must point to a valid NUL-terminated
+    /// C string; variadic mode is required for the O_CREAT-less open
+    /// used here (no third argument is passed).
     fn open(path: *const core::ffi::c_char, oflag: i32, ...) -> i32;
+    /// SAFETY (callers): `fd` must be an open descriptor and must not
+    /// be used again afterwards.
     fn close(fd: i32) -> i32;
 }
 
@@ -231,23 +248,32 @@ fn parse_record(
     // Fixed-width data, consumed in kernel source order. A reserved
     // (always-zero here) error slot sits at @20 before the first
     // attribute; see get_error_attributes in xnu's vfs_attrlist.c.
+    // Every read below is length-checked against the record first so
+    // a truncated or malformed buffer degrades into the portable walk
+    // (an io::Error) instead of panicking on slice indexing.
     let mut pos = 24usize;
 
     // NAME: attrreference_t { i32 dataoffset (relative to itself),
     // u32 length including the trailing NUL }; bytes live in the tail.
+    if record.len() < pos + 8 {
+        return Err(io::Error::other("getattrlistbulk record too short"));
+    }
     let dataoffset = read_i32(record, pos);
     let name_len = read_u32(record, pos + 4) as usize;
     if name_len == 0 || dataoffset < 0 {
         return Err(io::Error::other("getattrlistbulk returned a bad name"));
     }
     let name_start = (pos as isize + dataoffset as isize) as usize;
-    if name_start + name_len > record.len() {
+    if name_len > record.len() || name_start > record.len() - name_len {
         return Err(io::Error::other("getattrlistbulk returned a bad name"));
     }
     let raw_name = &record[name_start..name_start + name_len - 1];
     pos += 8;
 
     // OBJTYPE: u32 vtype.
+    if record.len() < pos + 4 {
+        return Err(io::Error::other("getattrlistbulk record too short"));
+    }
     let vtype = read_u32(record, pos);
     pos += 4;
 
@@ -255,6 +281,9 @@ fn parse_record(
     let mut mtime_secs = 0u64;
     let mut mtime_nanos = 0u32;
     if common & ATTR_CMN_MODTIME != 0 {
+        if record.len() < pos + 16 {
+            return Err(io::Error::other("getattrlistbulk record too short"));
+        }
         let secs = read_i64(record, pos);
         let nanos = read_i64(record, pos + 8);
         pos += 16;
@@ -269,6 +298,9 @@ fn parse_record(
     // with `MetadataExt::mode`.
     let mut mode = 0u32;
     if common & ATTR_CMN_ACCESSMASK != 0 {
+        if record.len() < pos + 4 {
+            return Err(io::Error::other("getattrlistbulk record too short"));
+        }
         mode = read_u32(record, pos);
         pos += 4;
     }
@@ -276,6 +308,9 @@ fn parse_record(
     // FILE DATALENGTH: u64; only returned for non-directories.
     let mut size = 0u64;
     if filebits & ATTR_FILE_DATALENGTH != 0 {
+        if record.len() < pos + 8 {
+            return Err(io::Error::other("getattrlistbulk record too short"));
+        }
         size = read_u64(record, pos);
     }
 
@@ -313,19 +348,39 @@ fn parse_record(
 
 /// Little-endian reads at arbitrary offsets: the kernel packs the
 /// attrbuffer on 4-byte boundaries, which does not always leave
-/// 8-byte fields naturally aligned.
+/// 8-byte fields naturally aligned. Bounds are enforced by the slice
+/// indexing itself; callers length-check each record before parsing
+/// it.
 fn read_u32(buf: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(buf[at..at + 4].try_into().expect("4 bytes"))
+    u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
 }
 
 fn read_i32(buf: &[u8], at: usize) -> i32 {
-    i32::from_le_bytes(buf[at..at + 4].try_into().expect("4 bytes"))
+    i32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
 }
 
 fn read_u64(buf: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(buf[at..at + 8].try_into().expect("8 bytes"))
+    u64::from_le_bytes([
+        buf[at],
+        buf[at + 1],
+        buf[at + 2],
+        buf[at + 3],
+        buf[at + 4],
+        buf[at + 5],
+        buf[at + 6],
+        buf[at + 7],
+    ])
 }
 
 fn read_i64(buf: &[u8], at: usize) -> i64 {
-    i64::from_le_bytes(buf[at..at + 8].try_into().expect("8 bytes"))
+    i64::from_le_bytes([
+        buf[at],
+        buf[at + 1],
+        buf[at + 2],
+        buf[at + 3],
+        buf[at + 4],
+        buf[at + 5],
+        buf[at + 6],
+        buf[at + 7],
+    ])
 }

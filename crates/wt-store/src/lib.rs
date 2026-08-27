@@ -7,8 +7,10 @@
 //! (ticket 06).
 
 mod disk;
+mod fsutil;
 mod gc;
 mod mirror;
+mod scrub;
 mod snapdiff;
 mod snapindex;
 mod snapshot;
@@ -21,17 +23,18 @@ pub mod bulkwalk;
 pub use disk::DiskStore;
 pub use gc::{GcMode, MarkReport, MarkSwept};
 pub use mirror::{
-    escape, mirror_path, publish as publish_mirror, read_all as read_mirrors, unescape,
-    worktree_key, ReadMirror, StoreMirror,
+    ReadMirror, StoreMirror, escape, mirror_path, publish as publish_mirror,
+    read_all as read_mirrors, unescape, worktree_key,
 };
+pub use scrub::ScrubReport;
 pub use snapdiff::SnapshotDiff;
 pub use snapindex::{
-    record_hit as record_snapshot_hit, record_publish as record_snapshot_publish,
-    select_old_snapshot, SelectionIndex, SelectionRecord, MAX_RING,
+    MAX_RING, SelectionIndex, SelectionRecord, SnapshotLru, record_hit as record_snapshot_hit,
+    record_publish as record_snapshot_publish, record_snapshot_lru_touch, select_old_snapshot,
 };
 pub use snapshot::{
-    read_published as read_published_snapshot, snapshot_path, snapshot_tree_path, BuildError,
-    EntryKind, Manifest, PublishOutcome, SnapshotBuildTiming, SnapshotEntry,
+    BuildError, EntryKind, Manifest, PublishOutcome, PublishReceipt, SnapshotBuildTiming,
+    SnapshotEntry, read_published as read_published_snapshot, snapshot_path, snapshot_tree_path,
 };
 pub use validation::{Entry, ValidationCache};
 pub use verified::{Fingerprint, VerifiedLedger};
@@ -57,6 +60,7 @@ impl fmt::Display for ContentId {
 impl ContentId {
     /// Parse the lowercase hex form produced by [`Display`]. Returns
     /// `None` for anything that is not exactly 64 hex digits.
+    #[must_use]
     pub fn from_hex(text: &str) -> Option<ContentId> {
         let bytes = text.as_bytes();
         if bytes.len() != 64 || !bytes.iter().all(u8::is_ascii_hexdigit) {
@@ -64,14 +68,22 @@ impl ContentId {
         }
         let mut out = [0u8; 32];
         for (i, pair) in text.as_bytes().chunks(2).enumerate() {
-            let hi = (pair[0] as char).to_digit(16).expect("hex digit") as u8;
-            let lo = (pair[1] as char).to_digit(16).expect("hex digit") as u8;
-            out[i] = hi << 4 | lo;
+            // The charset guard above makes non-hex digits impossible;
+            // a `None` here degrades to the same `None` answer rather
+            // than trusting it.
+            let (Some(hi), Some(lo)) = (
+                (pair[0] as char).to_digit(16),
+                (pair[1] as char).to_digit(16),
+            ) else {
+                return None;
+            };
+            out[i] = (hi as u8) << 4 | lo as u8;
         }
         Some(ContentId(out))
     }
 }
 
+/// What can go wrong talking to a store.
 #[derive(Debug)]
 pub enum Error {
     /// `get` found the entry but its bytes no longer match the
@@ -83,6 +95,7 @@ pub enum Error {
     /// A reference was released more times than it was added, or
     /// decremented on unknown content.
     RefCountUnderflow(ContentId),
+    /// Any filesystem failure while reading or writing the store.
     Io(io::Error),
 }
 
@@ -105,6 +118,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Store result: [`Error`] on failure.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Hash-addressed content store with reference counting.

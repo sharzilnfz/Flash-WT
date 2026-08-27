@@ -21,15 +21,29 @@
 //! in the same directory, then rename). Parsing is tolerant: any line
 //! that does not validate is dropped silently — the index is pure
 //! optimization metadata, never worth failing a create over.
+//!
+//! Durability status: rebuildable and best-effort by design (losing it
+//! only degrades v2 incremental rebuilds to full builds); NOT
+//! crash-durable — writes are atomic but not fsynced.
+//!
+//! The module also hosts [`SnapshotLru`], the retention-cap sidecar
+//! (product-handoff §7.4): one `<hash>\t<last-use-unix-secs>` line per
+//! snapshot, refreshed on publish AND on hit through the free
+//! [`record_publish`]/[`record_hit`] entry points. GC reads it to pick
+//! which unreferenced snapshots exceed `WT_SNAPSHOT_CAP` and evicts
+//! least-recently-used first. Same conventions as the selection
+//! index: whole-file load/save with an atomic rename, tolerant parse,
+//! torn tail dropped, best-effort everywhere — losing the sidecar
+//! only degrades eviction order to directory mtime, never correctness.
 
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::mirror::escape;
-use crate::snapshot::{read_published, Manifest};
 use crate::ContentId;
+use crate::mirror::escape;
+use crate::snapshot::{Manifest, read_published};
 
 /// Ring capacity: how many recent manifest hashes one key remembers.
 pub const MAX_RING: usize = 3;
@@ -39,8 +53,11 @@ pub const MAX_RING: usize = 3;
 /// happens only at serialization time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectionRecord {
+    /// Absolute path of the repository the selection was made in.
     pub repo_root: String,
+    /// The include-pattern string that selected the heavy directory.
     pub pattern: String,
+    /// The heavy directory's path relative to `repo_root`.
     pub heavy_dir: String,
     /// Manifest hashes, newest first.
     pub ring: Vec<ContentId>,
@@ -103,6 +120,7 @@ impl SelectionRecord {
 /// The whole index: every valid record, in file order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SelectionIndex {
+    /// All valid records.
     pub records: Vec<SelectionRecord>,
 }
 
@@ -158,34 +176,30 @@ impl SelectionIndex {
         Ok(())
     }
 
-    fn find_mut(
-        &mut self,
-        repo_root: &str,
-        pattern: &str,
-        heavy_dir: &str,
-    ) -> Option<&mut SelectionRecord> {
-        self.records
-            .iter_mut()
-            .find(|r| r.matches(repo_root, pattern, heavy_dir))
-    }
-
     fn ensure_record(
         &mut self,
         repo_root: &str,
         pattern: &str,
         heavy_dir: &str,
     ) -> &mut SelectionRecord {
-        if self.find_mut(repo_root, pattern, heavy_dir).is_none() {
-            self.records.push(SelectionRecord {
-                repo_root: repo_root.to_string(),
-                pattern: pattern.to_string(),
-                heavy_dir: heavy_dir.to_string(),
-                ring: Vec::new(),
-                mtime_secs: 0,
-            });
+        if let Some(existing) = self
+            .records
+            .iter()
+            .position(|r| r.matches(repo_root, pattern, heavy_dir))
+        {
+            // In bounds by the `position` match above.
+            return &mut self.records[existing];
         }
-        self.find_mut(repo_root, pattern, heavy_dir)
-            .expect("record just inserted")
+        self.records.push(SelectionRecord {
+            repo_root: repo_root.to_string(),
+            pattern: pattern.to_string(),
+            heavy_dir: heavy_dir.to_string(),
+            ring: Vec::new(),
+            mtime_secs: 0,
+        });
+        let last = self.records.len() - 1;
+        // In bounds by construction: we just pushed it.
+        &mut self.records[last]
     }
 
     /// Move `hash` to the front of the key's ring (dedup, truncate to
@@ -233,8 +247,120 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Path of the snapshot LRU sidecar: `<root>/snapshots/lru.tsv`.
+pub fn lru_path(root: &Path) -> PathBuf {
+    root.join("snapshots").join("lru.tsv")
+}
+
+/// Last-use registry for published snapshots (product-handoff §7.4
+/// retention cap). One line per snapshot:
+///
+/// ```text
+/// <hash>\t<last-use-unix-secs>
+/// ```
+///
+/// Refreshed on every publish AND every hit that goes through the
+/// free [`record_publish`]/[`record_hit`] entry points; GC reads it
+/// to order unreferenced snapshots least-recently-used-first when the
+/// count exceeds the retention cap. A snapshot missing from the file
+/// falls back to its directory mtime (set at publish), so a lost or
+/// truncated sidecar degrades ordering, never safety.
+///
+/// Same conventions as [`SelectionIndex`]: tolerant parse (bad lines
+/// dropped silently), torn tail rule, atomic whole-file save, and
+/// best-effort semantics — never worth failing a create over.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SnapshotLru {
+    /// One `(hash, last-use unix secs)` pair per known snapshot,
+    /// in file order.
+    pub entries: Vec<(ContentId, u64)>,
+}
+
+impl SnapshotLru {
+    /// Load `<root>/snapshots/lru.tsv`. Missing/unreadable means
+    /// empty; malformed lines are dropped silently.
+    pub fn load(root: &Path) -> SnapshotLru {
+        let mut lru = SnapshotLru::default();
+        let Ok(text) = fs::read_to_string(lru_path(root)) else {
+            return lru;
+        };
+        let complete = match text.strip_suffix('\n') {
+            Some(body) => body,
+            None => match text.rfind('\n') {
+                Some(i) => &text[..i],
+                None => return lru,
+            },
+        };
+        for line in complete.split('\n').filter(|l| !l.is_empty()) {
+            if let Some(entry) = Self::parse_line(line) {
+                // Last writer wins on duplicates: newest physical line
+                // is the most recent state.
+                match lru.entries.iter_mut().find(|(h, _)| *h == entry.0) {
+                    Some(slot) => slot.1 = entry.1,
+                    None => lru.entries.push(entry),
+                }
+            }
+        }
+        lru
+    }
+
+    /// Publish the whole sidecar atomically: temp file inside the
+    /// snapshots directory, then one rename onto the final name.
+    pub fn save(&self, root: &Path) -> io::Result<()> {
+        let dir = root.join("snapshots");
+        fs::create_dir_all(&dir)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
+        for (hash, secs) in &self.entries {
+            tmp.write_all(format!("{hash}\t{secs}\n").as_bytes())?;
+        }
+        tmp.persist(lru_path(root)).map_err(|e| e.error)?;
+        Ok(())
+    }
+
+    /// Record `secs` as `hash`'s last use, inserting or overwriting.
+    /// Last writer wins: callers pass their own clock reading.
+    pub fn record(&mut self, hash: &ContentId, secs: u64) {
+        match self.entries.iter_mut().find(|(h, _)| h == hash) {
+            Some(slot) => slot.1 = secs,
+            None => self.entries.push((*hash, secs)),
+        }
+    }
+
+    /// The recorded last use of `hash`, if any.
+    pub fn last_use(&self, hash: &ContentId) -> Option<u64> {
+        self.entries
+            .iter()
+            .find(|(h, _)| h == hash)
+            .map(|(_, secs)| *secs)
+    }
+
+    fn parse_line(line: &str) -> Option<(ContentId, u64)> {
+        let (hex, secs) = line.split_once('\t')?;
+        let secs_text = secs.split('\t').next()?;
+        Some((ContentId::from_hex(hex)?, secs_text.parse().ok()?))
+    }
+}
+
+/// Best-effort LRU touch: load, record now, save. Any failure is
+/// swallowed — eviction then falls back to directory mtimes, which
+/// still orders publishes correctly.
+fn touch_lru(root: &Path, hash: &ContentId) {
+    let mut lru = SnapshotLru::load(root);
+    lru.record(hash, now_secs());
+    let _ = lru.save(root);
+}
+
+/// LRU-only last-use refresh, for callers that skip the v2 selection
+/// index (record_hit / record_publish already stamp via touch_lru).
+/// Best-effort, same contract as touch_lru.
+pub fn record_snapshot_lru_touch(root: &Path, hash: &ContentId) {
+    touch_lru(root, hash);
+}
+
 /// After a successful PUBLISH (full or incremental): load, move the
 /// published hash to the front, refresh the mtime, save atomically.
+/// Also refreshes the snapshot's LRU last-use stamp (retention-cap
+/// sidecar); an LRU write failure never fails the index update.
 pub fn record_publish(
     root: &Path,
     repo_root: &str,
@@ -244,11 +370,15 @@ pub fn record_publish(
 ) -> io::Result<()> {
     let mut idx = SelectionIndex::load(root);
     idx.record_publish(repo_root, pattern, heavy_dir, hash, now_secs());
+    touch_lru(root, hash);
     idx.save(root)
 }
 
 /// After a snapshot HIT: load, move-to-front if not already there,
-/// save atomically. The mtime is untouched.
+/// save atomically. The selection mtime is untouched, but the LRU
+/// last-use stamp IS refreshed — a hit must protect the snapshot
+/// from retention-cap eviction (unlike the v2 ring order, which only
+/// cares about recency relative to sibling candidates).
 pub fn record_hit(
     root: &Path,
     repo_root: &str,
@@ -258,6 +388,7 @@ pub fn record_hit(
 ) -> io::Result<()> {
     let mut idx = SelectionIndex::load(root);
     idx.record_hit(repo_root, pattern, heavy_dir, hash);
+    touch_lru(root, hash);
     idx.save(root)
 }
 
@@ -284,6 +415,7 @@ pub fn select_old_snapshot(
     None
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,8 +539,8 @@ mod tests {
 
     #[test]
     fn select_walks_ring_newest_first_and_skips_invalid_candidates() {
-        use crate::snapshot::{Manifest, SnapshotEntry};
         use crate::Store as _;
+        use crate::snapshot::{Manifest, SnapshotEntry};
 
         let base = tempfile::tempdir().unwrap();
         let mut store = crate::DiskStore::open(base.path().join("store")).unwrap();
@@ -420,7 +552,7 @@ mod tests {
             store
                 .publish_snapshot(m_old.entries.clone(), false)
                 .unwrap(),
-            Ok(crate::PublishOutcome::Published)
+            crate::PublishOutcome::Published
         );
         super::record_publish(store.root(), ROOT_A, PAT, HEAVY, &m_old.hash).unwrap();
 
@@ -436,7 +568,7 @@ mod tests {
             store
                 .publish_snapshot(m_new.entries.clone(), false)
                 .unwrap(),
-            Ok(crate::PublishOutcome::Published)
+            crate::PublishOutcome::Published
         );
         {
             let mut idx = crate::snapindex::SelectionIndex::load(store.root());
@@ -470,5 +602,76 @@ mod tests {
         assert!(select_old_snapshot(store.root(), ROOT_A, PAT, HEAVY).is_none());
         assert!(select_old_snapshot(store.root(), "/unknown", PAT, HEAVY).is_none());
         store.flush().unwrap();
+    }
+
+    #[test]
+    fn lru_sidecar_round_trips_and_tolerates_garbage() {
+        let base = tempfile::tempdir().unwrap();
+        let store = base.path();
+
+        // Missing file: empty registry.
+        assert_eq!(SnapshotLru::load(store), SnapshotLru::default());
+
+        let mut lru = SnapshotLru::default();
+        lru.record(&id(1), 100);
+        lru.record(&id(2), 200);
+        lru.record(&id(1), 150); // upsert, no duplicate line
+        lru.save(store).unwrap();
+        let back = SnapshotLru::load(store);
+        assert_eq!(back, lru);
+        assert_eq!(back.entries.len(), 2);
+        assert_eq!(back.last_use(&id(1)), Some(150));
+        assert_eq!(back.last_use(&id(2)), Some(200));
+        assert_eq!(back.last_use(&id(3)), None);
+
+        // Garbage lines dropped; torn tail (no trailing newline)
+        // dropped too; duplicate keys resolved newest-line-wins.
+        let good = format!("{}\t42\n", id(5));
+        fs::write(
+            lru_path(store),
+            format!(
+                "not-hex\t7\n{good}{}\tnot-a-number\n{}extra\t9\n{good}",
+                id(6),
+                id(7)
+            ),
+        )
+        .unwrap();
+        let lru = SnapshotLru::load(store);
+        assert_eq!(lru.entries, vec![(id(5), 42)]);
+    }
+
+    #[test]
+    fn publish_and_hit_refresh_the_lru_sidecar() {
+        // The free entry points are what the CLI calls on publishes
+        // and hits: each must leave a fresh last-use stamp behind.
+        let base = tempfile::tempdir().unwrap();
+        let store = base.path();
+        super::record_publish(store, ROOT_A, PAT, HEAVY, &id(9)).unwrap();
+        let stamp = SnapshotLru::load(store).last_use(&id(9));
+        assert!(
+            stamp.is_some_and(|s| s >= now_secs() - 2),
+            "publish must stamp the LRU sidecar ({stamp:?})"
+        );
+
+        // A hit re-stamps: still exactly one entry for the hash.
+        super::record_hit(store, ROOT_A, PAT, HEAVY, &id(9)).unwrap();
+        let lru = SnapshotLru::load(store);
+        assert_eq!(lru.entries.len(), 1);
+        assert_eq!(lru.entries[0].0, id(9));
+        assert!(
+            lru.entries[0].1 >= now_secs() - 2,
+            "hit must leave a fresh stamp"
+        );
+    }
+
+    #[test]
+    fn lru_touch_survives_hostile_layouts_silently() {
+        // snapshots/ exists as a FILE: the LRU touch is best-effort
+        // and must never panic; the index save surfaces its own
+        // error as before.
+        let base = tempfile::tempdir().unwrap();
+        fs::write(base.path().join("snapshots"), "not a directory").unwrap();
+        assert!(super::record_publish(base.path(), ROOT_A, PAT, HEAVY, &id(9)).is_err());
+        let _ = super::record_hit(base.path(), ROOT_A, PAT, HEAVY, &id(9));
     }
 }

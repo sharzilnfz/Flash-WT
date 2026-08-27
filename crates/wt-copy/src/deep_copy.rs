@@ -5,8 +5,9 @@ use std::fs;
 use std::path::Path;
 
 use crate::copy_tree::copy_tree;
-use crate::{ensure_dest_free, BackendKind, CopyBackend, Error, Result};
+use crate::{BackendKind, CopyBackend, Error, Result};
 
+/// Portable byte-by-byte fallback backend; works everywhere.
 #[derive(Debug, Default)]
 pub struct DeepCopyBackend;
 
@@ -21,12 +22,14 @@ impl CopyBackend for DeepCopyBackend {
     }
 
     fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()> {
-        ensure_dest_free(dest)?;
-        let mut copy_file = |from: &Path, to: &Path| fs::copy(from, to).map(|_| ());
-        copy_tree(src, dest, &mut copy_file).map_err(Error::Io)
+        crate::copy_tree::staged_copy(dest, self.safety(), &mut |staging| {
+            let mut copy_file = |from: &Path, to: &Path| fs::copy(from, to).map(|_| ());
+            copy_tree(src, staging, &mut copy_file).map_err(Error::Io)
+        })
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

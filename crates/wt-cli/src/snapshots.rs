@@ -32,19 +32,11 @@ use wt_store::{ContentId, DiskStore, SnapshotBuildTiming};
 use wt_copy::{ClonefileBackend, CopyBackend};
 #[cfg(target_os = "macos")]
 use wt_store::{
-    select_old_snapshot, BuildError, Manifest, PublishOutcome, SnapshotDiff, SnapshotEntry,
+    BuildError, Manifest, PublishOutcome, SnapshotDiff, SnapshotEntry, select_old_snapshot,
 };
 
+use crate::config::RunConfig;
 use crate::hydrate::Ingested;
-
-/// Feature gate for v2 incremental rebuilds. Requires BOTH env vars
-/// plus macOS/APFS (checked by the caller's backend probe), and any
-/// failure degrades to the plain full build.
-#[cfg(target_os = "macos")]
-pub fn v2_enabled() -> bool {
-    std::env::var("WT_SNAPSHOTS").as_deref() == Ok("1")
-        && std::env::var("WT_SNAPSHOTS_V2").as_deref() == Ok("1")
-}
 
 /// One heavy directory hydrated through the fast path.
 pub struct SnapshotHydration {
@@ -97,7 +89,9 @@ pub enum Outcome {
 /// repo-relative heavy directory name ("heavy" in `heavy/pkg/x`).
 /// `repo_root` and `pattern` key the v2 selection index (the first
 /// `.wtinclude` pattern that matched this directory is fine; the key
-/// only needs to be stable across runs).
+/// only needs to be stable across runs). `cfg.verify` bypasses hits;
+/// v2 incremental rebuilds additionally require `cfg.snapshots` and
+/// `cfg.v2`.
 #[allow(clippy::too_many_arguments)]
 pub fn hydrate(
     store: &mut DiskStore,
@@ -107,18 +101,18 @@ pub fn hydrate(
     src_root: &Path,
     heavy_rel: &str,
     dest_root: &Path,
-    paranoid: bool,
+    cfg: &RunConfig,
 ) -> Outcome {
     #[cfg(target_os = "macos")]
     {
         hydrate_impl(
-            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root, paranoid,
+            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root, cfg,
         )
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (
-            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root, paranoid,
+            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root, cfg,
         );
         // Linux v1: no recursive-clone primitive, so whole-directory
         // snapshots stay a macOS feature. The gate is a no-op.
@@ -136,15 +130,16 @@ fn hydrate_impl(
     src_root: &Path,
     heavy_rel: &str,
     dest_root: &Path,
-    paranoid: bool,
+    cfg: &RunConfig,
 ) -> Outcome {
+    let paranoid = cfg.verify;
     let backend = ClonefileBackend;
     // Gate is a no-op on filesystems without recursive clone support.
     if !backend.supports(dest_root) {
         return Outcome::FellBack(None);
     }
     // v2 needs the same APFS substrate PLUS its own env gate.
-    let v2 = v2_enabled();
+    let v2 = cfg.snapshots && cfg.v2;
     let repo_key = repo_root.to_string_lossy().into_owned();
 
     let entries = match manifest_entries(ingested, heavy_rel) {
@@ -180,6 +175,11 @@ fn hydrate_impl(
                         heavy_rel,
                         &manifest.hash,
                     );
+                } else {
+                    // No selection index without v2, but a hit must
+                    // still refresh LRU recency or retention-cap
+                    // eviction can collect a hot snapshot.
+                    wt_store::record_snapshot_lru_touch(store.root(), &manifest.hash);
                 }
                 let tree = wt_store::snapshot_tree_path(store.root(), &manifest.hash);
                 let stage = Instant::now();
@@ -196,7 +196,7 @@ fn hydrate_impl(
                             lookup_ms,
                             clonefile_ms,
                             build,
-                        })
+                        });
                     }
                     // Snapshot evicted mid-flight: rebuild and try again.
                     Err(CloneFailure::SnapshotVanished) => continue,
@@ -243,6 +243,9 @@ fn hydrate_impl(
                 heavy_rel,
                 &manifest.hash,
             );
+        } else {
+            // Same recency rule as the hit path above.
+            wt_store::record_snapshot_lru_touch(store.root(), &manifest.hash);
         }
 
         let stage = Instant::now();
@@ -315,16 +318,15 @@ fn try_incremental(
         return None;
     }
 
-    let mut phase = SnapshotBuildTiming::default();
-    match store.publish_snapshot_incremental(
+    match store.publish_snapshot_incremental_with_timing(
         manifest.entries.clone(),
         &old_hash,
         paranoid,
-        Some(&mut phase),
     ) {
-        Ok(Ok(PublishOutcome::Published)) | Ok(Ok(PublishOutcome::WinnerValid)) => {
-            *build = Some(phase);
-            Some((phase.clone_units, phase.linked_files))
+        Ok(receipt) => {
+            let timing = receipt.timing;
+            *build = Some(timing);
+            Some((timing.clone_units, timing.linked_files))
         }
         _ => None,
     }
@@ -389,7 +391,7 @@ fn finish_clone(
 
     match backend.copy_dir(tree, dest_heavy) {
         Ok(()) => Ok(()),
-        Err(wt_copy::Error::Io(e)) if e.raw_os_error() == Some(libc::ENOENT) => {
+        Err(wt_copy::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             // Source snapshot vanished mid-flight (eviction race).
             cleanup_partial(dest_heavy, restore_empty_dir)?;
             Err(CloneFailure::SnapshotVanished)
@@ -497,24 +499,23 @@ fn ensure_published(
 ) -> Result<PublishOutcome, String> {
     let mut healed = false;
     loop {
-        let mut phase = SnapshotBuildTiming::default();
-        match store.publish_snapshot_timed(manifest.entries.clone(), paranoid, Some(&mut phase)) {
-            Ok(Ok(outcome)) => {
-                *build = Some(phase);
-                return Ok(outcome);
+        match store.publish_snapshot_with_timing(manifest.entries.clone(), paranoid) {
+            Ok(receipt) => {
+                *build = Some(receipt.timing);
+                return Ok(receipt.outcome);
             }
-            Ok(Err(BuildError::MissingBlob(blob))) if !healed => {
+            Err(BuildError::MissingBlob(blob)) if !healed => {
                 // Sweep raced us: re-run put() for the source content,
                 // then retry ONCE. put re-records the fingerprint, so
                 // re-verification happens inside the next build.
                 healed = true;
                 heal_blob(store, ingested, src_root, blob)?;
             }
-            Ok(Err(BuildError::MissingBlob(blob))) => {
+            Err(BuildError::MissingBlob(blob)) => {
                 return Err(format!("blob {blob} vanished twice during snapshot build"));
             }
-            Ok(Err(BuildError::Fatal(msg))) => return Err(msg),
-            Err(e) => return Err(e.to_string()),
+            Err(BuildError::Fatal(msg)) => return Err(msg),
+            Err(BuildError::Io(e)) => return Err(e.to_string()),
         }
     }
 }
