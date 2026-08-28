@@ -97,17 +97,17 @@ fn surviving_snapshots(store: &Path) -> Vec<String> {
     names
 }
 
-/// Sweep helper with 1-hour grace window for unreferenced snapshot cap/budget testing.
+/// Sweep helper with zero grace for immediate retention-cap testing.
 fn sweep_now(store: &mut DiskStore, cap: usize) -> MarkSwept {
     store
-        .sweep_mark_sweep_with_budget(Duration::from_secs(3600), cap, None)
+        .sweep_mark_sweep_with_budget(Duration::from_secs(0), cap, None)
         .unwrap()
 }
 
 /// Sweep helper with max bytes.
 fn sweep_budget(store: &mut DiskStore, cap: usize, max_bytes: Option<u64>) -> MarkSwept {
     store
-        .sweep_mark_sweep_with_budget(Duration::from_secs(3600), cap, max_bytes)
+        .sweep_mark_sweep_with_budget(Duration::from_secs(0), cap, max_bytes)
         .unwrap()
 }
 
@@ -143,6 +143,25 @@ fn cap_evicts_least_recently_used_and_keeps_most_recent() {
 
     // The sidecar itself must never become sweep debris.
     assert!(store.root().join("snapshots").join("lru.tsv").is_file());
+}
+
+#[test]
+fn anti_thrashing_protects_young_snapshots_even_when_budget_is_zero() {
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+
+    let _hashes: Vec<ContentId> = ["a", "b", "c"]
+        .iter()
+        .map(|t| publish_snapshot(&mut store, t.as_bytes()))
+        .collect();
+
+    // Snapshots were just published (young within 1h grace). Even with cap 0 and max_bytes 0,
+    // the anti-thrashing grace window protects them from eviction.
+    let swept = store
+        .sweep_mark_sweep_with_budget(Duration::from_secs(3600), 0, Some(0))
+        .unwrap();
+    assert_eq!(swept.snapshot_cap_evicted, 0);
+    assert_eq!(surviving_snapshots(store.root()).len(), 3);
 }
 
 #[test]
@@ -234,10 +253,10 @@ fn referenced_snapshots_survive_any_cap() {
     );
     age_all_snapshots(store.root());
 
-    // Cap zero: unreferenced aged-out snapshots go (via the grace rule), yet the referenced pair survives untouched.
+    // Cap zero: unreferenced aged-out snapshots go, yet the referenced pair survives untouched.
     let swept = sweep_now(&mut store, 0);
     assert_eq!(swept.snapshot_dirs_removed, 2);
-    assert_eq!(swept.snapshot_cap_evicted, 0);
+    assert_eq!(swept.snapshot_cap_evicted, 2);
     let mut expected: Vec<String> = hashes[..2].iter().map(|h| h.to_string()).collect();
     expected.sort();
     assert_eq!(surviving_snapshots(store.root()), expected);

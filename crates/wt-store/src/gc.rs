@@ -343,6 +343,7 @@ impl DiskStore {
             path: PathBuf,
             last_use: u64,
             size: u64,
+            is_young: bool,
         }
 
         let mut candidates: Vec<Candidate> = Vec::new();
@@ -382,9 +383,6 @@ impl DiskStore {
             let id = ContentId::from_hex(&name);
             match id {
                 Some(id) if referenced.contains(&id) => {}
-                Some(_) if aged_out => {
-                    removed += u64::from(remove_tree(&path));
-                }
                 Some(id) => {
                     let size = if let Some(m) = crate::snapshot::read_published(self.root(), &id) {
                         if m.total_size > 0 {
@@ -411,6 +409,7 @@ impl DiskStore {
                         path,
                         last_use,
                         size,
+                        is_young: !aged_out,
                     });
                 }
                 None if aged_out => {
@@ -421,21 +420,42 @@ impl DiskStore {
             }
         }
 
-        // Least-recently-used first (ascending last_use timestamp)
-        candidates.sort_by_key(|c| c.last_use);
+        // Sort MRU first (highest last_use timestamp first)
+        candidates.sort_by_key(|c| std::cmp::Reverse(c.last_use));
 
-        let mut total_bytes: u64 = candidates.iter().map(|c| c.size).sum();
+        let has_custom_budget = max_bytes.is_some() || cap < 64;
+
+        let mut retained_count = 0usize;
+        let mut retained_bytes = 0u64;
         let mut cap_evicted = 0u64;
 
-        while !candidates.is_empty() {
-            let count_exceeded = candidates.len() > cap;
-            let bytes_exceeded = max_bytes.is_some_and(|max| total_bytes > max);
-            if !count_exceeded && !bytes_exceeded {
-                break;
+        for c in candidates {
+            if c.is_young {
+                // Anti-thrashing grace window: recently published snapshots younger than the grace period
+                // are protected from budget eviction even when budgets are tight.
+                retained_count += 1;
+                retained_bytes = retained_bytes.saturating_add(c.size);
+                continue;
             }
-            let victim = candidates.remove(0);
-            total_bytes = total_bytes.saturating_sub(victim.size);
-            if remove_tree(&victim.path) {
+
+            if !has_custom_budget {
+                // Default sweep without custom budget: aged-out unreferenced snapshots are grace removals.
+                if remove_tree(&c.path) {
+                    removed += 1;
+                }
+                continue;
+            }
+
+            let count_ok = retained_count < cap;
+            let bytes_ok = match max_bytes {
+                Some(max) => retained_bytes.saturating_add(c.size) <= max,
+                None => true,
+            };
+
+            if count_ok && bytes_ok {
+                retained_count += 1;
+                retained_bytes = retained_bytes.saturating_add(c.size);
+            } else if remove_tree(&c.path) {
                 cap_evicted += 1;
             }
         }
