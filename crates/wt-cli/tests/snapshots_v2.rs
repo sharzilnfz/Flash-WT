@@ -299,7 +299,7 @@ fn corrupt_old_manifest_falls_back_to_full_build() {
     let hash = fs::read_dir(&snapshots_dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .find(|n| *n != "tmp" && *n != "index.tsv")
+        .find(|n| wt_store::ContentId::from_hex(n).is_some())
         .expect("published snapshot");
     fs::write(snapshots_dir.join(&hash).join("manifest.tsv"), "garbage\n").unwrap();
 
