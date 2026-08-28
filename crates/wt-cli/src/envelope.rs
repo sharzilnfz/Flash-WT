@@ -113,6 +113,12 @@ pub struct SweepData {
     pub snapshot_cap_evicted: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deferred_by_grace: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leases_examined: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leases_reclaimed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_bytes_reclaimed: Option<u64>,
 }
 
 /// Payload for `wt scrub --json`.
@@ -233,5 +239,30 @@ mod tests {
         assert!(parsed["data"].is_null());
         assert_eq!(parsed["diagnostics"][0]["code"], "NOT_FOUND");
         assert_eq!(parsed["diagnostics"][0]["level"], "error");
+    }
+
+    #[test]
+    fn sweep_envelope_with_lease_metrics_serialization() {
+        let data = SweepData {
+            mode: "mark-sweep".into(),
+            examined: 100,
+            reclaimed: 5,
+            mirrors_removed: Some(2),
+            snapshot_dirs_removed: Some(1),
+            snapshot_cap_evicted: Some(0),
+            deferred_by_grace: Some(false),
+            leases_examined: Some(3),
+            leases_reclaimed: Some(2),
+            lease_bytes_reclaimed: Some(4096),
+        };
+        let env = Envelope::ok("sweep", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize sweep json");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse sweep json");
+        assert_eq!(parsed["command"], "sweep");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["data"]["leases_examined"], 3);
+        assert_eq!(parsed["data"]["leases_reclaimed"], 2);
+        assert_eq!(parsed["data"]["lease_bytes_reclaimed"], 4096);
     }
 }

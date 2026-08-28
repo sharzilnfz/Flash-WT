@@ -287,7 +287,11 @@ impl DiskStore {
     }
 
     pub(crate) fn read_ref_count(&self, id: &ContentId) -> Result<u64> {
-        let text = fs::read_to_string(self.ref_path(id))?;
+        let text = match fs::read_to_string(self.ref_path(id)) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(Error::Io(e)),
+        };
         text.trim()
             .parse::<u64>()
             .map_err(|e| Error::Io(io::Error::other(format!("bad ref count file: {e}"))))
@@ -353,7 +357,11 @@ impl DiskStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
-        fs::remove_file(self.object_path(id))?;
+        match fs::remove_file(self.object_path(id)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
         // Best-effort cleanup of an emptied shard directory. Ignoring
         // failure is safe by construction: the shard may still hold
         // other blobs (ENOTEMPTY), and leaving an empty shard behind
@@ -399,10 +407,15 @@ impl DiskStore {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
-            let modified = fs::metadata(self.object_path(&id))
-                .map_err(Error::Io)?
-                .modified()
-                .map_err(Error::Io)?;
+            let meta = match fs::metadata(self.object_path(&id)) {
+                Ok(m) => m,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(Error::Io(e)),
+            };
+            let modified = match meta.modified() {
+                Ok(m) => m,
+                Err(e) => return Err(Error::Io(e)),
+            };
             if modified > cutoff {
                 continue;
             }

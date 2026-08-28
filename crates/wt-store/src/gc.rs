@@ -287,10 +287,15 @@ impl DiskStore {
             if marks.marked.contains(&id) {
                 continue;
             }
-            let modified = fs::metadata(self.object_path(&id))
-                .map_err(Error::Io)?
-                .modified()
-                .map_err(Error::Io)?;
+            let meta = match fs::metadata(self.object_path(&id)) {
+                Ok(m) => m,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(Error::Io(e)),
+            };
+            let modified = match meta.modified() {
+                Ok(m) => m,
+                Err(e) => return Err(Error::Io(e)),
+            };
             if modified > cutoff {
                 continue;
             }

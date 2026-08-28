@@ -27,7 +27,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use wt_store::{ContentId, GcMode, Store};
 
@@ -280,11 +280,196 @@ pub fn remove(name: &str, dir: Option<&Path>, cfg: &RunConfig) -> Result<(Remove
     Ok((data, diagnostics))
 }
 
+/// What lease sweeping did (ticket 04).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LeaseSweepReport {
+    /// Total lease files examined.
+    pub examined: usize,
+    /// Dead or expired leases successfully reclaimed.
+    pub reclaimed: usize,
+    /// Estimated bytes of scratch worktree directories freed.
+    pub bytes_reclaimed: u64,
+}
+
+fn dir_size(path: &Path) -> u64 {
+    let mut total = 0;
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.is_file() {
+            total += meta.len();
+        } else if meta.is_dir() {
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    total += dir_size(&entry.path());
+                }
+            }
+        }
+    }
+    total
+}
+
+fn find_repo_root_from_gitdir(gitdir: &Path) -> Option<PathBuf> {
+    if gitdir.exists() {
+        let commondir = gitdir.join("commondir");
+        if let Ok(rel) = fs::read_to_string(&commondir) {
+            let mgd = gitdir.join(rel.trim());
+            if let Ok(canon) = mgd.canonicalize() {
+                if canon.file_name() == Some(std::ffi::OsStr::new(".git")) {
+                    if let Some(parent) = canon.parent() {
+                        return Some(parent.to_path_buf());
+                    }
+                }
+                return Some(canon);
+            }
+        }
+    }
+
+    if let Some(parent) = gitdir.parent() {
+        if parent.file_name() == Some(std::ffi::OsStr::new("worktrees")) {
+            if let Some(git_parent) = parent.parent() {
+                if git_parent.file_name() == Some(std::ffi::OsStr::new(".git")) {
+                    if let Some(repo) = git_parent.parent() {
+                        if repo.is_dir() {
+                            return Some(repo.to_path_buf());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Sweep dead or expired scratch worktree leases (ticket 04).
+pub fn sweep_leases(
+    store: &mut wt_store::DiskStore,
+    grace: Duration,
+    now: SystemTime,
+) -> Result<LeaseSweepReport> {
+    let cutoff = now.checked_sub(grace).unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut report = LeaseSweepReport::default();
+    let leases = wt_store::read_leases(store.root());
+    report.examined = leases.len();
+
+    for read in leases {
+        let wt_store::ReadLease {
+            path,
+            id,
+            modified,
+            lease,
+        } = read;
+
+        match lease {
+            Ok(lease) => {
+                let is_dead = !wt_store::is_process_alive(lease.pid, lease.start_time);
+                let is_expired = wt_store::is_lease_expired(&lease);
+                let is_orphaned = !lease.worktree.exists();
+
+                if is_dead || is_expired || is_orphaned {
+                    // 1. Calculate reclaimed disk bytes before deletion
+                    let bytes = if lease.worktree.exists() {
+                        dir_size(&lease.worktree)
+                    } else {
+                        0
+                    };
+                    report.bytes_reclaimed += bytes;
+
+                    // 2. Release references and clean up mirror
+                    if lease.gitdir.exists() {
+                        let ledger_path = lease.gitdir.join("wt-hydrated.tsv");
+                        if ledger_path.exists() {
+                            if let Ok((blobs, _snapshots)) = read_ledger(&lease.gitdir) {
+                                if store.gc_mode() != GcMode::MarkSweepNoRefs {
+                                    for hex in &blobs {
+                                        if let Some(cid) = ContentId::from_hex(hex) {
+                                            match Store::release_ref(store, &cid) {
+                                                Ok(()) => {}
+                                                Err(wt_store::Error::RefCountUnderflow(_)) => {}
+                                                Err(e) => return Err(e.into()),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let _ = fs::remove_file(ledger_path);
+                        }
+                    }
+                    let _ = store.remove_worktree_mirror(&lease.worktree, &lease.gitdir);
+
+                    // 3. Git worktree tracking and branch cleanup
+                    let branch_name = if lease.gitdir.exists() {
+                        fs::read_to_string(lease.gitdir.join("HEAD"))
+                            .ok()
+                            .and_then(|h| {
+                                let h = h.trim();
+                                h.strip_prefix("ref: refs/heads/").map(|s| s.to_string())
+                            })
+                    } else {
+                        None
+                    };
+                    let branch_name = branch_name.unwrap_or_else(|| {
+                        if lease.id.starts_with("scratch-") {
+                            lease.id.clone()
+                        } else {
+                            format!("scratch-{}", lease.id)
+                        }
+                    });
+
+                    let repo_root = find_repo_root_from_gitdir(&lease.gitdir);
+                    if let Some(ref r_root) = repo_root {
+                        if lease.worktree.exists() {
+                            let _ = std::process::Command::new("git")
+                                .args(["worktree", "remove", "--force", &lease.worktree.to_string_lossy()])
+                                .current_dir(r_root)
+                                .output();
+                        }
+                        let _ = std::process::Command::new("git")
+                            .args(["worktree", "prune"])
+                            .current_dir(r_root)
+                            .output();
+                        let _ = std::process::Command::new("git")
+                            .args(["branch", "-D", &branch_name])
+                            .current_dir(r_root)
+                            .output();
+                    }
+
+                    // 4. Clean up worktree directory if still present
+                    if lease.worktree.exists() {
+                        let _ = fs::remove_dir_all(&lease.worktree);
+                    }
+
+                    // 5. Clean up gitdir directory if still present
+                    if lease.gitdir.exists() {
+                        let _ = fs::remove_dir_all(&lease.gitdir);
+                    }
+
+                    // 6. Remove the lease file
+                    let _ = wt_store::remove_lease(store.root(), &id);
+                    let _ = fs::remove_file(&path);
+
+                    report.reclaimed += 1;
+                }
+            }
+            Err(_reason) => {
+                // Malformed lease file: reap if older than the grace period
+                if modified <= cutoff {
+                    let _ = fs::remove_file(&path);
+                    report.reclaimed += 1;
+                }
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<Diagnostic>)> {
     let mut store = open_store()?;
+    let now = SystemTime::now();
     match store.gc_mode() {
         GcMode::Legacy => {
             let max_age = age.unwrap_or(Duration::from_secs(7 * 24 * 60 * 60));
+            let lease_report = sweep_leases(&mut store, max_age, now)?;
             let swept = store.sweep(max_age)?;
             // Dual-write parity evidence: compare what mirrors would
             // keep against what refcounts kept. Agreement prints
@@ -293,12 +478,24 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
                 eprintln!("{line}");
             }
             if !cfg.json {
-                println!(
-                    "swept store: examined {}, reclaimed {} entr{}",
-                    swept.examined,
-                    swept.reclaimed,
-                    if swept.reclaimed == 1 { "y" } else { "ies" }
-                );
+                if lease_report.reclaimed > 0 {
+                    println!(
+                        "swept store: examined {}, reclaimed {} entr{}, reclaimed {} lease{} ({} bytes)",
+                        swept.examined,
+                        swept.reclaimed,
+                        if swept.reclaimed == 1 { "y" } else { "ies" },
+                        lease_report.reclaimed,
+                        if lease_report.reclaimed == 1 { "" } else { "s" },
+                        lease_report.bytes_reclaimed,
+                    );
+                } else {
+                    println!(
+                        "swept store: examined {}, reclaimed {} entr{}",
+                        swept.examined,
+                        swept.reclaimed,
+                        if swept.reclaimed == 1 { "y" } else { "ies" }
+                    );
+                }
             }
             let data = SweepData {
                 mode: "legacy".to_string(),
@@ -308,6 +505,9 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
                 snapshot_dirs_removed: None,
                 snapshot_cap_evicted: None,
                 deferred_by_grace: None,
+                leases_examined: Some(lease_report.examined),
+                leases_reclaimed: Some(lease_report.reclaimed),
+                lease_bytes_reclaimed: Some(lease_report.bytes_reclaimed),
             };
             Ok((data, Vec::new()))
         }
@@ -316,6 +516,7 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
                 Some(explicit) => explicit,
                 None => grace_from_env()?,
             };
+            let lease_report = sweep_leases(&mut store, grace, now)?;
             let max_snapshot_bytes = max_snapshot_bytes_from_env()?;
             let swept = store.sweep_mark_sweep_with_budget(
                 grace,
@@ -328,14 +529,28 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
                 );
             }
             if !cfg.json {
-                println!(
-                    "swept store (mark-and-sweep): examined {}, reclaimed {}, mirrors removed {}, snapshots removed {}, cap evicted {}",
-                    swept.examined,
-                    swept.reclaimed,
-                    swept.mirrors_removed,
-                    swept.snapshot_dirs_removed,
-                    swept.snapshot_cap_evicted,
-                );
+                if lease_report.reclaimed > 0 {
+                    println!(
+                        "swept store (mark-and-sweep): examined {}, reclaimed {}, mirrors removed {}, snapshots removed {}, cap evicted {}, reclaimed {} lease{} ({} bytes)",
+                        swept.examined,
+                        swept.reclaimed,
+                        swept.mirrors_removed,
+                        swept.snapshot_dirs_removed,
+                        swept.snapshot_cap_evicted,
+                        lease_report.reclaimed,
+                        if lease_report.reclaimed == 1 { "" } else { "s" },
+                        lease_report.bytes_reclaimed,
+                    );
+                } else {
+                    println!(
+                        "swept store (mark-and-sweep): examined {}, reclaimed {}, mirrors removed {}, snapshots removed {}, cap evicted {}",
+                        swept.examined,
+                        swept.reclaimed,
+                        swept.mirrors_removed,
+                        swept.snapshot_dirs_removed,
+                        swept.snapshot_cap_evicted,
+                    );
+                }
             }
             let data = SweepData {
                 mode: "mark-sweep".to_string(),
@@ -345,6 +560,9 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
                 snapshot_dirs_removed: Some(swept.snapshot_dirs_removed as usize),
                 snapshot_cap_evicted: Some(swept.snapshot_cap_evicted as usize),
                 deferred_by_grace: Some(swept.deferred_by_grace),
+                leases_examined: Some(lease_report.examined),
+                leases_reclaimed: Some(lease_report.reclaimed),
+                lease_bytes_reclaimed: Some(lease_report.bytes_reclaimed),
             };
             Ok((data, Vec::new()))
         }
