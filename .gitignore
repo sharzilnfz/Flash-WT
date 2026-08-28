@@ -1,8 +1,8 @@
 /target
 .fleet/
 .worktrees/
+.DS_Store
 # internal agent-workflow notes; not part of the public repo
-.scratch/
 .agents/
 skills-lock.json
 AGENT_HANDOFF_PLAN_REVISED.md
