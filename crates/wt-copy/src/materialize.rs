@@ -31,7 +31,7 @@ use std::path::Path;
 ///   them — "this filesystem cannot do that, fall back" versus "real
 ///   failure, stay loud" — is the caller's job, because the answer
 ///   depends on which fallbacks remain.
-pub trait FileMaterialize {
+pub trait FileMaterialize: Send + Sync {
     /// Stable displayable strategy name for CLI reporting.
     fn name(&self) -> &'static str;
 
@@ -129,6 +129,38 @@ impl FileMaterialize for CloneOut {
         // (`shares_inode_with_source` is false), so a post-placement
         // chmod never reaches back into the store.
         Ok(())
+    }
+}
+
+/// Per-file copy-on-write clone via Linux `ioctl(FICLONE)` on btrfs/XFS.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+pub struct ReflinkOut;
+
+#[cfg(target_os = "linux")]
+impl FileMaterialize for ReflinkOut {
+    fn name(&self) -> &'static str {
+        "reflink"
+    }
+
+    fn materialize_file(&self, src: &Path, dest: &Path) -> io::Result<()> {
+        crate::reflink::reflink_file(src, dest)
+    }
+}
+
+/// Per-file page-splicing copy via Linux `copy_file_range(2)` on ext4.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+pub struct CopyFileRangeOut;
+
+#[cfg(target_os = "linux")]
+impl FileMaterialize for CopyFileRangeOut {
+    fn name(&self) -> &'static str {
+        "copy_file_range"
+    }
+
+    fn materialize_file(&self, src: &Path, dest: &Path) -> io::Result<()> {
+        crate::copy_file_range::copy_file_range_file(src, dest)
     }
 }
 

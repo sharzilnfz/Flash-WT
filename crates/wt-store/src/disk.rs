@@ -28,6 +28,83 @@ use sha2::{Digest, Sha256};
 use crate::verified::VerifiedLedger;
 use crate::{ContentId, Error, Result, Store};
 
+/// Probed filesystem capabilities for a store root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsCapabilities {
+    /// Filesystem device identifier (`st_dev`).
+    pub device_id: u64,
+    /// Filesystem magic type identifier (`f_type`).
+    pub fs_type: u64,
+    /// Whether the filesystem natively supports copy-on-write extent sharing / reflink.
+    pub reflink_capable: bool,
+}
+
+impl FsCapabilities {
+    /// True if the probed filesystem is Linux ext4.
+    pub fn is_ext4(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.fs_type == (libc::EXT4_SUPER_MAGIC as u64)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+}
+
+/// Probe filesystem parameters via `statfs(2)` and `stat(2)`.
+pub fn probe_fs(path: &Path) -> io::Result<FsCapabilities> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
+
+        let meta = fs::metadata(path)?;
+        let device_id = meta.dev();
+
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL byte"))?;
+        let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statfs(c_path.as_ptr(), &mut st) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        #[cfg(target_os = "linux")]
+        let (fs_type, reflink_capable) = {
+            let f_type = st.f_type as libc::c_long;
+            let is_reflink = f_type == (libc::BTRFS_SUPER_MAGIC as libc::c_long)
+                || f_type == (libc::XFS_SUPER_MAGIC as libc::c_long);
+            (f_type as u64, is_reflink)
+        };
+
+        #[cfg(target_os = "macos")]
+        let (fs_type, reflink_capable) = {
+            use std::ffi::CStr;
+            let fstype = unsafe { CStr::from_ptr(st.f_fstypename.as_ptr()) };
+            let is_apfs = fstype.to_string_lossy().eq_ignore_ascii_case("apfs");
+            (st.f_type as u64, is_apfs)
+        };
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let (fs_type, reflink_capable) = (st.f_type as u64, false);
+
+        Ok(FsCapabilities {
+            device_id,
+            fs_type,
+            reflink_capable,
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(FsCapabilities {
+            device_id: 0,
+            fs_type: 0,
+            reflink_capable: false,
+        })
+    }
+}
+
 /// On-disk [`Store`]: a git-style object database under one root.
 pub struct DiskStore {
     root: PathBuf,
@@ -36,6 +113,7 @@ pub struct DiskStore {
     /// store handle stays shareable behind `&self` (materialization
     /// only borrows it); the ledger is persisted once per run.
     ledger: Mutex<VerifiedLedger>,
+    fs_caps: FsCapabilities,
 }
 
 /// Held `flock(2)` on the `refs/` directory for the lifetime of the
@@ -69,7 +147,18 @@ impl DiskStore {
         fs::create_dir_all(root.join("objects"))?;
         fs::create_dir_all(root.join("refs"))?;
         let ledger = Mutex::new(VerifiedLedger::open(&root));
-        Ok(DiskStore { root, ledger })
+        let fs_caps = probe_fs(&root)?;
+        Ok(DiskStore {
+            root,
+            ledger,
+            fs_caps,
+        })
+    }
+
+    /// Probed filesystem capabilities (device id, filesystem type, reflink capability)
+    /// cached at store initialization.
+    pub fn fs_capabilities(&self) -> FsCapabilities {
+        self.fs_caps
     }
 
     /// Lock the ledger, recovering from a poisoned one: the entries
@@ -486,3 +575,28 @@ impl Drop for DiskStore {
         let _ = self.ledger().save_if_dirty();
     }
 }
+
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probes_filesystem_and_caches_capabilities_on_store_open() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = DiskStore::open(temp.path()).expect("open store");
+        let caps = store.fs_capabilities();
+
+        #[cfg(unix)]
+        assert!(caps.device_id > 0, "device id must be non-zero on unix");
+
+        #[cfg(target_os = "linux")]
+        {
+            assert!(caps.fs_type > 0, "filesystem magic must be reported on linux");
+        }
+
+        let direct_caps = probe_fs(temp.path()).expect("probe_fs");
+        assert_eq!(caps, direct_caps);
+    }
+}
+

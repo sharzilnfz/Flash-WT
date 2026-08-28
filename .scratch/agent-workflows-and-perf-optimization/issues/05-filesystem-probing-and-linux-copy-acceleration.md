@@ -6,9 +6,9 @@
 
 **Status:** ready-for-agent
 
-- [ ] Store initialization probes filesystem parameters via `statfs(2)` and caches `(device_id, fs_type, reflink_capable)`.
-- [ ] Linux ext4 hydration skips `FICLONE` ioctls and runs parallel `copy_file_range(2)` across worker threads.
-- [ ] Linux btrfs and XFS execute `ioctl(FICLONE)` for copy-on-write extent sharing.
-- [ ] Cross-device copies and unsupported mounts fall back to parallel buffered copy with `posix_fadvise(POSIX_FADV_SEQUENTIAL)`.
-- [ ] Storage boundary fallback copies emit `CROSS_DEVICE_COPY_DEGRADATION` diagnostic warnings in `--json` output.
-- [ ] Copy engine unit tests and benchmarks verify correct strategy selection and zero-copy performance on supported filesystems.
+- [x] Store initialization probes filesystem parameters via `statfs(2)` and caches `(device_id, fs_type, reflink_capable)`.
+- [x] Linux ext4 hydration skips `FICLONE` ioctls and runs parallel `copy_file_range(2)` across worker threads.
+- [x] Linux btrfs and XFS execute `ioctl(FICLONE)` for copy-on-write extent sharing.
+- [x] Cross-device copies and unsupported mounts fall back to parallel buffered copy with `posix_fadvise(POSIX_FADV_SEQUENTIAL)`.
+- [x] Storage boundary fallback copies emit `CROSS_DEVICE_COPY_DEGRADATION` diagnostic warnings in `--json` output.
+- [x] Copy engine unit tests and benchmarks verify correct strategy selection and zero-copy performance on supported filesystems.

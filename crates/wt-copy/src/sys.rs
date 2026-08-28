@@ -49,6 +49,57 @@ pub(crate) fn read_only(path: &Path) -> io::Result<bool> {
     Ok(vfs.f_flag & libc::ST_RDONLY != 0)
 }
 
+/// Fallback parallel buffered copy with `posix_fadvise(POSIX_FADV_SEQUENTIAL)`.
+pub fn buffered_copy_file(from: &Path, to: &Path) -> io::Result<u64> {
+    use std::fs;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut src = fs::File::open(from)?;
+    let meta = src.metadata()?;
+    let mode = meta.permissions().mode() & 0o7777;
+    let len = meta.len();
+
+    #[cfg(unix)]
+    unsafe {
+        libc::posix_fadvise(
+            src.as_raw_fd(),
+            0,
+            len as libc::off_t,
+            libc::POSIX_FADV_SEQUENTIAL,
+        );
+    }
+
+    let mut dest = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(to)?;
+
+    #[cfg(unix)]
+    unsafe {
+        libc::posix_fadvise(
+            dest.as_raw_fd(),
+            0,
+            len as libc::off_t,
+            libc::POSIX_FADV_SEQUENTIAL,
+        );
+    }
+
+    let mut buf = vec![0u8; 128 * 1024];
+    let mut copied = 0u64;
+    loop {
+        let n = io::Read::read(&mut src, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        io::Write::write_all(&mut dest, &buf[..n])?;
+        copied += n as u64;
+    }
+    fs::set_permissions(to, fs::Permissions::from_mode(mode))?;
+    Ok(copied)
+}
+
 fn c_path(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL byte"))
@@ -73,5 +124,26 @@ mod tests {
 
         let err = statfs_of(Path::new("/definitely/not/here")).expect_err("ENOENT expected");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn buffered_copy_file_copies_bytes_and_preserves_mode() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src.txt");
+        let dest = dir.path().join("dest.txt");
+        fs::write(&src, "sequential buffered bytes\n").expect("write");
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let bytes = buffered_copy_file(&src, &dest).expect("buffered copy");
+        assert_eq!(bytes, 26);
+        assert_eq!(
+            fs::read_to_string(&dest).expect("read"),
+            "sequential buffered bytes\n"
+        );
+        let mode = fs::metadata(&dest).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o7777, 0o755);
     }
 }

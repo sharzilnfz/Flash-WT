@@ -18,6 +18,8 @@ use crate::{CopyBackend, Safety};
 #[cfg(target_os = "macos")]
 use crate::clonefile::ClonefileBackend;
 #[cfg(target_os = "linux")]
+use crate::copy_file_range::CopyFileRangeBackend;
+#[cfg(target_os = "linux")]
 use crate::reflink::ReflinkBackend;
 
 /// What the caller promises about the source tree while the copy
@@ -52,7 +54,10 @@ pub fn candidates() -> Vec<Box<dyn CopyBackend>> {
     #[cfg(target_os = "macos")]
     out.push(Box::new(ClonefileBackend));
     #[cfg(target_os = "linux")]
-    out.push(Box::new(ReflinkBackend));
+    {
+        out.push(Box::new(ReflinkBackend));
+        out.push(Box::new(CopyFileRangeBackend));
+    }
     out.push(Box::new(HardlinkBackend));
     out.push(Box::new(DeepCopyBackend));
     out

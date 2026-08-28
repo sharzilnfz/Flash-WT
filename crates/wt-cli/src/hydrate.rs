@@ -39,7 +39,9 @@ use std::time::Instant;
 
 #[cfg(target_os = "macos")]
 use wt_copy::CloneOut;
-use wt_copy::{FileMaterialize, HardlinkOut, placement_refused};
+#[cfg(target_os = "linux")]
+use wt_copy::{CopyFileRangeOut, ReflinkOut};
+use wt_copy::{FileMaterialize, HardlinkOut, buffered_copy_file, placement_refused};
 #[cfg(target_os = "macos")]
 use wt_store::bulkwalk;
 use wt_store::{ContentId, DiskStore, Entry as CacheEntry, GcMode, Store, ValidationCache};
@@ -371,18 +373,55 @@ pub struct MaterializeReport {
 ///   made read-only, so tools that rewrite files in place fail loudly.
 /// - `Default`: per-file CoW clones on macOS; byte copies elsewhere
 ///   until Linux reflink is validated for store materialization.
-fn select_strategy(policy: StrategyPolicy) -> Option<Box<dyn FileMaterialize>> {
+/// Which placement strategy this run uses, from the startup policy and
+/// probed filesystem capabilities:
+///
+/// - `ForceByteCopy` (`WT_NO_HARDLINK` on): forced byte copies.
+/// - `Hardlink` (`WT_HARDLINK` on): experimental hardlinked materialization.
+/// - `Default`: per-file CoW clones on macOS APFS; reflink on Linux btrfs/XFS;
+///   copy_file_range on Linux ext4; fallback byte copy with posix_fadvise on cross-device.
+fn select_strategy(
+    policy: StrategyPolicy,
+    store: &DiskStore,
+    dest_root: &Path,
+) -> (Option<Box<dyn FileMaterialize>>, &'static str) {
     match policy {
-        StrategyPolicy::ForceByteCopy => None,
-        StrategyPolicy::Hardlink => Some(Box::new(HardlinkOut)),
+        StrategyPolicy::ForceByteCopy => (None, "byte-copy"),
+        StrategyPolicy::Hardlink => (Some(Box::new(HardlinkOut)), "hardlink"),
         StrategyPolicy::Default => {
+            let store_caps = store.fs_capabilities();
+            let dest_caps = wt_store::probe_fs(dest_root).ok();
+            let is_cross_device = dest_caps
+                .map(|d| d.device_id != store_caps.device_id)
+                .unwrap_or(false);
+
+            if is_cross_device {
+                return (None, "byte-copy");
+            }
+
             #[cfg(target_os = "macos")]
             {
-                Some(Box::new(CloneOut))
+                if store_caps.reflink_capable {
+                    (Some(Box::new(CloneOut)), "copy-on-write")
+                } else {
+                    (None, "byte-copy")
+                }
             }
-            #[cfg(not(target_os = "macos"))]
+
+            #[cfg(target_os = "linux")]
             {
-                None
+                if store_caps.reflink_capable {
+                    (Some(Box::new(ReflinkOut)), "reflink")
+                } else if store_caps.is_ext4() {
+                    (Some(Box::new(CopyFileRangeOut)), "copy_file_range")
+                } else {
+                    (None, "byte-copy")
+                }
+            }
+
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                (None, "byte-copy")
             }
         }
     }
@@ -397,111 +436,165 @@ fn select_strategy(policy: StrategyPolicy) -> Option<Box<dyn FileMaterialize>> {
 /// ledger fingerprint still matches its stat is trusted without
 /// reading a byte; everything else is hashed once and remembered.
 ///
-/// Placement tries the selected strategy (CoW clone by default)
+/// Placement tries the selected strategy (CoW clone / reflink / copy_file_range)
 /// against the verified blob; filesystem refusals fall back silently
-/// to a byte copy from the blob itself. After placement each file
-/// gets the mode recorded at ingest time (the exec bit survives even
-/// though blobs themselves are normalized), and every ingested
-/// symlink is recreated verbatim from its raw target, dangling or
-/// not. Directories are pre-created once from the ingested dir
-/// list — there is no per-file `create_dir_all`; if placement still
-/// hits ENOENT (a directory the manifest's walk never saw), it
-/// recreates the parent and retries exactly once, EAFP-style.
-/// Permission problems on the destination are real failures and stay
-/// loud.
+/// to a sequential buffered copy with `posix_fadvise`. Placement is
+/// dispatched in parallel across worker threads.
 pub fn materialize(
     store: &DiskStore,
     ingested: &Ingested,
     dest_root: &Path,
     cfg: &RunConfig,
 ) -> Result<MaterializeReport> {
-    let backend = select_strategy(cfg.strategy_policy);
+    let (backend, strategy_name) = select_strategy(cfg.strategy_policy, store, dest_root);
     let paranoid = cfg.verify;
-    let mut copied = 0usize;
-    let mut bytes_shared = 0u64;
-    let mut bytes_copied = 0u64;
-    let mut verify_ms = 0u128;
-    let mut place_ms = 0u128;
+
     for rel in &ingested.dirs {
         fs::create_dir_all(dest_root.join(rel))
             .map_err(|e| Error::io("prepare", dest_root.join(rel), e))?;
     }
-    for (rel, id) in &ingested.files {
-        let size = ingested.file_sizes.get(rel).copied().unwrap_or(0);
-        // Hash verification happens here, before any placement: with
-        // fclonefileat the kernel copies bytes directly from the blob
-        // at clone time, so the blob must already be known-good or
-        // corruption would land. The TOCTOU window between this check
-        // and the kernel's read is the one the previous design had in
-        // reverse; nothing else guards it today either.
-        if paranoid {
-            let stage = Instant::now();
-            store
-                .get(id)
-                .map_err(|e| Error::Store(format!("materialize {rel}: {e}")))?;
-            verify_ms += stage.elapsed().as_millis();
-        } else {
-            let stage = Instant::now();
-            store
-                .ensure_verified(id)
-                .map_err(|e| Error::Store(format!("materialize {rel}: {e}")))?;
-            verify_ms += stage.elapsed().as_millis();
-        }
-        let src = store.blob_path(id);
-        let dest = dest_root.join(rel);
 
-        // The ENOENT parent-repair retry is part of placement cost.
-        let stage = Instant::now();
-        let placed = match place(backend.as_deref(), &src, &dest) {
-            Ok(placed) => placed,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // The heavy directories themselves were just
-                // recreated above; only an unexpected gap should ever
-                // land here. Recreate the parent once and retry.
-                let parent = dest
-                    .parent()
-                    .ok_or_else(|| Error::Store(format!("{rel} has no parent")))?;
-                fs::create_dir_all(parent).map_err(|e| Error::io("prepare", parent, e))?;
-                match place(backend.as_deref(), &src, &dest) {
-                    Ok(placed) => placed,
-                    Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
-                }
-            }
-            Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
-        };
-        let mut is_byte_copied = !placed;
-        if let Some(&mode) = ingested.modes.get(rel) {
-            // A mode can only be applied in place when the placement
-            // owns its inode; see `finalize_mode` for the shared case.
-            let shared_inode = placed
-                && backend
-                    .as_deref()
-                    .is_some_and(|b| b.shares_inode_with_source());
-            match finalize_mode(shared_inode, mode, &src, &dest) {
-                Ok(repaired) => {
-                    // The shared-inode repair IS a byte copy: count it
-                    // so `copied` reports honestly how much of the
-                    // hardlink strategy actually stuck.
-                    if repaired {
-                        is_byte_copied = true;
+    let files: Vec<(&String, &ContentId)> = ingested.files.iter().collect();
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let num_workers = num_cpus.clamp(4, 8).min(files.len()).max(1);
+
+    let next_file_idx = std::sync::atomic::AtomicUsize::new(0);
+    let total_copied = std::sync::atomic::AtomicUsize::new(0);
+    let total_bytes_shared = std::sync::atomic::AtomicU64::new(0);
+    let total_bytes_copied = std::sync::atomic::AtomicU64::new(0);
+    let total_verify_ms = std::sync::atomic::AtomicU64::new(0);
+    let total_place_ms = std::sync::atomic::AtomicU64::new(0);
+    let err_slot: std::sync::Mutex<Option<Error>> = std::sync::Mutex::new(None);
+
+    std::thread::scope(|s| {
+        for _ in 0..num_workers {
+            s.spawn(|| {
+                let mut worker_verify_ms = 0u128;
+                let mut worker_place_ms = 0u128;
+                let mut worker_copied = 0usize;
+                let mut worker_bytes_shared = 0u64;
+                let mut worker_bytes_copied = 0u64;
+
+                loop {
+                    if err_slot.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
+                        break;
                     }
+
+                    let idx = next_file_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if idx >= files.len() {
+                        break;
+                    }
+
+                    let (rel, id) = files[idx];
+                    let size = ingested.file_sizes.get(rel).copied().unwrap_or(0);
+
+                    let v_start = Instant::now();
+                    let v_res = if paranoid {
+                        store.get(id).map(|_| ())
+                    } else {
+                        store.ensure_verified(id)
+                    };
+                    if let Err(e) = v_res {
+                        let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
+                        if slot.is_none() {
+                            *slot = Some(Error::Store(format!("materialize {rel}: {e}")));
+                        }
+                        break;
+                    }
+                    worker_verify_ms += v_start.elapsed().as_millis();
+
+                    let src = store.blob_path(id);
+                    let dest = dest_root.join(rel);
+
+                    let p_start = Instant::now();
+                    let placed = match place(backend.as_deref(), &src, &dest) {
+                        Ok(placed) => placed,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            let parent = match dest.parent() {
+                                Some(p) => p,
+                                None => {
+                                    let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
+                                    if slot.is_none() {
+                                        *slot = Some(Error::Store(format!("{rel} has no parent")));
+                                    }
+                                    break;
+                                }
+                            };
+                            if let Err(e) = fs::create_dir_all(parent) {
+                                let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
+                                if slot.is_none() {
+                                    *slot = Some(Error::io("prepare", parent, e));
+                                }
+                                break;
+                            }
+                            match place(backend.as_deref(), &src, &dest) {
+                                Ok(placed) => placed,
+                                Err(e) => {
+                                    let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
+                                    if slot.is_none() {
+                                        *slot = Some(Error::Store(format!("materialize {rel}: {e}")));
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
+                            if slot.is_none() {
+                                *slot = Some(Error::Store(format!("materialize {rel}: {e}")));
+                            }
+                            break;
+                        }
+                    };
+
+                    let mut is_byte_copied = !placed;
+                    if let Some(&mode) = ingested.modes.get(rel) {
+                        let shared_inode = placed
+                            && backend
+                                .as_deref()
+                                .is_some_and(|b| b.shares_inode_with_source());
+                        match finalize_mode(shared_inode, mode, &src, &dest) {
+                            Ok(repaired) => {
+                                if repaired {
+                                    is_byte_copied = true;
+                                }
+                            }
+                            Err(e) => {
+                                let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
+                                if slot.is_none() {
+                                    *slot = Some(Error::Store(format!("materialize {rel}: {e}")));
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    if is_byte_copied {
+                        worker_copied += 1;
+                        worker_bytes_copied += size;
+                    } else {
+                        worker_bytes_shared += size;
+                    }
+                    worker_place_ms += p_start.elapsed().as_millis();
                 }
-                Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
-            }
+
+                total_copied.fetch_add(worker_copied, std::sync::atomic::Ordering::Relaxed);
+                total_bytes_shared.fetch_add(worker_bytes_shared, std::sync::atomic::Ordering::Relaxed);
+                total_bytes_copied.fetch_add(worker_bytes_copied, std::sync::atomic::Ordering::Relaxed);
+                total_verify_ms.fetch_add(worker_verify_ms as u64, std::sync::atomic::Ordering::Relaxed);
+                total_place_ms.fetch_add(worker_place_ms as u64, std::sync::atomic::Ordering::Relaxed);
+            });
         }
-        if is_byte_copied {
-            copied += 1;
-            bytes_copied += size;
-        } else {
-            bytes_shared += size;
-        }
-        place_ms += stage.elapsed().as_millis();
+    });
+
+    if let Some(err) = err_slot.into_inner().unwrap_or_default() {
+        return Err(err);
     }
+
     for (rel, target) in &ingested.symlinks {
         let dest = dest_root.join(rel);
-        // The dirs pass created every walked directory; this only
-        // covers a parent that somehow escaped the walk (same EAFP
-        // stance as the files above).
         if let Some(parent) = dest.parent() {
             if !parent.exists() {
                 fs::create_dir_all(parent).map_err(|e| Error::io("prepare", parent, e))?;
@@ -510,12 +603,7 @@ pub fn materialize(
         std::os::unix::fs::symlink(target, &dest)
             .map_err(|e| Error::io("place symlink", &dest, e))?;
     }
-    // Restore directory permission bits AFTER placement (a restrictive
-    // parent must not block file creation) and deepest-first: sorted
-    // ascending puts every ancestor before its descendants, so the
-    // reverse walk fixes children while their ancestors can still be
-    // traversed. Without this pass, `create_dir_all` leaves every
-    // directory umask-normalized and modes like 0700 or 0500 are lost.
+
     for rel in ingested.dirs.iter().rev() {
         let Some(&mode) = ingested.dir_modes.get(rel) else {
             continue;
@@ -524,14 +612,15 @@ pub fn materialize(
         fs::set_permissions(&path, fs::Permissions::from_mode(mode))
             .map_err(|e| Error::io("restore dir mode", &path, e))?;
     }
+
     Ok(MaterializeReport {
         files: ingested.files.len(),
-        copied,
-        bytes_shared,
-        bytes_copied,
-        strategy: backend.as_ref().map(|b| b.name()).unwrap_or("byte-copy"),
-        verify_ms,
-        place_ms,
+        copied: total_copied.into_inner(),
+        bytes_shared: total_bytes_shared.into_inner(),
+        bytes_copied: total_bytes_copied.into_inner(),
+        strategy: strategy_name,
+        verify_ms: total_verify_ms.into_inner() as u128,
+        place_ms: total_place_ms.into_inner() as u128,
     })
 }
 
@@ -556,7 +645,7 @@ fn finalize_mode(shared_inode: bool, mode: u32, src: &Path, dest: &Path) -> io::
             return Ok(false);
         }
         fs::remove_file(dest)?;
-        fs::copy(src, dest)?;
+        buffered_copy_file(src, dest)?;
         fs::set_permissions(dest, fs::Permissions::from_mode(mode))?;
         return Ok(true);
     }
@@ -579,9 +668,8 @@ fn place(backend: Option<&dyn FileMaterialize>, src: &Path, dest: &Path) -> std:
             Err(e) => return Err(e),
         }
     }
-    // Byte-copy fallback reads straight from the verified blob — no
-    // need to have held its bytes since verification.
-    fs::copy(src, dest)?;
+    // Byte-copy fallback reads straight from the verified blob with sequential hint.
+    buffered_copy_file(src, dest)?;
     Ok(false)
 }
 
@@ -648,10 +736,19 @@ pub fn publish_mirror(
     git_dir: &Path,
     ingested: &Ingested,
     snapshots: &[ContentId],
+    base_branch: Option<&str>,
+    base_commit: Option<&str>,
 ) -> Result<()> {
     let distinct: BTreeSet<&ContentId> = ingested.files.values().collect();
     store
-        .publish_worktree_mirror(worktree, git_dir, distinct, snapshots.iter())
+        .publish_worktree_mirror(
+            worktree,
+            git_dir,
+            distinct,
+            snapshots.iter(),
+            base_branch,
+            base_commit,
+        )
         .map(|_| ())
         .map_err(|e| Error::Store(format!("cannot publish worktree mirror: {e}")))
 }

@@ -22,6 +22,8 @@
 
 #[cfg(target_os = "macos")]
 mod clonefile;
+#[cfg(target_os = "linux")]
+mod copy_file_range;
 mod copy_tree;
 mod deep_copy;
 mod hardlink;
@@ -33,17 +35,22 @@ mod sys;
 
 #[cfg(target_os = "macos")]
 pub use clonefile::ClonefileBackend;
+#[cfg(target_os = "linux")]
+pub use copy_file_range::{CopyFileRangeBackend, copy_file_range_file};
 pub use deep_copy::DeepCopyBackend;
 pub use hardlink::HardlinkBackend;
-// CloneOut wraps fclonefileat(2) and only exists on macOS; other
-// platforms take the byte-copy path (see wt-cli select_strategy).
 #[cfg(target_os = "macos")]
 pub use materialize::{CloneOut, FileMaterialize, HardlinkOut, placement_refused};
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub use materialize::{
+    CopyFileRangeOut, FileMaterialize, HardlinkOut, ReflinkOut, placement_refused,
+};
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub use materialize::{FileMaterialize, HardlinkOut, placement_refused};
 #[cfg(target_os = "linux")]
-pub use reflink::ReflinkBackend;
+pub use reflink::{ReflinkBackend, reflink_file};
 pub use selection::{SourcePolicy, candidates, select_backend};
+pub use sys::buffered_copy_file;
 
 use std::io;
 use std::path::Path;
@@ -58,6 +65,8 @@ pub enum BackendKind {
     Clonefile,
     /// Linux reflink copies (btrfs/XFS `FICLONE`).
     Reflink,
+    /// Linux in-kernel `copy_file_range(2)` page splicing.
+    CopyFileRange,
     /// Plain hardlinks. Fast; shared inodes are made read-only so
     /// in-place rewrites fail instead of corrupting sibling trees
     /// (ticket 07).
@@ -73,6 +82,7 @@ impl BackendKind {
         match self {
             BackendKind::Clonefile => "clonefile",
             BackendKind::Reflink => "reflink",
+            BackendKind::CopyFileRange => "copy_file_range",
             BackendKind::Hardlink => "hardlink",
             BackendKind::DeepCopy => "deep-copy",
         }
