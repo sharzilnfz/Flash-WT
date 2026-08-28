@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] Store blob verification splits across 256 hash prefix shards and executes in parallel.
-- [ ] Published snapshot directories are scrubbed for missing `.complete` markers, unparseable manifests, and broken file trees.
-- [ ] Corrupted blobs and broken snapshot directories are flagged and reported in scan summaries.
-- [ ] Structured `--json` envelopes emit detailed diagnostic arrays on corruption detection.
-- [ ] Scrubbing integration tests verify parallel scaling and detection of simulated disk corruptions.
+- [x] Store blob verification splits across 256 hash prefix shards and executes in parallel.
+- [x] Published snapshot directories are scrubbed for missing `.complete` markers, unparseable manifests, and broken file trees.
+- [x] Corrupted blobs and broken snapshot directories are flagged and reported in scan summaries.
+- [x] Structured `--json` envelopes emit detailed diagnostic arrays on corruption detection.
+- [x] Scrubbing integration tests verify parallel scaling and detection of simulated disk corruptions.
