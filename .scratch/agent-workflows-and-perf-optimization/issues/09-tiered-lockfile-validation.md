@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Lockfile parser identifies mutable dependency references (`file:`, `link:`, `workspace:`, unpinned git branches).
-- [ ] Lockfiles with mutable dependencies trigger full directory ingestion and bypass the fast path.
-- [ ] Lockfiles with strictly pinned dependencies evaluate lockfile SHA-256 against snapshot manifest headers.
-- [ ] Snapshot validation returns O(1) cache hits when lockfile hashes match and root directory timestamps are unchanged.
-- [ ] Tests verify immediate fast-path hits on pinned lockfiles and correct fallback ingestion on local mutable paths.
+- [x] Lockfile parser identifies mutable dependency references (`file:`, `link:`, `workspace:`, unpinned git branches).
+- [x] Lockfiles with mutable dependencies trigger full directory ingestion and bypass the fast path.
+- [x] Lockfiles with strictly pinned dependencies evaluate lockfile SHA-256 against snapshot manifest headers.
+- [x] Snapshot validation returns O(1) cache hits when lockfile hashes match and root directory timestamps are unchanged.
+- [x] Tests verify immediate fast-path hits on pinned lockfiles and correct fallback ingestion on local mutable paths.

@@ -163,7 +163,18 @@ impl DiskStore {
         entries: Vec<SnapshotEntry>,
         paranoid: bool,
     ) -> Result<PublishOutcome, BuildError> {
-        self.publish_snapshot_with_timing(entries, paranoid)
+        self.publish_snapshot_with_lockfile_and_timing(entries, None, paranoid)
+            .map(|receipt| receipt.outcome)
+    }
+
+    /// Publish a snapshot with an optional lockfile hash.
+    pub fn publish_snapshot_with_lockfile(
+        &self,
+        entries: Vec<SnapshotEntry>,
+        lockfile_hash: Option<ContentId>,
+        paranoid: bool,
+    ) -> Result<PublishOutcome, BuildError> {
+        self.publish_snapshot_with_lockfile_and_timing(entries, lockfile_hash, paranoid)
             .map(|receipt| receipt.outcome)
     }
 
@@ -177,8 +188,19 @@ impl DiskStore {
         entries: Vec<SnapshotEntry>,
         paranoid: bool,
     ) -> Result<PublishReceipt, BuildError> {
+        self.publish_snapshot_with_lockfile_and_timing(entries, None, paranoid)
+    }
+
+    /// [`Self::publish_snapshot_with_lockfile`] plus internal phase timings.
+    pub fn publish_snapshot_with_lockfile_and_timing(
+        &self,
+        entries: Vec<SnapshotEntry>,
+        lockfile_hash: Option<ContentId>,
+        paranoid: bool,
+    ) -> Result<PublishReceipt, BuildError> {
         self.stage_and_publish(
             entries,
+            lockfile_hash,
             StageSeed::FreshTree,
             &mut |tree_dir, manifest, timing| {
                 self.fill_full_tree(tree_dir, manifest, paranoid, timing)
@@ -265,7 +287,19 @@ impl DiskStore {
         old_hash: &ContentId,
         paranoid: bool,
     ) -> Result<PublishOutcome, BuildError> {
-        self.publish_snapshot_incremental_with_timing(entries, old_hash, paranoid)
+        self.publish_snapshot_incremental_with_lockfile_and_timing(entries, None, old_hash, paranoid)
+            .map(|receipt| receipt.outcome)
+    }
+
+    /// Publish an incremental snapshot with an optional lockfile hash.
+    pub fn publish_snapshot_incremental_with_lockfile(
+        &self,
+        entries: Vec<SnapshotEntry>,
+        lockfile_hash: Option<ContentId>,
+        old_hash: &ContentId,
+        paranoid: bool,
+    ) -> Result<PublishOutcome, BuildError> {
+        self.publish_snapshot_incremental_with_lockfile_and_timing(entries, lockfile_hash, old_hash, paranoid)
             .map(|receipt| receipt.outcome)
     }
 
@@ -278,8 +312,20 @@ impl DiskStore {
         old_hash: &ContentId,
         paranoid: bool,
     ) -> Result<PublishReceipt, BuildError> {
+        self.publish_snapshot_incremental_with_lockfile_and_timing(entries, None, old_hash, paranoid)
+    }
+
+    /// [`Self::publish_snapshot_incremental_with_lockfile`] plus internal phase timings.
+    pub fn publish_snapshot_incremental_with_lockfile_and_timing(
+        &self,
+        entries: Vec<SnapshotEntry>,
+        lockfile_hash: Option<ContentId>,
+        old_hash: &ContentId,
+        paranoid: bool,
+    ) -> Result<PublishReceipt, BuildError> {
         self.stage_and_publish(
             entries,
+            lockfile_hash,
             StageSeed::CloneTree,
             &mut |tree_dir, manifest, timing| {
                 self.fill_incremental_tree(tree_dir, manifest, old_hash, paranoid, timing)
@@ -432,6 +478,7 @@ impl DiskStore {
     fn stage_and_publish(
         &self,
         entries: Vec<SnapshotEntry>,
+        lockfile_hash: Option<ContentId>,
         seed: StageSeed,
         fill_tree: &mut dyn FnMut(
             &Path,
@@ -442,7 +489,7 @@ impl DiskStore {
         let mut timing = SnapshotBuildTiming::default();
 
         let stage = Instant::now();
-        let manifest = Manifest::new(entries)?;
+        let manifest = Manifest::new_with_lockfile(entries, lockfile_hash)?;
         timing.publish_ms += stage.elapsed().as_millis() as u64;
 
         // Staging prep counts as the start of the link train.

@@ -17,11 +17,12 @@ mod snapshot;
 mod validation;
 mod verified;
 
-#[cfg(target_os = "macos")]
 pub mod bulkwalk;
+pub mod lockfile;
 
 pub use disk::DiskStore;
 pub use gc::{GcMode, MarkReport, MarkSwept};
+pub use lockfile::{DependencySafety, classify_lockfile, find_lockfile, hash_lockfile};
 pub use mirror::{
     ReadMirror, StoreMirror, escape, mirror_path, publish as publish_mirror,
     read_all as read_mirrors, unescape, worktree_key,
@@ -29,7 +30,8 @@ pub use mirror::{
 pub use scrub::ScrubReport;
 pub use snapdiff::SnapshotDiff;
 pub use snapindex::{
-    MAX_RING, SelectionIndex, SelectionRecord, SnapshotLru, record_hit as record_snapshot_hit,
+    MAX_RING, MetadataLock, SelectionIndex, SelectionRecord, SnapshotLru,
+    compact_journal, journal_path, lru_path, record_hit as record_snapshot_hit,
     record_publish as record_snapshot_publish, record_snapshot_lru_touch, select_old_snapshot,
 };
 pub use snapshot::{

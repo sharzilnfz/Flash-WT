@@ -157,13 +157,23 @@ pub struct Manifest {
     pub entries: Vec<SnapshotEntry>,
     /// SHA-256 of the exact serialized entry bytes (no header).
     pub hash: ContentId,
+    /// SHA-256 of the associated project lockfile, if any.
+    pub lockfile_hash: Option<ContentId>,
 }
 
 impl Manifest {
     /// Build a manifest from arbitrary-order inputs: validate every
     /// relpath, normalize modes, sort by raw path bytes then kind,
     /// and hash the canonical serialization.
-    pub fn new(mut entries: Vec<SnapshotEntry>) -> Result<Manifest, String> {
+    pub fn new(entries: Vec<SnapshotEntry>) -> Result<Manifest, String> {
+        Self::new_with_lockfile(entries, None)
+    }
+
+    /// Build a manifest with an associated lockfile hash.
+    pub fn new_with_lockfile(
+        mut entries: Vec<SnapshotEntry>,
+        lockfile_hash: Option<ContentId>,
+    ) -> Result<Manifest, String> {
         for e in &entries {
             validate_rel(&e.rel)?;
             match e.kind {
@@ -202,15 +212,20 @@ impl Manifest {
         Ok(Manifest {
             entries,
             hash: ContentId(hasher.finalize().into()),
+            lockfile_hash,
         })
     }
 
-    /// Header + entry lines. The header embeds this manifest's hash.
+    /// Header + entry lines. The header embeds this manifest's hash and optional lockfile hash.
     #[must_use]
     pub fn serialize(&self) -> String {
         let mut out = String::new();
         out.push_str("v1\tmanifest-sha256\t");
         out.push_str(&self.hash.to_string());
+        if let Some(lh) = &self.lockfile_hash {
+            out.push_str("\tlockfile-sha256\t");
+            out.push_str(&lh.to_string());
+        }
         out.push('\n');
         out.push_str(&serialize_entries(&self.entries));
         out
@@ -233,11 +248,19 @@ impl Manifest {
             .split_once('\n')
             .ok_or("manifest has no header line")?;
         let fields: Vec<&str> = header.split('\t').collect();
-        if fields.len() != 3 || fields[0] != "v1" || fields[1] != "manifest-sha256" {
+        if fields.len() < 3 || fields[0] != "v1" || fields[1] != "manifest-sha256" {
             return Err(format!("bad manifest header {header:?}"));
         }
         let claimed = ContentId::from_hex(fields[2])
             .ok_or_else(|| format!("malformed manifest hash {:?}", fields[2]))?;
+        let lockfile_hash = if fields.len() >= 5 && fields[3] == "lockfile-sha256" {
+            Some(
+                ContentId::from_hex(fields[4])
+                    .ok_or_else(|| format!("malformed lockfile hash {:?}", fields[4]))?,
+            )
+        } else {
+            None
+        };
         let mut hasher = Sha256::new();
         hasher.update(body.as_bytes());
         let actual = ContentId(hasher.finalize().into());
@@ -312,6 +335,7 @@ impl Manifest {
         Ok(Manifest {
             entries,
             hash: claimed,
+            lockfile_hash,
         })
     }
 }

@@ -83,6 +83,127 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// Attempt an O(1) fast-path snapshot hydration without walking or ingesting
+/// the heavy directory when a pinned lockfile SHA-256 matches a published
+/// snapshot manifest header and the heavy root mtime is unchanged.
+pub fn try_lockfile_hit(
+    store: &mut DiskStore,
+    repo_root: &Path,
+    pattern: &str,
+    src_root: &Path,
+    heavy_rel: &str,
+    dest_root: &Path,
+    lockfile_hash: &ContentId,
+    cfg: &RunConfig,
+) -> Outcome {
+    #[cfg(target_os = "macos")]
+    {
+        try_lockfile_hit_impl(
+            store, repo_root, pattern, src_root, heavy_rel, dest_root, lockfile_hash, cfg,
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (
+            store, repo_root, pattern, src_root, heavy_rel, dest_root, lockfile_hash, cfg,
+        );
+        Outcome::FellBack(None)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn try_lockfile_hit_impl(
+    store: &mut DiskStore,
+    repo_root: &Path,
+    pattern: &str,
+    src_root: &Path,
+    heavy_rel: &str,
+    dest_root: &Path,
+    lockfile_hash: &ContentId,
+    cfg: &RunConfig,
+) -> Outcome {
+    if cfg.verify {
+        return Outcome::FellBack(None);
+    }
+    let backend = ClonefileBackend;
+    if !backend.supports(dest_root) {
+        return Outcome::FellBack(None);
+    }
+    let repo_key = repo_root.to_string_lossy().into_owned();
+    let idx = wt_store::SelectionIndex::load(store.root());
+    let Some(rec) = idx.records.iter().find(|r| r.matches(&repo_key, pattern, heavy_rel)) else {
+        return Outcome::FellBack(None);
+    };
+
+    let heavy_src = src_root.join(heavy_rel);
+    let Ok(src_meta) = fs::symlink_metadata(&heavy_src) else {
+        return Outcome::FellBack(None);
+    };
+    if !src_meta.is_dir() {
+        return Outcome::FellBack(None);
+    }
+    let src_mtime_secs = src_meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Root directory modification times must be unchanged since snapshot publish
+    if rec.mtime_secs > 0 && src_mtime_secs > rec.mtime_secs + 1 {
+        return Outcome::FellBack(None);
+    }
+
+    let mut lookup_ms = 0u128;
+    let mut clonefile_ms = 0u128;
+
+    for hash in &rec.ring {
+        let stage = Instant::now();
+        let candidate = store.find_snapshot(hash);
+        lookup_ms += stage.elapsed().as_millis();
+        if let Some(manifest) = candidate {
+            if manifest.lockfile_hash == Some(*lockfile_hash) {
+                let dest_heavy = dest_root.join(heavy_rel);
+                let tree = wt_store::snapshot_tree_path(store.root(), hash);
+                let stage = Instant::now();
+                let cloned = finish_clone(&backend, &tree, &dest_heavy);
+                clonefile_ms += stage.elapsed().as_millis();
+                match cloned {
+                    Ok(()) => {
+                        let _ = wt_store::record_snapshot_hit(
+                            store.root(),
+                            &repo_key,
+                            pattern,
+                            heavy_rel,
+                            hash,
+                        );
+                        let file_count = manifest
+                            .entries
+                            .iter()
+                            .filter(|e| e.kind == wt_store::EntryKind::File)
+                            .count();
+                        return Outcome::Hydrated(SnapshotHydration {
+                            hash: *hash,
+                            files: file_count,
+                            mode: "hit",
+                            cloned_units: 0,
+                            linked_files: 0,
+                            lookup_ms,
+                            clonefile_ms,
+                            build: None,
+                        });
+                    }
+                    Err(CloneFailure::SnapshotVanished) => continue,
+                    Err(CloneFailure::Refused(diag)) => return Outcome::FellBack(diag),
+                    Err(CloneFailure::Fatal(msg)) => return Outcome::Failed(msg),
+                }
+            }
+        }
+    }
+
+    Outcome::FellBack(None)
+}
+
 /// Build and hydrate one heavy directory through snapshots, or fall
 /// back. `src_root` is where ingested content came from (for blob
 /// healing), `dest_root` the new worktree root, `heavy_rel` the
@@ -101,18 +222,21 @@ pub fn hydrate(
     src_root: &Path,
     heavy_rel: &str,
     dest_root: &Path,
+    lockfile_hash: Option<&ContentId>,
     cfg: &RunConfig,
 ) -> Outcome {
     #[cfg(target_os = "macos")]
     {
         hydrate_impl(
-            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root, cfg,
+            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root,
+            lockfile_hash, cfg,
         )
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (
-            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root, cfg,
+            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root,
+            lockfile_hash, cfg,
         );
         // Linux v1: no recursive-clone primitive, so whole-directory
         // snapshots stay a macOS feature. The gate is a no-op.
@@ -130,6 +254,7 @@ fn hydrate_impl(
     src_root: &Path,
     heavy_rel: &str,
     dest_root: &Path,
+    lockfile_hash: Option<&ContentId>,
     cfg: &RunConfig,
 ) -> Outcome {
     let paranoid = cfg.verify;
@@ -146,7 +271,7 @@ fn hydrate_impl(
         Ok(entries) => entries,
         Err(msg) => return Outcome::Failed(msg),
     };
-    let manifest = match Manifest::new(entries) {
+    let manifest = match Manifest::new_with_lockfile(entries, lockfile_hash.copied()) {
         Ok(m) => m,
         Err(msg) => return Outcome::Failed(format!("cannot build snapshot manifest: {msg}")),
     };
@@ -318,8 +443,9 @@ fn try_incremental(
         return None;
     }
 
-    match store.publish_snapshot_incremental_with_timing(
+    match store.publish_snapshot_incremental_with_lockfile_and_timing(
         manifest.entries.clone(),
+        manifest.lockfile_hash,
         &old_hash,
         paranoid,
     ) {
@@ -499,7 +625,11 @@ fn ensure_published(
 ) -> Result<PublishOutcome, String> {
     let mut healed = false;
     loop {
-        match store.publish_snapshot_with_timing(manifest.entries.clone(), paranoid) {
+        match store.publish_snapshot_with_lockfile_and_timing(
+            manifest.entries.clone(),
+            manifest.lockfile_hash,
+            paranoid,
+        ) {
             Ok(receipt) => {
                 *build = Some(receipt.timing);
                 return Ok(receipt.outcome);

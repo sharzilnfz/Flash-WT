@@ -1150,3 +1150,37 @@ fn large_scale_subtree_partitioned_parallel_ingestion_integrity() {
     }
     store.flush().unwrap();
 }
+
+#[test]
+fn manifest_header_lockfile_hash_round_trips_and_validates() {
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+
+    let blob = store.put(b"hello lockfile\n").unwrap();
+    let entries = vec![SnapshotEntry::file("dep.txt", blob, 0o644)];
+    let lock_hash = id(42);
+
+    let manifest = Manifest::new_with_lockfile(entries.clone(), Some(lock_hash)).unwrap();
+    assert_eq!(manifest.lockfile_hash, Some(lock_hash));
+
+    let serialized = manifest.serialize();
+    assert!(serialized.starts_with(&format!(
+        "v1\tmanifest-sha256\t{}\tlockfile-sha256\t{}\n",
+        manifest.hash, lock_hash
+    )));
+
+    let parsed = Manifest::parse(&serialized).unwrap();
+    assert_eq!(parsed.hash, manifest.hash);
+    assert_eq!(parsed.lockfile_hash, Some(lock_hash));
+    assert_eq!(parsed.entries, manifest.entries);
+
+    // Publishing with lockfile records the header
+    let receipt = store
+        .publish_snapshot_with_lockfile_and_timing(entries, Some(lock_hash), false)
+        .unwrap();
+    assert_eq!(receipt.outcome, PublishOutcome::Published);
+
+    let loaded = store.find_snapshot(&manifest.hash).unwrap();
+    assert_eq!(loaded.lockfile_hash, Some(lock_hash));
+}
+
