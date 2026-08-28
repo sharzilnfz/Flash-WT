@@ -13,15 +13,19 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 
 /// Used when no manifest exists yet. Deliberately short and boring:
-/// these cover the ecosystems that actually produce untracked bulk.
+/// these cover the ecosystems that actually produce untracked bulk,
+/// while excluding volatile compiler caches to prevent cache corruption.
 pub const DEFAULT_PATTERNS: &[&str] = &[
     "node_modules/",
+    "!node_modules/.vite/",
     "target/",
+    "!target/debug/incremental/",
     "dist/",
     "build/",
     ".cache/",
     ".venv/",
     "__pycache__/",
+    "!.next/cache/",
 ];
 
 pub const STARTER_MANIFEST: &str = "\
@@ -29,12 +33,15 @@ pub const STARTER_MANIFEST: &str = "\
 # Gitignore syntax, relative to this repository root. Edit freely;
 # anything listed here is copied (never moved) from this checkout.
 node_modules/
+!node_modules/.vite/
 target/
+!target/debug/incremental/
 dist/
 build/
 .cache/
 .venv/
 __pycache__/
+!.next/cache/
 ";
 
 /// What [`load_patterns`] decided. Splitting the decision from the
@@ -53,12 +60,11 @@ pub enum LoadedPatterns {
 }
 
 /// Parse manifest text into patterns, skipping blank lines and
-/// `#` comments. Negation (`!`) is not supported; such lines are
-/// ignored rather than silently misinterpreted.
+/// `#` comments. Preserves negation (`!`) patterns for exclusions.
 pub fn parse_patterns(text: &str) -> Vec<String> {
     text.lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('!'))
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(str::to_owned)
         .collect()
 }
@@ -110,6 +116,18 @@ fn segment_match(pattern: &str, segment: &str) -> bool {
 pub fn collect_matches(root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>> {
     let mut matched = Vec::new();
     let mut stack = vec![root.to_path_buf()];
+    let positive_patterns: Vec<&str> = patterns
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !p.starts_with('!'))
+        .collect();
+    let negative_patterns: Vec<&str> = patterns
+        .iter()
+        .map(String::as_str)
+        .filter(|p| p.starts_with('!'))
+        .map(|p| p.trim_start_matches('!'))
+        .collect();
+
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
@@ -125,7 +143,13 @@ pub fn collect_matches(root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>>
                     path.display()
                 ))
             })?;
-            if patterns.iter().any(|p| pattern_matches(p, rel)) {
+            let rel_str = rel.to_string_lossy();
+            if negative_patterns.iter().any(|p| pattern_matches(p, rel))
+                || crate::toolchain::is_volatile_cache(&rel_str)
+            {
+                continue;
+            }
+            if positive_patterns.iter().any(|p| pattern_matches(p, rel)) {
                 matched.push(rel.to_path_buf());
             } else {
                 stack.push(path);
@@ -246,9 +270,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_skips_comments_blanks_and_negations() {
+    fn parse_skips_comments_blanks_and_preserves_negations() {
         let text = "# comment\n\nheavy/\n!keep/\n   \n  target/  \n";
-        assert_eq!(parse_patterns(text), vec!["heavy/", "target/"]);
+        assert_eq!(parse_patterns(text), vec!["heavy/", "!keep/", "target/"]);
     }
 
     #[test]

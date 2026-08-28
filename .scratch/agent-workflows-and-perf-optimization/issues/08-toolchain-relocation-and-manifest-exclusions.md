@@ -4,11 +4,11 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Post-hydration pass inspects hydrated `.venv/` directories and updates absolute host paths in `pyvenv.cfg`.
-- [ ] Virtual environment `bin/activate*` shell scripts are updated with target worktree directory paths.
-- [ ] Shebang lines in `bin/*` script executables are patched to point to the new worktree Python binary.
-- [ ] Python `.pyc` cache files are preserved without rewriting.
-- [ ] Starter manifests omit volatile compiler incremental caches (`target/debug/incremental/`, `.next/cache`, `node_modules/.vite`).
-- [ ] Integration tests verify that hydrated virtual environments and cargo workspaces build and run without path errors.
+- [x] Post-hydration pass inspects hydrated `.venv/` directories and updates absolute host paths in `pyvenv.cfg`.
+- [x] Virtual environment `bin/activate*` shell scripts are updated with target worktree directory paths.
+- [x] Shebang lines in `bin/*` script executables are patched to point to the new worktree Python binary.
+- [x] Python `.pyc` cache files are preserved without rewriting.
+- [x] Starter manifests omit volatile compiler incremental caches (`target/debug/incremental/`, `.next/cache`, `node_modules/.vite`).
+- [x] Integration tests verify that hydrated virtual environments and cargo workspaces build and run without path errors.

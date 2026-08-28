@@ -84,6 +84,8 @@ pub struct Ingested {
     pub dir_modes: BTreeMap<String, u32>,
     /// Repo-relative file path -> stored content address.
     pub files: BTreeMap<String, ContentId>,
+    /// Repo-relative file path -> file size in bytes.
+    pub file_sizes: BTreeMap<String, u64>,
     /// Repo-relative symlink path -> raw target (possibly dangling;
     /// targets are never followed or stored as blobs). Recorded on
     /// every ingest so both the fallback ladder and the snapshot
@@ -122,6 +124,7 @@ pub fn ingest_dir(
         dirs: Vec::new(),
         dir_modes: BTreeMap::new(),
         files: BTreeMap::new(),
+        file_sizes: BTreeMap::new(),
         symlinks: BTreeMap::new(),
         modes: BTreeMap::new(),
     };
@@ -164,6 +167,9 @@ pub fn ingest_dir(
                 } else {
                     format!("{base}/{}", entry.rel_path)
                 };
+                if crate::toolchain::is_volatile_cache(&rel) {
+                    continue;
+                }
                 let path = src.join(&entry.rel_path);
                 if entry.is_symlink {
                     let target =
@@ -208,6 +214,7 @@ pub fn ingest_dir(
                         id
                     }
                 };
+                ingested.file_sizes.insert(rel.clone(), entry.size);
                 ingested.files.insert(rel, id);
             }
         }
@@ -235,8 +242,11 @@ fn ingest_dir_walk(
 ) -> Result<()> {
     let mut stack = vec![src.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = fs::read_dir(&dir).map_err(|e| Error::io("read", &dir, e))?;
         let rel = rel_text(src_root, &dir)?;
+        if crate::toolchain::is_volatile_cache(&rel) {
+            continue;
+        }
+        let entries = fs::read_dir(&dir).map_err(|e| Error::io("read", &dir, e))?;
         // One extra stat per DIRECTORY (not per file): its permission
         // bits must survive hydration, since create_dir_all cannot
         // carry them through the umask.
@@ -247,6 +257,10 @@ fn ingest_dir_walk(
         ingested.dirs.push(rel);
         for entry in entries.flatten() {
             let path = entry.path();
+            let rel = rel_text(src_root, &path)?;
+            if crate::toolchain::is_volatile_cache(&rel) {
+                continue;
+            }
             let file_type = entry.file_type().map_err(|e| Error::io("stat", &path, e))?;
             if file_type.is_symlink() {
                 // The raw target is what gets recorded, dangling or
@@ -299,6 +313,7 @@ fn ingest_dir_walk(
                     id
                 }
             };
+            ingested.file_sizes.insert(rel.clone(), size);
             ingested.files.insert(rel, id);
         }
     }
@@ -327,6 +342,10 @@ pub struct MaterializeReport {
     /// carry the recorded mode (a hardlink whose exec bits mismatched
     /// is replaced by a private copy — that replacement counts here).
     pub copied: usize,
+    /// Bytes placed via shared copy-on-write / hardlink inodes.
+    pub bytes_shared: u64,
+    /// Bytes written as plain byte copies.
+    pub bytes_copied: u64,
     /// Strategy attempted for this directory: `"copy-on-write"`
     /// (default), `"hardlink"` (`WT_HARDLINK=1`), or `"byte-copy"`
     /// (forced by `WT_NO_HARDLINK`, and the answer on platforms with
@@ -399,6 +418,8 @@ pub fn materialize(
     let backend = select_strategy(cfg.strategy_policy);
     let paranoid = cfg.verify;
     let mut copied = 0usize;
+    let mut bytes_shared = 0u64;
+    let mut bytes_copied = 0u64;
     let mut verify_ms = 0u128;
     let mut place_ms = 0u128;
     for rel in &ingested.dirs {
@@ -406,6 +427,7 @@ pub fn materialize(
             .map_err(|e| Error::io("prepare", dest_root.join(rel), e))?;
     }
     for (rel, id) in &ingested.files {
+        let size = ingested.file_sizes.get(rel).copied().unwrap_or(0);
         // Hash verification happens here, before any placement: with
         // fclonefileat the kernel copies bytes directly from the blob
         // at clone time, so the blob must already be known-good or
@@ -447,9 +469,7 @@ pub fn materialize(
             }
             Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
         };
-        if !placed {
-            copied += 1;
-        }
+        let mut is_byte_copied = !placed;
         if let Some(&mode) = ingested.modes.get(rel) {
             // A mode can only be applied in place when the placement
             // owns its inode; see `finalize_mode` for the shared case.
@@ -463,11 +483,17 @@ pub fn materialize(
                     // so `copied` reports honestly how much of the
                     // hardlink strategy actually stuck.
                     if repaired {
-                        copied += 1;
+                        is_byte_copied = true;
                     }
                 }
                 Err(e) => return Err(Error::Store(format!("materialize {rel}: {e}"))),
             }
+        }
+        if is_byte_copied {
+            copied += 1;
+            bytes_copied += size;
+        } else {
+            bytes_shared += size;
         }
         place_ms += stage.elapsed().as_millis();
     }
@@ -501,6 +527,8 @@ pub fn materialize(
     Ok(MaterializeReport {
         files: ingested.files.len(),
         copied,
+        bytes_shared,
+        bytes_copied,
         strategy: backend.as_ref().map(|b| b.name()).unwrap_or("byte-copy"),
         verify_ms,
         place_ms,

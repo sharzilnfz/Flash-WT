@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] Snapshot hit and publish operations append single-line TSV entries to `<store>/snapshots/journal.tsv` using `O_APPEND`.
-- [ ] Concurrency-sensitive snapshot lookup logic reads live state from the journal.
-- [ ] Snapshot metadata updates eliminate global read-modify-write file locking.
-- [ ] `wt sweep` acquires exclusive metadata lock, compacts `journal.tsv` into `index.tsv` and `lru.tsv`, fsyncs, and truncates the journal.
-- [ ] Crash resilience and concurrency stress tests verify zero lost updates across concurrent agent processes.
+- [x] Snapshot hit and publish operations append single-line TSV entries to `<store>/snapshots/journal.tsv` using `O_APPEND`.
+- [x] Concurrency-sensitive snapshot lookup logic reads live state from the journal.
+- [x] Snapshot metadata updates eliminate global read-modify-write file locking.
+- [x] `wt sweep` acquires exclusive metadata lock, compacts `journal.tsv` into `index.tsv` and `lru.tsv`, fsyncs, and truncates the journal.
+- [x] Crash resilience and concurrency stress tests verify zero lost updates across concurrent agent processes.

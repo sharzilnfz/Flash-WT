@@ -303,6 +303,7 @@ impl DiskStore {
         let Ok(entries) = fs::read_dir(&dir) else {
             return Ok((0, 0));
         };
+        let _ = crate::snapindex::compact_journal(self.root());
         let lru = crate::snapindex::SnapshotLru::load(self.root());
         // Young, unreferenced survivors of the grace pass, awaiting
         // the retention-cap decision.
@@ -312,7 +313,7 @@ impl DiskStore {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             match name.as_ref() {
-                "index.tsv" | "lru.tsv" => {
+                "index.tsv" | "lru.tsv" | "journal.tsv" | "metadata.lock" => {
                     // Live selection/LRU-retention metadata, not
                     // rebuildable cache: never collected. (Their own
                     // temp-file debris has a non-hex name and falls

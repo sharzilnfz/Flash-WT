@@ -277,6 +277,11 @@ impl DiskStore {
         Ok(())
     }
 
+    /// Compact snapshot metadata journal into canonical index and LRU files.
+    pub fn compact_snapshot_journal(&self) -> io::Result<()> {
+        crate::snapindex::compact_journal(self.root())
+    }
+
     /// Age-based garbage collection (ticket 06): delete every entry
     /// whose reference count is zero and whose object file was last
     /// modified before `now - max_age`. Referenced entries survive any
@@ -288,6 +293,7 @@ impl DiskStore {
     /// leaves only states the next sweep can finish: either both files
     /// present, or an unreferenced object with no ref file.
     pub fn sweep(&mut self, max_age: Duration) -> Result<Swept> {
+        let _ = crate::snapindex::compact_journal(self.root());
         let cutoff = SystemTime::now()
             .checked_sub(max_age)
             .unwrap_or(SystemTime::UNIX_EPOCH);

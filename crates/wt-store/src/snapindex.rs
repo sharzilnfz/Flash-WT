@@ -129,9 +129,16 @@ fn index_path(root: &Path) -> PathBuf {
 }
 
 impl SelectionIndex {
-    /// Load `<root>/snapshots/index.tsv`. A missing or unreadable
-    /// file is an empty index; bad lines are dropped silently.
+    /// Load `<root>/snapshots/index.tsv` and replay `<root>/snapshots/journal.tsv`.
+    /// A missing or unreadable file is an empty index; bad lines are dropped silently.
     pub fn load(root: &Path) -> SelectionIndex {
+        let mut idx = Self::load_canonical(root);
+        idx.apply_journal(root);
+        idx
+    }
+
+    /// Load only the canonical `<root>/snapshots/index.tsv` without journal replay.
+    pub fn load_canonical(root: &Path) -> SelectionIndex {
         let mut idx = SelectionIndex::default();
         let Ok(text) = fs::read_to_string(index_path(root)) else {
             return idx;
@@ -163,17 +170,64 @@ impl SelectionIndex {
         idx
     }
 
+    /// Replay entries from `<root>/snapshots/journal.tsv`.
+    pub fn apply_journal(&mut self, root: &Path) {
+        let Ok(text) = fs::read_to_string(journal_path(root)) else {
+            return;
+        };
+        let complete = match text.strip_suffix('\n') {
+            Some(body) => body,
+            None => match text.rfind('\n') {
+                Some(i) => &text[..i],
+                None => return,
+            },
+        };
+        for line in complete.split('\n').filter(|l| !l.is_empty()) {
+            if let Some(entry) = parse_journal_line(line) {
+                match entry {
+                    JournalEntry::Publish {
+                        repo_root,
+                        pattern,
+                        heavy_dir,
+                        hash,
+                        timestamp,
+                    } => {
+                        self.record_publish(&repo_root, &pattern, &heavy_dir, &hash, timestamp);
+                    }
+                    JournalEntry::Hit {
+                        repo_root,
+                        pattern,
+                        heavy_dir,
+                        hash,
+                        ..
+                    } => {
+                        self.record_hit(&repo_root, &pattern, &heavy_dir, &hash);
+                    }
+                    JournalEntry::Touch { .. } => {}
+                }
+            }
+        }
+    }
+
     /// Publish the whole index atomically: temp file inside the
     /// snapshots directory, then one rename onto the final name.
     pub fn save(&self, root: &Path) -> io::Result<()> {
+        self.save_durable(root)
+    }
+
+    /// Publish the whole index crash-durably: temp file inside the
+    /// snapshots directory, fsync, rename onto final name, fsync parent dir.
+    pub fn save_durable(&self, root: &Path) -> io::Result<()> {
         let dir = root.join("snapshots");
         fs::create_dir_all(&dir)?;
         let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
         for rec in &self.records {
             tmp.write_all(rec.serialize().as_bytes())?;
         }
-        tmp.persist(index_path(root)).map_err(|e| e.error)?;
-        Ok(())
+        let target = index_path(root);
+        tmp.as_file().sync_all()?;
+        tmp.persist(&target).map_err(|e| e.error)?;
+        crate::fsutil::sync_parent_dir(&target)
     }
 
     fn ensure_record(
@@ -247,6 +301,11 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Path of the snapshot WAL journal: `<root>/snapshots/journal.tsv`.
+pub fn journal_path(root: &Path) -> PathBuf {
+    root.join("snapshots").join("journal.tsv")
+}
+
 /// Path of the snapshot LRU sidecar: `<root>/snapshots/lru.tsv`.
 pub fn lru_path(root: &Path) -> PathBuf {
     root.join("snapshots").join("lru.tsv")
@@ -277,9 +336,16 @@ pub struct SnapshotLru {
 }
 
 impl SnapshotLru {
-    /// Load `<root>/snapshots/lru.tsv`. Missing/unreadable means
-    /// empty; malformed lines are dropped silently.
+    /// Load `<root>/snapshots/lru.tsv` and replay `<root>/snapshots/journal.tsv`.
+    /// Missing/unreadable means empty; malformed lines are dropped silently.
     pub fn load(root: &Path) -> SnapshotLru {
+        let mut lru = Self::load_canonical(root);
+        lru.apply_journal(root);
+        lru
+    }
+
+    /// Load only the canonical `<root>/snapshots/lru.tsv` without journal replay.
+    pub fn load_canonical(root: &Path) -> SnapshotLru {
         let mut lru = SnapshotLru::default();
         let Ok(text) = fs::read_to_string(lru_path(root)) else {
             return lru;
@@ -304,17 +370,49 @@ impl SnapshotLru {
         lru
     }
 
+    /// Replay entries from `<root>/snapshots/journal.tsv`.
+    pub fn apply_journal(&mut self, root: &Path) {
+        let Ok(text) = fs::read_to_string(journal_path(root)) else {
+            return;
+        };
+        let complete = match text.strip_suffix('\n') {
+            Some(body) => body,
+            None => match text.rfind('\n') {
+                Some(i) => &text[..i],
+                None => return,
+            },
+        };
+        for line in complete.split('\n').filter(|l| !l.is_empty()) {
+            if let Some(entry) = parse_journal_line(line) {
+                match entry {
+                    JournalEntry::Publish { hash, timestamp, .. }
+                    | JournalEntry::Hit { hash, timestamp, .. }
+                    | JournalEntry::Touch { hash, timestamp } => {
+                        self.record(&hash, timestamp);
+                    }
+                }
+            }
+        }
+    }
+
     /// Publish the whole sidecar atomically: temp file inside the
     /// snapshots directory, then one rename onto the final name.
     pub fn save(&self, root: &Path) -> io::Result<()> {
+        self.save_durable(root)
+    }
+
+    /// Publish the whole sidecar crash-durably.
+    pub fn save_durable(&self, root: &Path) -> io::Result<()> {
         let dir = root.join("snapshots");
         fs::create_dir_all(&dir)?;
         let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
         for (hash, secs) in &self.entries {
             tmp.write_all(format!("{hash}\t{secs}\n").as_bytes())?;
         }
-        tmp.persist(lru_path(root)).map_err(|e| e.error)?;
-        Ok(())
+        let target = lru_path(root);
+        tmp.as_file().sync_all()?;
+        tmp.persist(&target).map_err(|e| e.error)?;
+        crate::fsutil::sync_parent_dir(&target)
     }
 
     /// Record `secs` as `hash`'s last use, inserting or overwriting.
@@ -341,26 +439,221 @@ impl SnapshotLru {
     }
 }
 
-/// Best-effort LRU touch: load, record now, save. Any failure is
-/// swallowed — eviction then falls back to directory mtimes, which
-/// still orders publishes correctly.
-fn touch_lru(root: &Path, hash: &ContentId) {
-    let mut lru = SnapshotLru::load(root);
-    lru.record(hash, now_secs());
-    let _ = lru.save(root);
+enum JournalEntry {
+    Publish {
+        repo_root: String,
+        pattern: String,
+        heavy_dir: String,
+        hash: ContentId,
+        timestamp: u64,
+    },
+    Hit {
+        repo_root: String,
+        pattern: String,
+        heavy_dir: String,
+        hash: ContentId,
+        timestamp: u64,
+    },
+    Touch {
+        hash: ContentId,
+        timestamp: u64,
+    },
+}
+
+fn parse_journal_line(line: &str) -> Option<JournalEntry> {
+    let f: Vec<&str> = line.split('\t').collect();
+    if f.is_empty() {
+        return None;
+    }
+    match f[0] {
+        "publish" => {
+            if f.len() != 6 {
+                return None;
+            }
+            Some(JournalEntry::Publish {
+                repo_root: crate::mirror::unescape(f[1]).ok()?,
+                pattern: crate::mirror::unescape(f[2]).ok()?,
+                heavy_dir: crate::mirror::unescape(f[3]).ok()?,
+                hash: ContentId::from_hex(f[4])?,
+                timestamp: f[5].parse().ok()?,
+            })
+        }
+        "hit" => {
+            if f.len() != 6 {
+                return None;
+            }
+            Some(JournalEntry::Hit {
+                repo_root: crate::mirror::unescape(f[1]).ok()?,
+                pattern: crate::mirror::unescape(f[2]).ok()?,
+                heavy_dir: crate::mirror::unescape(f[3]).ok()?,
+                hash: ContentId::from_hex(f[4])?,
+                timestamp: f[5].parse().ok()?,
+            })
+        }
+        "touch" | "lru" => {
+            if f.len() != 3 {
+                return None;
+            }
+            Some(JournalEntry::Touch {
+                hash: ContentId::from_hex(f[1])?,
+                timestamp: f[2].parse().ok()?,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn append_journal(root: &Path, line: &str) -> io::Result<()> {
+    let dir = root.join("snapshots");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("journal.tsv");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(line.as_bytes())?;
+    Ok(())
+}
+
+/// Held `flock(2)` on `<root>/snapshots/metadata.lock` during sweep
+/// compaction.
+pub struct MetadataLock {
+    file: fs::File,
+}
+
+impl MetadataLock {
+    /// Acquire an exclusive lock on `<root>/snapshots/metadata.lock`.
+    pub fn acquire(root: &Path) -> io::Result<Self> {
+        let dir = root.join("snapshots");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("metadata.lock");
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+        // SAFETY: flock(2) takes only an fd and constants; the fd is
+        // valid for as long as `file` is alive.
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for MetadataLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        let fd = self.file.as_raw_fd();
+        // SAFETY: fd is valid for the lifetime of self.file.
+        unsafe { libc::flock(fd, libc::LOCK_UN) };
+    }
+}
+
+/// Compact `<root>/snapshots/journal.tsv` into canonical `index.tsv` and `lru.tsv`.
+///
+/// Acquires an exclusive metadata lock (`<root>/snapshots/metadata.lock`),
+/// merges uncompacted journal records with existing canonical index/LRU files,
+/// crash-durably saves both files (with fsync), and truncates `journal.tsv`.
+pub fn compact_journal(root: &Path) -> io::Result<()> {
+    let dir = root.join("snapshots");
+    if !dir.exists() {
+        return Ok(());
+    }
+    let _lock = MetadataLock::acquire(root)?;
+    let j_path = journal_path(root);
+    let mut journal_file = match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&j_path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+
+    use std::io::{Read, Seek};
+    let mut bytes = Vec::new();
+    journal_file.read_to_end(&mut bytes)?;
+    if bytes.is_empty() {
+        return Ok(());
+    }
+
+    let last_newline = match bytes.iter().rposition(|&b| b == b'\n') {
+        Some(pos) => pos + 1,
+        None => return Ok(()),
+    };
+
+    let complete_text = match std::str::from_utf8(&bytes[..last_newline]) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+
+    let mut idx = SelectionIndex::load_canonical(root);
+    let mut lru = SnapshotLru::load_canonical(root);
+    for line in complete_text.split('\n').filter(|l| !l.is_empty()) {
+        if let Some(entry) = parse_journal_line(line) {
+            match entry {
+                JournalEntry::Publish {
+                    repo_root,
+                    pattern,
+                    heavy_dir,
+                    hash,
+                    timestamp,
+                } => {
+                    idx.record_publish(&repo_root, &pattern, &heavy_dir, &hash, timestamp);
+                    lru.record(&hash, timestamp);
+                }
+                JournalEntry::Hit {
+                    repo_root,
+                    pattern,
+                    heavy_dir,
+                    hash,
+                    timestamp,
+                } => {
+                    idx.record_hit(&repo_root, &pattern, &heavy_dir, &hash);
+                    lru.record(&hash, timestamp);
+                }
+                JournalEntry::Touch { hash, timestamp } => {
+                    lru.record(&hash, timestamp);
+                }
+            }
+        }
+    }
+
+    idx.save_durable(root)?;
+    lru.save_durable(root)?;
+
+    let current_len = journal_file.metadata()?.len() as usize;
+    if current_len > last_newline {
+        journal_file.seek(io::SeekFrom::Start(last_newline as u64))?;
+        let mut remaining = Vec::new();
+        journal_file.read_to_end(&mut remaining)?;
+        journal_file.seek(io::SeekFrom::Start(0))?;
+        journal_file.write_all(&remaining)?;
+        journal_file.set_len(remaining.len() as u64)?;
+    } else {
+        journal_file.seek(io::SeekFrom::Start(0))?;
+        journal_file.set_len(0)?;
+    }
+    journal_file.sync_all()?;
+    crate::fsutil::sync_parent_dir(&j_path)?;
+    Ok(())
 }
 
 /// LRU-only last-use refresh, for callers that skip the v2 selection
-/// index (record_hit / record_publish already stamp via touch_lru).
-/// Best-effort, same contract as touch_lru.
+/// index. Appends a touch entry to the write-ahead journal using O_APPEND.
 pub fn record_snapshot_lru_touch(root: &Path, hash: &ContentId) {
-    touch_lru(root, hash);
+    let now = now_secs();
+    let line = format!("touch\t{}\t{}\n", hash, now);
+    let _ = append_journal(root, &line);
 }
 
-/// After a successful PUBLISH (full or incremental): load, move the
-/// published hash to the front, refresh the mtime, save atomically.
-/// Also refreshes the snapshot's LRU last-use stamp (retention-cap
-/// sidecar); an LRU write failure never fails the index update.
+/// After a successful PUBLISH (full or incremental): append a publish entry
+/// to the write-ahead journal using atomic POSIX O_APPEND.
 pub fn record_publish(
     root: &Path,
     repo_root: &str,
@@ -368,17 +661,20 @@ pub fn record_publish(
     heavy_dir: &str,
     hash: &ContentId,
 ) -> io::Result<()> {
-    let mut idx = SelectionIndex::load(root);
-    idx.record_publish(repo_root, pattern, heavy_dir, hash, now_secs());
-    touch_lru(root, hash);
-    idx.save(root)
+    let now = now_secs();
+    let line = format!(
+        "publish\t{}\t{}\t{}\t{}\t{}\n",
+        escape(repo_root),
+        escape(pattern),
+        escape(heavy_dir),
+        hash,
+        now
+    );
+    append_journal(root, &line)
 }
 
-/// After a snapshot HIT: load, move-to-front if not already there,
-/// save atomically. The selection mtime is untouched, but the LRU
-/// last-use stamp IS refreshed — a hit must protect the snapshot
-/// from retention-cap eviction (unlike the v2 ring order, which only
-/// cares about recency relative to sibling candidates).
+/// After a snapshot HIT: append a hit entry to the write-ahead journal
+/// using atomic POSIX O_APPEND.
 pub fn record_hit(
     root: &Path,
     repo_root: &str,
@@ -386,10 +682,16 @@ pub fn record_hit(
     heavy_dir: &str,
     hash: &ContentId,
 ) -> io::Result<()> {
-    let mut idx = SelectionIndex::load(root);
-    idx.record_hit(repo_root, pattern, heavy_dir, hash);
-    touch_lru(root, hash);
-    idx.save(root)
+    let now = now_secs();
+    let line = format!(
+        "hit\t{}\t{}\t{}\t{}\t{}\n",
+        escape(repo_root),
+        escape(pattern),
+        escape(heavy_dir),
+        hash,
+        now
+    );
+    append_journal(root, &line)
 }
 
 /// Pick the old snapshot to diff against: walk the key's ring newest
@@ -523,11 +825,10 @@ mod tests {
 
     #[test]
     fn record_publish_surfaces_io_errors_without_panicking_on_hostile_layouts() {
-        // index.tsv exists as a DIRECTORY: load cannot read it and
-        // save cannot rename over it. The error must come back as a
-        // plain Err for callers to ignore — the index is best-effort.
+        // journal.tsv exists as a DIRECTORY: append cannot write it.
+        // The error must come back as a plain Err for callers to ignore — the index is best-effort.
         let base = tempfile::tempdir().unwrap();
-        fs::create_dir_all(base.path().join("snapshots/index.tsv")).unwrap();
+        fs::create_dir_all(base.path().join("snapshots/journal.tsv")).unwrap();
         assert!(super::record_publish(base.path(), ROOT_A, PAT, HEAVY, &id(7)).is_err());
         assert!(super::select_old_snapshot(base.path(), ROOT_A, PAT, HEAVY).is_none());
 
@@ -535,6 +836,165 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         fs::write(base.path().join("snapshots"), "not a directory").unwrap();
         assert!(super::record_publish(base.path(), ROOT_A, PAT, HEAVY, &id(8)).is_err());
+    }
+
+    #[test]
+    fn wal_journal_appends_and_reads_live_state_before_compaction() {
+        let base = tempfile::tempdir().unwrap();
+        let store = base.path();
+
+        // Initially no journal or index files
+        assert_eq!(SelectionIndex::load(store), SelectionIndex::default());
+        assert_eq!(SnapshotLru::load(store), SnapshotLru::default());
+
+        // Publish to journal
+        super::record_publish(store, ROOT_A, PAT, HEAVY, &id(1)).unwrap();
+        let j_path = journal_path(store);
+        assert!(j_path.exists(), "journal.tsv must be created");
+
+        let j_content = fs::read_to_string(&j_path).unwrap();
+        assert!(
+            j_content.starts_with("publish\t"),
+            "journal must contain publish line"
+        );
+
+        // Canonical files should not exist yet before compaction
+        assert!(!index_path(store).exists());
+        assert!(!lru_path(store).exists());
+
+        // Live state reads must see the journal entry immediately
+        let idx = SelectionIndex::load(store);
+        assert_eq!(idx.records.len(), 1);
+        assert_eq!(idx.records[0].ring, vec![id(1)]);
+        assert!(idx.records[0].mtime_secs > 0);
+
+        let lru = SnapshotLru::load(store);
+        assert!(lru.last_use(&id(1)).is_some());
+
+        // Hit appends to journal
+        super::record_hit(store, ROOT_A, PAT, HEAVY, &id(2)).unwrap();
+        let idx2 = SelectionIndex::load(store);
+        assert_eq!(idx2.records[0].ring, vec![id(2), id(1)]);
+
+        // Touch appends to journal
+        super::record_snapshot_lru_touch(store, &id(3));
+        let lru2 = SnapshotLru::load(store);
+        assert!(lru2.last_use(&id(3)).is_some());
+    }
+
+    #[test]
+    fn compaction_merges_journal_into_canonical_files_and_truncates_journal() {
+        let base = tempfile::tempdir().unwrap();
+        let store = base.path();
+
+        super::record_publish(store, ROOT_A, PAT, HEAVY, &id(1)).unwrap();
+        super::record_publish(store, ROOT_A, PAT, HEAVY, &id(2)).unwrap();
+        super::record_hit(store, ROOT_A, PAT, HEAVY, &id(1)).unwrap();
+        super::record_snapshot_lru_touch(store, &id(3));
+
+        // Compact journal into canonical files
+        compact_journal(store).expect("compaction must succeed");
+
+        // Canonical files must exist and journal must be truncated
+        assert!(index_path(store).exists());
+        assert!(lru_path(store).exists());
+        let j_content = fs::read_to_string(journal_path(store)).unwrap();
+        assert!(j_content.is_empty(), "journal must be truncated to 0 bytes");
+
+        // Canonical files alone hold the complete state
+        let idx = SelectionIndex::load_canonical(store);
+        assert_eq!(idx.records.len(), 1);
+        assert_eq!(idx.records[0].ring, vec![id(1), id(2)]);
+        assert!(idx.records[0].mtime_secs > 0);
+
+        let lru = SnapshotLru::load_canonical(store);
+        assert_eq!(lru.entries.len(), 3);
+        assert!(lru.last_use(&id(2)).is_some());
+
+        // Subsequent publishes append fresh lines to truncated journal
+        super::record_publish(store, ROOT_A, PAT, HEAVY, &id(4)).unwrap();
+        let j_after = fs::read_to_string(journal_path(store)).unwrap();
+        assert!(!j_after.is_empty());
+
+        let idx_live = SelectionIndex::load(store);
+        assert_eq!(idx_live.records[0].ring, vec![id(4), id(1), id(2)]);
+    }
+
+    #[test]
+    fn journal_torn_tail_and_corrupt_entries_tolerated_during_compaction() {
+        let base = tempfile::tempdir().unwrap();
+        let store = base.path();
+        let dir = store.join("snapshots");
+        fs::create_dir_all(&dir).unwrap();
+
+        let good1 = format!("publish\t{ROOT_A}\t{PAT}\t{HEAVY}\t{}\t10\n", id(1));
+        let bad = "corrupt\tinvalid\tformat\n";
+        let good2 = format!("publish\t{ROOT_A}\t{PAT}\t{HEAVY}\t{}\t20\n", id(2));
+        let torn = format!("publish\t{ROOT_A}\t{PAT}\t{HEAVY}\t{}", id(3)); // no trailing newline
+
+        fs::write(journal_path(store), format!("{good1}{bad}{good2}{torn}")).unwrap();
+
+        // Load before compaction
+        let idx = SelectionIndex::load(store);
+        assert_eq!(idx.records.len(), 1);
+        assert_eq!(idx.records[0].ring, vec![id(2), id(1)]);
+
+        // Compact
+        compact_journal(store).unwrap();
+
+        // Canonical files have good entries
+        let idx_canonical = SelectionIndex::load_canonical(store);
+        assert_eq!(idx_canonical.records[0].ring, vec![id(2), id(1)]);
+
+        // The torn tail was retained at the start of journal
+        let rem_journal = fs::read_to_string(journal_path(store)).unwrap();
+        assert_eq!(rem_journal, torn);
+    }
+
+    #[test]
+    fn concurrent_journal_appends_and_compaction_stress() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let base = tempfile::tempdir().unwrap();
+        let store = Arc::new(base.path().to_path_buf());
+
+        let num_threads = 8;
+        let ops_per_thread = 50;
+
+        let mut handles = Vec::new();
+        for t in 0..num_threads {
+            let s = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                for i in 0..ops_per_thread {
+                    let h = id(((t * ops_per_thread + i) % 250 + 1) as u8);
+                    let key = format!("/repo/{t}");
+                    if i % 3 == 0 {
+                        super::record_publish(&s, &key, "pat/", "heavy", &h).unwrap();
+                    } else if i % 3 == 1 {
+                        super::record_hit(&s, &key, "pat/", "heavy", &h).unwrap();
+                    } else {
+                        super::record_snapshot_lru_touch(&s, &h);
+                    }
+                    if i % 15 == 0 {
+                        let _ = compact_journal(&s);
+                    }
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Final compaction
+        compact_journal(&store).unwrap();
+
+        let lru = SnapshotLru::load_canonical(&store);
+        assert!(!lru.entries.is_empty(), "LRU should have recorded entries");
+
+        let idx = SelectionIndex::load_canonical(&store);
+        assert_eq!(idx.records.len(), num_threads, "All thread keys must be present in index");
     }
 
     #[test]
@@ -570,11 +1030,7 @@ mod tests {
                 .unwrap(),
             crate::PublishOutcome::Published
         );
-        {
-            let mut idx = crate::snapindex::SelectionIndex::load(store.root());
-            idx.record_publish(ROOT_A, PAT, HEAVY, &m_new.hash, now_secs());
-            idx.save(store.root()).unwrap();
-        }
+        super::record_publish(store.root(), ROOT_A, PAT, HEAVY, &m_new.hash).unwrap();
 
         let (picked, manifest) =
             select_old_snapshot(store.root(), ROOT_A, PAT, HEAVY).expect("a usable candidate");
