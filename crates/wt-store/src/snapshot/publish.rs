@@ -287,8 +287,10 @@ impl DiskStore {
         old_hash: &ContentId,
         paranoid: bool,
     ) -> Result<PublishOutcome, BuildError> {
-        self.publish_snapshot_incremental_with_lockfile_and_timing(entries, None, old_hash, paranoid)
-            .map(|receipt| receipt.outcome)
+        self.publish_snapshot_incremental_with_lockfile_and_timing(
+            entries, None, old_hash, paranoid,
+        )
+        .map(|receipt| receipt.outcome)
     }
 
     /// Publish an incremental snapshot with an optional lockfile hash.
@@ -299,8 +301,13 @@ impl DiskStore {
         old_hash: &ContentId,
         paranoid: bool,
     ) -> Result<PublishOutcome, BuildError> {
-        self.publish_snapshot_incremental_with_lockfile_and_timing(entries, lockfile_hash, old_hash, paranoid)
-            .map(|receipt| receipt.outcome)
+        self.publish_snapshot_incremental_with_lockfile_and_timing(
+            entries,
+            lockfile_hash,
+            old_hash,
+            paranoid,
+        )
+        .map(|receipt| receipt.outcome)
     }
 
     /// [`Self::publish_snapshot_incremental`] plus a returned
@@ -312,7 +319,9 @@ impl DiskStore {
         old_hash: &ContentId,
         paranoid: bool,
     ) -> Result<PublishReceipt, BuildError> {
-        self.publish_snapshot_incremental_with_lockfile_and_timing(entries, None, old_hash, paranoid)
+        self.publish_snapshot_incremental_with_lockfile_and_timing(
+            entries, None, old_hash, paranoid,
+        )
     }
 
     /// [`Self::publish_snapshot_incremental_with_lockfile`] plus internal phase timings.

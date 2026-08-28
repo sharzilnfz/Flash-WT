@@ -7,8 +7,8 @@
 
 mod common;
 
-use std::fs;
 use common::Fixture;
+use std::fs;
 
 const HEAVY_FILES: usize = 100;
 
@@ -26,7 +26,11 @@ fn create_json_emits_valid_envelope_and_suppresses_human_output() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = stdout.trim().lines().collect();
-    assert_eq!(lines.len(), 1, "stdout must contain exactly 1 line of NDJSON: {stdout}");
+    assert_eq!(
+        lines.len(),
+        1,
+        "stdout must contain exactly 1 line of NDJSON: {stdout}"
+    );
 
     let json: serde_json::Value = serde_json::from_str(lines[0]).expect("parse json");
     assert_eq!(json["wt_version"], env!("CARGO_PKG_VERSION"));
@@ -37,7 +41,12 @@ fn create_json_emits_valid_envelope_and_suppresses_human_output() {
 
     let data = &json["data"];
     assert_eq!(data["branch"], "demo");
-    assert!(data["worktree_path"].as_str().unwrap().contains("origin-demo"));
+    assert!(
+        data["worktree_path"]
+            .as_str()
+            .unwrap()
+            .contains("origin-demo")
+    );
     assert!(data["duration_ms"].is_number());
     assert!(data["hydration_method"].is_string());
     assert!(data["bytes_shared_cow"].is_number());
@@ -58,21 +67,24 @@ fn global_json_flag_parses_in_all_positions() {
     // Before subcommand: wt --json create demo1
     let out1 = fx.wt(&["--json", "create", "demo1"]);
     assert!(out1.status.success());
-    let val1: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out1.stdout).trim()).unwrap();
+    let val1: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out1.stdout).trim()).unwrap();
     assert_eq!(val1["status"], "ok");
     assert_eq!(val1["data"]["branch"], "demo1");
 
     // After subcommand: wt create --json demo2
     let out2 = fx.wt(&["create", "--json", "demo2"]);
     assert!(out2.status.success());
-    let val2: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out2.stdout).trim()).unwrap();
+    let val2: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out2.stdout).trim()).unwrap();
     assert_eq!(val2["status"], "ok");
     assert_eq!(val2["data"]["branch"], "demo2");
 
     // At end: wt create demo3 --json
     let out3 = fx.wt(&["create", "demo3", "--json"]);
     assert!(out3.status.success());
-    let val3: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out3.stdout).trim()).unwrap();
+    let val3: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out3.stdout).trim()).unwrap();
     assert_eq!(val3["status"], "ok");
     assert_eq!(val3["data"]["branch"], "demo3");
 }
@@ -120,7 +132,12 @@ fn remove_json_emits_valid_envelope() {
 
     let data = &json["data"];
     assert_eq!(data["branch"], "to-remove");
-    assert!(data["worktree_path"].as_str().unwrap().contains("origin-to-remove"));
+    assert!(
+        data["worktree_path"]
+            .as_str()
+            .unwrap()
+            .contains("origin-to-remove")
+    );
     assert!(data["references_released"].is_number());
     assert!(data["mirror_removed"].is_boolean());
 
@@ -153,16 +170,21 @@ fn sweep_json_emits_valid_envelope() {
     assert!(!stdout.contains("swept store"));
 
     // Migrate to mark-sweep and sweep --json
-    let mig_out = fx.wt_with_store(&["store", "migrate", "--activate-mark-sweep", "--json"], store_dir.path());
+    let mig_out = fx.wt_with_store(
+        &["store", "migrate", "--activate-mark-sweep", "--json"],
+        store_dir.path(),
+    );
     assert!(mig_out.status.success());
-    let mig_json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&mig_out.stdout).trim()).unwrap();
+    let mig_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&mig_out.stdout).trim()).unwrap();
     assert_eq!(mig_json["command"], "store");
     assert_eq!(mig_json["status"], "ok");
     assert_eq!(mig_json["data"]["gc_mode"], "mark-sweep");
 
     let sweep2_out = fx.wt_with_store(&["sweep", "--age", "0s", "--json"], store_dir.path());
     assert!(sweep2_out.status.success());
-    let sweep2_json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&sweep2_out.stdout).trim()).unwrap();
+    let sweep2_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&sweep2_out.stdout).trim()).unwrap();
     assert_eq!(sweep2_json["command"], "sweep");
     assert_eq!(sweep2_json["status"], "ok");
     assert_eq!(sweep2_json["data"]["mode"], "mark-sweep");
@@ -182,7 +204,8 @@ fn scrub_json_emits_valid_envelope() {
     // Dry run
     let scrub_dry = fx.wt_with_store(&["scrub", "--dry-run", "--json"], store_dir.path());
     assert!(scrub_dry.status.success());
-    let dry_json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&scrub_dry.stdout).trim()).unwrap();
+    let dry_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&scrub_dry.stdout).trim()).unwrap();
     assert_eq!(dry_json["command"], "scrub");
     assert_eq!(dry_json["status"], "ok");
     assert_eq!(dry_json["data"]["dry_run"], true);
@@ -193,7 +216,8 @@ fn scrub_json_emits_valid_envelope() {
     // Non dry run
     let scrub_real = fx.wt_with_store(&["scrub", "--json"], store_dir.path());
     assert!(scrub_real.status.success());
-    let real_json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&scrub_real.stdout).trim()).unwrap();
+    let real_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&scrub_real.stdout).trim()).unwrap();
     assert_eq!(real_json["command"], "scrub");
     assert_eq!(real_json["status"], "ok");
     assert_eq!(real_json["data"]["dry_run"], false);
@@ -208,11 +232,18 @@ fn json_error_envelope_on_failure() {
 
     // Creation failure due to existing directory
     let out = fx.wt(&["create", "taken", "--json"]);
-    assert!(!out.status.success(), "expected failure for existing directory");
+    assert!(
+        !out.status.success(),
+        "expected failure for existing directory"
+    );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = stdout.trim().lines().collect();
-    assert_eq!(lines.len(), 1, "expected single line error json on stdout: {stdout}");
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected single line error json on stdout: {stdout}"
+    );
 
     let json: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(json["wt_version"], env!("CARGO_PKG_VERSION"));
@@ -222,12 +253,24 @@ fn json_error_envelope_on_failure() {
     assert!(json["data"].is_null());
     assert!(json["diagnostics"].is_array());
     assert_eq!(json["diagnostics"][0]["code"], "ERROR");
-    assert!(json["diagnostics"][0]["message"].as_str().unwrap().contains("already exists"));
+    assert!(
+        json["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already exists")
+    );
 
     // Missing manifest failure
-    let out2 = fx.wt(&["create", "missing-manifest-test", "--manifest", "nonexistent.wtinclude", "--json"]);
+    let out2 = fx.wt(&[
+        "create",
+        "missing-manifest-test",
+        "--manifest",
+        "nonexistent.wtinclude",
+        "--json",
+    ]);
     assert!(!out2.status.success());
-    let json2: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out2.stdout).trim()).unwrap();
+    let json2: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out2.stdout).trim()).unwrap();
     assert_eq!(json2["status"], "error");
     assert_eq!(json2["command"], "create");
 }

@@ -18,9 +18,9 @@ use std::thread;
 use std::time::Duration;
 
 use wt_store::{
-    compact_journal, journal_path, lru_path, record_snapshot_hit, record_snapshot_publish,
-    record_snapshot_lru_touch, select_old_snapshot, ContentId, DiskStore, Manifest,
-    PublishOutcome, SelectionIndex, SnapshotEntry, SnapshotLru, Store as _,
+    ContentId, DiskStore, Manifest, PublishOutcome, SelectionIndex, SnapshotEntry, SnapshotLru,
+    Store as _, compact_journal, journal_path, lru_path, record_snapshot_hit,
+    record_snapshot_lru_touch, record_snapshot_publish, select_old_snapshot,
 };
 
 fn sample_id(n: u8) -> ContentId {

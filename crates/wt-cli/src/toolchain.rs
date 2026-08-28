@@ -65,7 +65,10 @@ fn find_venvs(dir: &Path, out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             if path.file_name().is_some_and(|n| n == ".venv") || path.join("pyvenv.cfg").is_file() {
                 out.push(path);
-            } else if path.file_name().is_some_and(|n| n != "node_modules" && n != "target" && n != ".git") {
+            } else if path
+                .file_name()
+                .is_some_and(|n| n != "node_modules" && n != "target" && n != ".git")
+            {
                 find_venvs(&path, out);
             }
         }
@@ -184,7 +187,8 @@ pub fn relocate_venv(src_root: &Path, dest_root: &Path, venv_dir: &Path) -> Resu
             };
 
             // bin/activate* shell scripts
-            let is_activate = file_name.starts_with("activate") || file_name.starts_with("Activate");
+            let is_activate =
+                file_name.starts_with("activate") || file_name.starts_with("Activate");
             if is_activate {
                 if let Ok(content) = fs::read_to_string(&path) {
                     let updated = replace_paths(&content);
@@ -230,7 +234,9 @@ mod tests {
         assert!(is_volatile_cache("crates/sub/target/debug/incremental/o"));
         assert!(is_volatile_cache("node_modules/.vite"));
         assert!(is_volatile_cache("node_modules/.vite/deps/react.js"));
-        assert!(is_volatile_cache("frontend/node_modules/.vite/deps/chunk.js"));
+        assert!(is_volatile_cache(
+            "frontend/node_modules/.vite/deps/chunk.js"
+        ));
         assert!(is_volatile_cache(".next/cache"));
         assert!(is_volatile_cache(".next/cache/webpack/client.pack"));
         assert!(is_volatile_cache("web/.next/cache/turbopack/module.pack"));
@@ -292,7 +298,10 @@ export PATH
 
         // Verify pyvenv.cfg
         let updated_cfg = fs::read_to_string(dest_venv.join("pyvenv.cfg")).unwrap();
-        assert!(updated_cfg.contains(&format!("command = /usr/bin/python3 -m venv {}", dest_venv.display())));
+        assert!(updated_cfg.contains(&format!(
+            "command = /usr/bin/python3 -m venv {}",
+            dest_venv.display()
+        )));
         assert!(!updated_cfg.contains(&src_venv.to_string_lossy().into_owned()));
 
         // Verify activate

@@ -132,7 +132,10 @@ fn anti_thrashing_grace_window_protects_young_snapshots_from_budget_eviction() {
         String::from_utf8_lossy(&swept.stderr)
     );
     let stdout = String::from_utf8_lossy(&swept.stdout);
-    assert!(stdout.contains("cap evicted 0"), "anti-thrashing must protect young snapshots: {stdout}");
+    assert!(
+        stdout.contains("cap evicted 0"),
+        "anti-thrashing must protect young snapshots: {stdout}"
+    );
     assert_eq!(surviving_snapshots(&store).len(), hashes.len());
 }
 
@@ -262,11 +265,13 @@ fn invalid_max_snapshot_bytes_value_fails_loudly() {
         &store,
         &[("WT_MAX_SNAPSHOT_BYTES", "invalid_size_str")],
     );
-    assert!(!swept.status.success(), "garbage max bytes must fail the sweep");
+    assert!(
+        !swept.status.success(),
+        "garbage max bytes must fail the sweep"
+    );
     let stderr = String::from_utf8_lossy(&swept.stderr);
     assert!(
         stderr.contains("WT_MAX_SNAPSHOT_BYTES"),
         "error must name the knob: {stderr}"
     );
 }
-

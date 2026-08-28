@@ -471,14 +471,17 @@ mod tests {
         m.files.insert(ContentId([42u8; 32]));
 
         let text = m.serialize();
-        assert!(text.contains("base\tfeat/special%09branch%0A%25name\t0123456789abcdef0123456789abcdef01234567\n"));
+        assert!(text.contains(
+            "base\tfeat/special%09branch%0A%25name\t0123456789abcdef0123456789abcdef01234567\n"
+        ));
         let parsed = StoreMirror::parse(&text).expect("parse");
         assert_eq!(parsed, m);
     }
 
     #[test]
     fn duplicate_base_record_rejects_the_mirror() {
-        let text = "v1\tworktree\t/w/one\t/r/.git/worktrees/one\nbase\tmain\t1111\nbase\tmain\t2222\n";
+        let text =
+            "v1\tworktree\t/w/one\t/r/.git/worktrees/one\nbase\tmain\t1111\nbase\tmain\t2222\n";
         assert!(StoreMirror::parse(text).is_err());
     }
 }

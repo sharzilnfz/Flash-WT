@@ -19,9 +19,21 @@ fn test_venv_post_hydration_relocation() {
     fs::create_dir_all(&repo).unwrap();
 
     // Initialize git repository
-    Command::new("git").args(["init", "--quiet"]).current_dir(&repo).status().unwrap();
-    Command::new("git").args(["config", "user.email", "test@example.com"]).current_dir(&repo).status().unwrap();
-    Command::new("git").args(["config", "user.name", "Test"]).current_dir(&repo).status().unwrap();
+    Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
 
     let venv = repo.join(".venv");
     fs::create_dir_all(venv.join("bin")).unwrap();
@@ -70,8 +82,16 @@ export PATH
 
     // Track a source file and commit
     fs::write(repo.join("main.py"), "print('hello')\n").unwrap();
-    Command::new("git").args(["add", "main.py"]).current_dir(&repo).status().unwrap();
-    Command::new("git").args(["commit", "--quiet", "-m", "init"]).current_dir(&repo).status().unwrap();
+    Command::new("git")
+        .args(["add", "main.py"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "--quiet", "-m", "init"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
 
     // Create worktree via wt
     let store_dir = base.path().join("store");
@@ -94,7 +114,10 @@ export PATH
     // Acceptance criterion 1: pyvenv.cfg updated with target worktree paths
     let updated_cfg = fs::read_to_string(dest_venv.join("pyvenv.cfg")).unwrap();
     assert!(
-        updated_cfg.contains(&format!("command = /usr/bin/python3 -m venv {}", dest_venv.display())),
+        updated_cfg.contains(&format!(
+            "command = /usr/bin/python3 -m venv {}",
+            dest_venv.display()
+        )),
         "pyvenv.cfg was not updated with dest venv path. Got:\n{updated_cfg}"
     );
     assert!(!updated_cfg.contains(&venv.to_string_lossy().into_owned()));
@@ -125,12 +148,21 @@ export PATH
         updated_script.starts_with(&format!("#!{}/bin/python3\n", dest_venv.display())),
         "Shebang was not updated to dest Python binary. Got:\n{updated_script}"
     );
-    let perms = fs::metadata(dest_venv.join("bin/pytest")).unwrap().permissions().mode();
+    let perms = fs::metadata(dest_venv.join("bin/pytest"))
+        .unwrap()
+        .permissions()
+        .mode();
     assert_eq!(perms & 0o777, 0o755, "Executable permissions not preserved");
 
     // Acceptance criterion 4: .pyc cache files preserved without rewriting
-    assert_eq!(fs::read(dest_venv.join("bin/cached.pyc")).unwrap(), pyc_bytes);
-    assert_eq!(fs::read(dest_venv.join("__pycache__/module.cpython-311.pyc")).unwrap(), pyc_bytes);
+    assert_eq!(
+        fs::read(dest_venv.join("bin/cached.pyc")).unwrap(),
+        pyc_bytes
+    );
+    assert_eq!(
+        fs::read(dest_venv.join("__pycache__/module.cpython-311.pyc")).unwrap(),
+        pyc_bytes
+    );
 }
 
 #[test]
@@ -142,11 +174,19 @@ fn test_starter_manifest_and_volatile_cache_exclusions() {
     fs::create_dir_all(target_dir.join("debug/deps")).unwrap();
     fs::write(target_dir.join("debug/deps/libfoo.rlib"), b"rlib data").unwrap();
     fs::create_dir_all(target_dir.join("debug/incremental/app-xyz")).unwrap();
-    fs::write(target_dir.join("debug/incremental/app-xyz/s-abc.o"), b"incremental data").unwrap();
+    fs::write(
+        target_dir.join("debug/incremental/app-xyz/s-abc.o"),
+        b"incremental data",
+    )
+    .unwrap();
 
     let node_modules_dir = fx.repo.join("node_modules");
     fs::create_dir_all(node_modules_dir.join("pkg")).unwrap();
-    fs::write(node_modules_dir.join("pkg/index.js"), b"console.log('pkg');").unwrap();
+    fs::write(
+        node_modules_dir.join("pkg/index.js"),
+        b"console.log('pkg');",
+    )
+    .unwrap();
     fs::create_dir_all(node_modules_dir.join(".vite/deps")).unwrap();
     fs::write(node_modules_dir.join(".vite/deps/react.js"), b"vite cache").unwrap();
 
@@ -164,9 +204,18 @@ fn test_starter_manifest_and_volatile_cache_exclusions() {
 
     // Acceptance criterion 5: Starter manifests omit volatile compiler incremental caches
     let starter = fs::read_to_string(fx.repo.join(".wtinclude")).unwrap();
-    assert!(starter.contains("!target/debug/incremental/"), "Starter manifest missing !target/debug/incremental/");
-    assert!(starter.contains("!node_modules/.vite/"), "Starter manifest missing !node_modules/.vite/");
-    assert!(starter.contains("!.next/cache/"), "Starter manifest missing !.next/cache/");
+    assert!(
+        starter.contains("!target/debug/incremental/"),
+        "Starter manifest missing !target/debug/incremental/"
+    );
+    assert!(
+        starter.contains("!node_modules/.vite/"),
+        "Starter manifest missing !node_modules/.vite/"
+    );
+    assert!(
+        starter.contains("!.next/cache/"),
+        "Starter manifest missing !.next/cache/"
+    );
 
     // Check hydrated destination
     let dest = fx.repo.parent().unwrap().join("origin-demo");
@@ -197,9 +246,21 @@ fn test_cargo_workspace_builds_in_hydrated_worktree() {
     fs::create_dir_all(repo.join("src")).unwrap();
 
     // Initialize git repository
-    Command::new("git").args(["init", "--quiet"]).current_dir(&repo).status().unwrap();
-    Command::new("git").args(["config", "user.email", "test@example.com"]).current_dir(&repo).status().unwrap();
-    Command::new("git").args(["config", "user.name", "Test"]).current_dir(&repo).status().unwrap();
+    Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
 
     let cargo_toml = r#"[package]
 name = "sample-crate"
@@ -209,11 +270,23 @@ edition = "2021"
 [dependencies]
 "#;
     fs::write(repo.join("Cargo.toml"), cargo_toml).unwrap();
-    fs::write(repo.join("src/main.rs"), "fn main() { println!(\"cargo-test-ok\"); }\n").unwrap();
+    fs::write(
+        repo.join("src/main.rs"),
+        "fn main() { println!(\"cargo-test-ok\"); }\n",
+    )
+    .unwrap();
 
     // Track and commit cargo project
-    Command::new("git").args(["add", "."]).current_dir(&repo).status().unwrap();
-    Command::new("git").args(["commit", "--quiet", "-m", "init"]).current_dir(&repo).status().unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "--quiet", "-m", "init"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
 
     // Build the project in repo to generate target/ and incremental caches
     let build_out = Command::new("cargo")
@@ -263,5 +336,8 @@ edition = "2021"
         "cargo run in hydrated worktree failed: {}",
         String::from_utf8_lossy(&run_out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&run_out.stdout).trim(), "cargo-test-ok");
+    assert_eq!(
+        String::from_utf8_lossy(&run_out.stdout).trim(),
+        "cargo-test-ok"
+    );
 }

@@ -114,9 +114,11 @@ pub fn parse_bytes(text: &str) -> Option<u64> {
 /// and valid (e.g. `20GB`, `500MB`, `1048576`), else `None`.
 pub fn max_snapshot_bytes_from_env() -> Result<Option<u64>> {
     match std::env::var("WT_MAX_SNAPSHOT_BYTES") {
-        Ok(text) => parse_bytes(&text)
-            .map(Some)
-            .ok_or_else(|| Error::Usage(format!("invalid WT_MAX_SNAPSHOT_BYTES {text:?} (try 20GB, 500MB)"))),
+        Ok(text) => parse_bytes(&text).map(Some).ok_or_else(|| {
+            Error::Usage(format!(
+                "invalid WT_MAX_SNAPSHOT_BYTES {text:?} (try 20GB, 500MB)"
+            ))
+        }),
         Err(_) => Ok(None),
     }
 }
@@ -169,7 +171,11 @@ fn read_ledger(git_dir: &Path) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
     Ok((blobs, snapshots))
 }
 
-pub fn remove(name: &str, dir: Option<&Path>, cfg: &RunConfig) -> Result<(RemoveData, Vec<Diagnostic>)> {
+pub fn remove(
+    name: &str,
+    dir: Option<&Path>,
+    cfg: &RunConfig,
+) -> Result<(RemoveData, Vec<Diagnostic>)> {
     let root = gitops::repo_root()?;
 
     let dest = match dir {
@@ -419,7 +425,12 @@ pub fn sweep_leases(
                     if let Some(ref r_root) = repo_root {
                         if lease.worktree.exists() {
                             let _ = std::process::Command::new("git")
-                                .args(["worktree", "remove", "--force", &lease.worktree.to_string_lossy()])
+                                .args([
+                                    "worktree",
+                                    "remove",
+                                    "--force",
+                                    &lease.worktree.to_string_lossy(),
+                                ])
                                 .current_dir(r_root)
                                 .output();
                         }
@@ -572,7 +583,11 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
 /// The explicit one-way cutover (ADR-0004): activate mark-and-sweep,
 /// or drop legacy refcount files entirely with a loud warning that
 /// pre-cutover binaries must not use this store afterwards.
-pub fn migrate(activate: bool, drop_refs: bool, cfg: &RunConfig) -> Result<(MigrateData, Vec<Diagnostic>)> {
+pub fn migrate(
+    activate: bool,
+    drop_refs: bool,
+    cfg: &RunConfig,
+) -> Result<(MigrateData, Vec<Diagnostic>)> {
     let mut store = open_store()?;
     if drop_refs {
         eprintln!(

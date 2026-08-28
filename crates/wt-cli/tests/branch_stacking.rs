@@ -7,9 +7,9 @@
 
 mod common;
 
+use common::Fixture;
 use std::fs;
 use std::process::Command;
-use common::Fixture;
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -17,7 +17,11 @@ fn git(dir: &std::path::Path, args: &[&str]) -> String {
         .args(args)
         .output()
         .expect("git");
-    assert!(out.status.success(), "git failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -46,7 +50,10 @@ fn create_with_base_records_symbolic_ref_and_initial_commit_in_mirror() {
         .expect("valid mirror");
 
     assert_eq!(mirror.base_branch.as_deref(), Some("main"));
-    assert_eq!(mirror.base_commit.as_deref(), Some(initial_main_commit.as_str()));
+    assert_eq!(
+        mirror.base_commit.as_deref(),
+        Some(initial_main_commit.as_str())
+    );
 }
 
 #[test]
@@ -87,9 +94,18 @@ fn base_movement_detected_in_json_and_human_output() {
         .expect("BASE_BRANCH_MOVED diagnostic must be present");
 
     let msg = base_diag["message"].as_str().expect("message string");
-    assert!(msg.contains("main"), "message should mention base branch 'main': {msg}");
-    assert!(msg.contains(&initial_main_commit), "message should mention old commit: {msg}");
-    assert!(msg.contains(&new_main_commit), "message should mention new commit: {msg}");
+    assert!(
+        msg.contains("main"),
+        "message should mention base branch 'main': {msg}"
+    );
+    assert!(
+        msg.contains(&initial_main_commit),
+        "message should mention old commit: {msg}"
+    );
+    assert!(
+        msg.contains(&new_main_commit),
+        "message should mention new commit: {msg}"
+    );
 
     // 2. Run wt create with human output and check stderr for warning
     let out_human = Command::new(env!("CARGO_BIN_EXE_wt"))
@@ -101,7 +117,8 @@ fn base_movement_detected_in_json_and_human_output() {
     assert!(out_human.status.success());
     let stderr = String::from_utf8_lossy(&out_human.stderr);
     assert!(
-        stderr.contains("warning: Base branch 'main' has moved") || stderr.contains("warning: base branch 'main' has moved"),
+        stderr.contains("warning: Base branch 'main' has moved")
+            || stderr.contains("warning: base branch 'main' has moved"),
         "human output should surface warning to stderr: {stderr}"
     );
 
@@ -109,8 +126,11 @@ fn base_movement_detected_in_json_and_human_output() {
     let out_stacked = fx.wt(&["create", "feat-stacked", "--base", "feat-1", "--json"]);
     assert!(out_stacked.status.success());
     let stdout_stacked = String::from_utf8_lossy(&out_stacked.stdout);
-    let json_stacked: serde_json::Value = serde_json::from_str(stdout_stacked.trim()).expect("parse json");
-    let diags_stacked = json_stacked["diagnostics"].as_array().expect("diagnostics array");
+    let json_stacked: serde_json::Value =
+        serde_json::from_str(stdout_stacked.trim()).expect("parse json");
+    let diags_stacked = json_stacked["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
 
     let stacked_diag = diags_stacked
         .iter()

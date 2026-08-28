@@ -60,7 +60,7 @@ pub fn buffered_copy_file(from: &Path, to: &Path) -> io::Result<u64> {
     let mode = meta.permissions().mode() & 0o7777;
     let len = meta.len();
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     unsafe {
         libc::posix_fadvise(
             src.as_raw_fd(),
@@ -69,6 +69,10 @@ pub fn buffered_copy_file(from: &Path, to: &Path) -> io::Result<u64> {
             libc::POSIX_FADV_SEQUENTIAL,
         );
     }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        libc::fcntl(src.as_raw_fd(), libc::F_RDAHEAD, 1);
+    }
 
     let mut dest = fs::OpenOptions::new()
         .write(true)
@@ -76,7 +80,7 @@ pub fn buffered_copy_file(from: &Path, to: &Path) -> io::Result<u64> {
         .mode(mode)
         .open(to)?;
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     unsafe {
         libc::posix_fadvise(
             dest.as_raw_fd(),

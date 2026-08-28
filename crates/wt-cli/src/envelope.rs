@@ -165,6 +165,7 @@ pub struct ScratchData {
     pub cleaned_up: Option<bool>,
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

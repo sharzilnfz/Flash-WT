@@ -6,10 +6,10 @@
 
 mod common;
 
+use common::Fixture;
 use std::fs;
 use std::sync::Arc;
 use std::time::SystemTime;
-use common::Fixture;
 use wt_store::{WorktreeLease, current_process_start_time, lease_path, publish_lease, read_leases};
 
 const HEAVY_FILES: usize = 20;
@@ -23,7 +23,8 @@ fn dead_process_lease_is_reaped_by_sweep() {
     // 1. Create a bare scratch worktree
     let out = fx.wt_with_store(&["scratch", "--json"], store_dir.path());
     assert!(out.status.success());
-    let json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     let branch = json["data"]["branch"].as_str().unwrap().to_string();
     let lease_id = json["data"]["lease_id"].as_str().unwrap().to_string();
     let worktree_path = std::path::PathBuf::from(json["data"]["worktree_path"].as_str().unwrap());
@@ -47,16 +48,25 @@ fn dead_process_lease_is_reaped_by_sweep() {
     // 3. Run wt sweep
     let sweep_out = fx.wt_with_store(&["sweep", "--age", "0s", "--json"], store_dir.path());
     assert!(sweep_out.status.success());
-    let sweep_json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&sweep_out.stdout).trim()).unwrap();
+    let sweep_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&sweep_out.stdout).trim()).unwrap();
     assert_eq!(sweep_json["command"], "sweep");
     assert_eq!(sweep_json["status"], "ok");
     assert_eq!(sweep_json["data"]["leases_examined"], 1);
     assert_eq!(sweep_json["data"]["leases_reclaimed"], 1);
-    assert!(sweep_json["data"]["lease_bytes_reclaimed"].as_u64().unwrap() > 0);
+    assert!(
+        sweep_json["data"]["lease_bytes_reclaimed"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 
     // 4. Verify everything is reaped cleanly
     assert!(!lease_file.exists(), "lease file must be deleted");
-    assert!(!worktree_path.exists(), "worktree directory must be deleted");
+    assert!(
+        !worktree_path.exists(),
+        "worktree directory must be deleted"
+    );
     assert!(!git_dir.exists(), "gitdir in .git/worktrees must be pruned");
 
     // Git branch must be deleted
@@ -79,7 +89,8 @@ fn shifted_start_time_pid_reuse_is_reaped() {
 
     let out = fx.wt_with_store(&["scratch", "--json"], store_dir.path());
     assert!(out.status.success());
-    let json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     let branch = json["data"]["branch"].as_str().unwrap().to_string();
     let lease_id = json["data"]["lease_id"].as_str().unwrap().to_string();
     let worktree_path = std::path::PathBuf::from(json["data"]["worktree_path"].as_str().unwrap());
@@ -99,7 +110,8 @@ fn shifted_start_time_pid_reuse_is_reaped() {
 
     let sweep_out = fx.wt_with_store(&["sweep", "--age", "0s", "--json"], store_dir.path());
     assert!(sweep_out.status.success());
-    let sweep_json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&sweep_out.stdout).trim()).unwrap();
+    let sweep_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&sweep_out.stdout).trim()).unwrap();
     assert_eq!(sweep_json["data"]["leases_reclaimed"], 1);
 
     assert!(!worktree_path.exists());
@@ -114,7 +126,8 @@ fn expired_ttl_lease_is_reaped_even_with_live_pid() {
 
     let out = fx.wt_with_store(&["scratch", "--json"], store_dir.path());
     assert!(out.status.success());
-    let json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     let branch = json["data"]["branch"].as_str().unwrap().to_string();
     let lease_id = json["data"]["lease_id"].as_str().unwrap().to_string();
     let worktree_path = std::path::PathBuf::from(json["data"]["worktree_path"].as_str().unwrap());
@@ -138,7 +151,8 @@ fn expired_ttl_lease_is_reaped_even_with_live_pid() {
 
     let sweep_out = fx.wt_with_store(&["sweep", "--age", "0s", "--json"], store_dir.path());
     assert!(sweep_out.status.success());
-    let sweep_json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&sweep_out.stdout).trim()).unwrap();
+    let sweep_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&sweep_out.stdout).trim()).unwrap();
     assert_eq!(sweep_json["data"]["leases_reclaimed"], 1);
 
     assert!(!worktree_path.exists());
@@ -153,14 +167,16 @@ fn active_lease_is_protected_from_sweep() {
 
     let out = fx.wt_with_store(&["scratch", "--json"], store_dir.path());
     assert!(out.status.success());
-    let json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     let branch = json["data"]["branch"].as_str().unwrap().to_string();
     let worktree_path = std::path::PathBuf::from(json["data"]["worktree_path"].as_str().unwrap());
 
     // Sweep while lease is active
     let sweep_out = fx.wt_with_store(&["sweep", "--age", "0s", "--json"], store_dir.path());
     assert!(sweep_out.status.success());
-    let sweep_json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&sweep_out.stdout).trim()).unwrap();
+    let sweep_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&sweep_out.stdout).trim()).unwrap();
     assert_eq!(sweep_json["data"]["leases_examined"], 1);
     assert_eq!(sweep_json["data"]["leases_reclaimed"], 0);
     assert_eq!(sweep_json["data"]["lease_bytes_reclaimed"], 0);
@@ -180,12 +196,16 @@ fn sweep_reclaims_unreferenced_blobs_of_reaped_lease() {
     fs::write(fx.repo.join(".wtinclude"), "heavy/\n").unwrap();
 
     // Migrate to mark-sweep
-    let _ = fx.wt_with_store(&["store", "migrate", "--activate-mark-sweep"], store_dir.path());
+    let _ = fx.wt_with_store(
+        &["store", "migrate", "--activate-mark-sweep"],
+        store_dir.path(),
+    );
 
     // Create scratch worktree
     let out = fx.wt_with_store(&["scratch", "--json"], store_dir.path());
     assert!(out.status.success());
-    let json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     let branch = json["data"]["branch"].as_str().unwrap().to_string();
     let lease_id = json["data"]["lease_id"].as_str().unwrap().to_string();
     let worktree_path = std::path::PathBuf::from(json["data"]["worktree_path"].as_str().unwrap());
@@ -205,7 +225,8 @@ fn sweep_reclaims_unreferenced_blobs_of_reaped_lease() {
     // Sweep with age 0s
     let sweep_out = fx.wt_with_store(&["sweep", "--age", "0s", "--json"], store_dir.path());
     assert!(sweep_out.status.success());
-    let sweep_json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&sweep_out.stdout).trim()).unwrap();
+    let sweep_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&sweep_out.stdout).trim()).unwrap();
 
     assert_eq!(sweep_json["data"]["leases_reclaimed"], 1);
     assert_eq!(sweep_json["data"]["mirrors_removed"], 1);
@@ -251,7 +272,8 @@ fn concurrent_lease_sweeping_stress() {
 
     // Final sweep cleans up anything left
     let fx_final = Fixture::heavy_repo(5);
-    let final_sweep = fx_final.wt_with_store(&["sweep", "--age", "0s", "--json"], store_path.as_path());
+    let final_sweep =
+        fx_final.wt_with_store(&["sweep", "--age", "0s", "--json"], store_path.as_path());
     assert!(final_sweep.status.success());
     assert_eq!(read_leases(store_path.as_path()).len(), 0);
 }

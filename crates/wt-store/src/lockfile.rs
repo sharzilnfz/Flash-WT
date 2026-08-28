@@ -77,9 +77,7 @@ pub fn classify_lockfile(content: &str) -> DependencySafety {
         }
 
         // Mutable local reference protocols
-        if trimmed.contains("file:")
-            || trimmed.contains("link:")
-            || trimmed.contains("workspace:")
+        if trimmed.contains("file:") || trimmed.contains("link:") || trimmed.contains("workspace:")
         {
             return DependencySafety::Mutable;
         }
@@ -162,6 +160,7 @@ fn is_hex_commit_hash(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,7 +217,10 @@ mod tests {
     }
   }
 }"#;
-        assert_eq!(classify_lockfile(unpinned_branch), DependencySafety::Mutable);
+        assert_eq!(
+            classify_lockfile(unpinned_branch),
+            DependencySafety::Mutable
+        );
 
         let pinned_sha = r#"{
   "packages": {

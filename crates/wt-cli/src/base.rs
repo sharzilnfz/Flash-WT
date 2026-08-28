@@ -1,9 +1,9 @@
 //! Base branch tracking and movement diagnostics (ticket 02).
 
-use std::path::Path;
-use wt_store::DiskStore;
 use crate::envelope::Diagnostic;
 use crate::gitops;
+use std::path::Path;
+use wt_store::DiskStore;
 
 /// Check whether the base branch of the current worktree (or a referenced base) has moved
 /// since worktree initialization.
@@ -41,14 +41,18 @@ pub fn check_base_movement(
                     .worktree
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|name| name == target_base || name.ends_with(&format!("-{target_base}")));
+                    .is_some_and(|name| {
+                        name == target_base || name.ends_with(&format!("-{target_base}"))
+                    });
                 let is_matching_gitdir = m
                     .gitdir
                     .to_string_lossy()
                     .ends_with(&format!("/worktrees/{target_base}"));
 
                 if is_matching_worktree || is_matching_gitdir {
-                    if let (Some(parent_base), Some(parent_commit)) = (&m.base_branch, &m.base_commit) {
+                    if let (Some(parent_base), Some(parent_commit)) =
+                        (&m.base_branch, &m.base_commit)
+                    {
                         if let Ok(current_commit) = gitops::resolve_commit(repo_root, parent_base) {
                             if current_commit != *parent_commit {
                                 let diag = Diagnostic::warning(
@@ -95,6 +99,7 @@ pub fn check_worktree_base_movement(
     None
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,7 +112,11 @@ mod tests {
             .args(args)
             .output()
             .expect("git");
-        assert!(out.status.success(), "git failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -129,7 +138,17 @@ mod tests {
         let c1 = git(&repo, &["rev-parse", "HEAD"]);
 
         let worktree = temp.path().join("repo-feat");
-        git(&repo, &["worktree", "add", "-b", "feat", &worktree.to_string_lossy(), "main"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat",
+                &worktree.to_string_lossy(),
+                "main",
+            ],
+        );
         let git_dir = gitops::git_dir(&worktree).unwrap();
 
         let store = DiskStore::open(&store_dir).unwrap();
@@ -154,7 +173,10 @@ mod tests {
         let c2 = git(&repo, &["rev-parse", "HEAD"]);
         assert_ne!(c1, c2);
 
-        let mirror = store.read_worktree_mirror(&worktree, &git_dir).unwrap().expect("mirror exists");
+        let mirror = store
+            .read_worktree_mirror(&worktree, &git_dir)
+            .unwrap()
+            .expect("mirror exists");
         assert_eq!(mirror.base_branch.as_deref(), Some("main"));
         assert_eq!(mirror.base_commit.as_deref(), Some(c1.as_str()));
 

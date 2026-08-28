@@ -7,9 +7,9 @@
 
 mod common;
 
+use common::Fixture;
 use std::fs;
 use std::time::SystemTime;
-use common::Fixture;
 use wt_store::{WorktreeLease, lease_path};
 
 const HEAVY_FILES: usize = 20;
@@ -29,7 +29,11 @@ fn bare_scratch_generates_worktree_and_persists_lease() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = stdout.trim().lines().collect();
-    assert_eq!(lines.len(), 1, "stdout must be single-line NDJSON: {stdout}");
+    assert_eq!(
+        lines.len(),
+        1,
+        "stdout must be single-line NDJSON: {stdout}"
+    );
 
     let json: serde_json::Value = serde_json::from_str(lines[0]).expect("parse json");
     assert_eq!(json["command"], "scratch");
@@ -43,9 +47,18 @@ fn bare_scratch_generates_worktree_and_persists_lease() {
     let expires_at = data["expires_at"].as_u64().unwrap();
 
     assert!(branch.starts_with("scratch-"));
-    assert!(worktree_path.exists(), "worktree directory must exist on disk");
-    assert!(worktree_path.join("heavy").exists(), "heavy dir must be hydrated");
-    assert!(lease_file.exists(), "lease file must exist on disk: {lease_file:?}");
+    assert!(
+        worktree_path.exists(),
+        "worktree directory must exist on disk"
+    );
+    assert!(
+        worktree_path.join("heavy").exists(),
+        "heavy dir must be hydrated"
+    );
+    assert!(
+        lease_file.exists(),
+        "lease file must exist on disk: {lease_file:?}"
+    );
 
     // Verify lease file contents
     let lease_text = fs::read_to_string(&lease_file).unwrap();
@@ -87,7 +100,11 @@ fn scratch_run_executes_child_command_and_cleans_up_on_clean_exit() {
 
     // Verify no leftover lease files in store
     let leases = wt_store::read_leases(store_dir.path());
-    assert_eq!(leases.len(), 0, "lease file must be removed after clean exit");
+    assert_eq!(
+        leases.len(),
+        0,
+        "lease file must be removed after clean exit"
+    );
 }
 
 #[test]
@@ -149,14 +166,15 @@ fn scratch_with_ttl_persists_custom_expiration() {
     let out = fx.wt_with_store(&["scratch", "--ttl", "2h", "--json"], store_dir.path());
     assert!(out.status.success());
 
-    let json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     let branch = json["data"]["branch"].as_str().unwrap();
     let expires_at = json["data"]["expires_at"].as_u64().unwrap();
 
     // 2 hours = 7200 seconds
     assert!(expires_at >= now_secs + 7150 && expires_at <= now_secs + 7250);
 
-    let lease_path = lease_path(store_dir.path(), &json["data"]["lease_id"].as_str().unwrap());
+    let lease_path = lease_path(store_dir.path(), json["data"]["lease_id"].as_str().unwrap());
     assert!(lease_path.exists());
 
     let _ = fx.wt_with_store(&["remove", branch], store_dir.path());
@@ -171,7 +189,8 @@ fn scratch_with_custom_name() {
     let out = fx.wt_with_store(&["scratch", "custom-sandbox", "--json"], store_dir.path());
     assert!(out.status.success());
 
-    let json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     assert_eq!(json["data"]["branch"], "custom-sandbox");
     assert_eq!(json["data"]["lease_id"], "custom-sandbox");
 
@@ -204,4 +223,3 @@ fn scratch_run_json_output_envelope() {
     assert_eq!(json["data"]["exit_code"], 0);
     assert_eq!(json["data"]["cleaned_up"], true);
 }
-

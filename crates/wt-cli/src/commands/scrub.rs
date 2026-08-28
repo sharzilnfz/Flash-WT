@@ -67,17 +67,23 @@ pub fn run(dry_run: bool, cfg: &RunConfig) -> Result<(ScrubData, Vec<Diagnostic>
         scanned: report.scanned as u64,
         corrupt: report.corrupt.iter().map(|id| id.to_string()).collect(),
         deleted: report.deleted as u64,
-        snapshot_dirs_scanned: if report.snapshot_dirs_scanned > 0 || !report.corrupt_snapshots.is_empty() {
+        snapshot_dirs_scanned: if report.snapshot_dirs_scanned > 0
+            || !report.corrupt_snapshots.is_empty()
+        {
             Some(report.snapshot_dirs_scanned)
         } else {
             None
         },
-        corrupt_snapshots: if report.snapshot_dirs_scanned > 0 || !report.corrupt_snapshots.is_empty() {
+        corrupt_snapshots: if report.snapshot_dirs_scanned > 0
+            || !report.corrupt_snapshots.is_empty()
+        {
             Some(report.corrupt_snapshots.clone())
         } else {
             None
         },
-        snapshot_dirs_deleted: if report.snapshot_dirs_scanned > 0 || !report.corrupt_snapshots.is_empty() {
+        snapshot_dirs_deleted: if report.snapshot_dirs_scanned > 0
+            || !report.corrupt_snapshots.is_empty()
+        {
             Some(report.snapshot_dirs_deleted)
         } else {
             None

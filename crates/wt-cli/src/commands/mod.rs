@@ -22,7 +22,13 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
             manifest,
             dir,
         } => {
-            let (data, diags) = create::run(&name, base.as_deref(), manifest.as_deref(), dir.as_deref(), cfg)?;
+            let (data, diags) = create::run(
+                &name,
+                base.as_deref(),
+                manifest.as_deref(),
+                dir.as_deref(),
+                cfg,
+            )?;
             if cfg.json {
                 let env = Envelope::ok(command_name, data, diags);
                 println!(

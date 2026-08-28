@@ -86,6 +86,7 @@ pub enum Outcome {
 /// Attempt an O(1) fast-path snapshot hydration without walking or ingesting
 /// the heavy directory when a pinned lockfile SHA-256 matches a published
 /// snapshot manifest header and the heavy root mtime is unchanged.
+#[allow(clippy::too_many_arguments)]
 pub fn try_lockfile_hit(
     store: &mut DiskStore,
     repo_root: &Path,
@@ -99,19 +100,34 @@ pub fn try_lockfile_hit(
     #[cfg(target_os = "macos")]
     {
         try_lockfile_hit_impl(
-            store, repo_root, pattern, src_root, heavy_rel, dest_root, lockfile_hash, cfg,
+            store,
+            repo_root,
+            pattern,
+            src_root,
+            heavy_rel,
+            dest_root,
+            lockfile_hash,
+            cfg,
         )
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (
-            store, repo_root, pattern, src_root, heavy_rel, dest_root, lockfile_hash, cfg,
+            store,
+            repo_root,
+            pattern,
+            src_root,
+            heavy_rel,
+            dest_root,
+            lockfile_hash,
+            cfg,
         );
         Outcome::FellBack(None)
     }
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn try_lockfile_hit_impl(
     store: &mut DiskStore,
     repo_root: &Path,
@@ -131,7 +147,11 @@ fn try_lockfile_hit_impl(
     }
     let repo_key = repo_root.to_string_lossy().into_owned();
     let idx = wt_store::SelectionIndex::load(store.root());
-    let Some(rec) = idx.records.iter().find(|r| r.matches(&repo_key, pattern, heavy_rel)) else {
+    let Some(rec) = idx
+        .records
+        .iter()
+        .find(|r| r.matches(&repo_key, pattern, heavy_rel))
+    else {
         return Outcome::FellBack(None);
     };
 
@@ -228,15 +248,29 @@ pub fn hydrate(
     #[cfg(target_os = "macos")]
     {
         hydrate_impl(
-            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root,
-            lockfile_hash, cfg,
+            store,
+            ingested,
+            repo_root,
+            pattern,
+            src_root,
+            heavy_rel,
+            dest_root,
+            lockfile_hash,
+            cfg,
         )
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (
-            store, ingested, repo_root, pattern, src_root, heavy_rel, dest_root,
-            lockfile_hash, cfg,
+            store,
+            ingested,
+            repo_root,
+            pattern,
+            src_root,
+            heavy_rel,
+            dest_root,
+            lockfile_hash,
+            cfg,
         );
         // Linux v1: no recursive-clone primitive, so whole-directory
         // snapshots stay a macOS feature. The gate is a no-op.
@@ -278,10 +312,11 @@ fn hydrate_impl(
         }
     }
     let total_size: u64 = unique_blobs.values().sum();
-    let manifest = match Manifest::new_with_lockfile_and_size(entries, lockfile_hash.copied(), total_size) {
-        Ok(m) => m,
-        Err(msg) => return Outcome::Failed(format!("cannot build snapshot manifest: {msg}")),
-    };
+    let manifest =
+        match Manifest::new_with_lockfile_and_size(entries, lockfile_hash.copied(), total_size) {
+            Ok(m) => m,
+            Err(msg) => return Outcome::Failed(format!("cannot build snapshot manifest: {msg}")),
+        };
 
     let dest_heavy = dest_root.join(heavy_rel);
 

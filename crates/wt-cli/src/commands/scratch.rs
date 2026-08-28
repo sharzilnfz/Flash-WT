@@ -133,19 +133,18 @@ pub fn run(
         .as_secs();
     let expires_at = now_secs.saturating_add(ttl_secs);
 
-    let pid = if let Some(owner) = std::env::var("WT_OWNER_PID").ok().and_then(|s| s.parse::<u32>().ok()) {
+    let pid = if let Some(owner) = std::env::var("WT_OWNER_PID")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+    {
         owner
     } else if run_cmd.is_some() {
         std::process::id()
     } else {
         let ppid = unsafe { libc::getppid() } as u32;
-        if ppid > 1 {
-            ppid
-        } else {
-            std::process::id()
-        }
+        if ppid > 1 { ppid } else { std::process::id() }
     };
-    let start_time = wt_store::process_start_time(pid).unwrap_or_else(|| current_process_start_time());
+    let start_time = wt_store::process_start_time(pid).unwrap_or_else(current_process_start_time);
     let canon_worktree = dest.canonicalize().unwrap_or_else(|_| dest.clone());
     let canon_gitdir = git_dir.canonicalize().unwrap_or_else(|_| git_dir.clone());
 

@@ -143,10 +143,22 @@ fn lockfile_parser_safety_classification() {
     use wt_store::lockfile::{DependencySafety, classify_lockfile};
 
     assert_eq!(classify_lockfile(PINNED_LOCKFILE), DependencySafety::Pinned);
-    assert_eq!(classify_lockfile(MUTABLE_FILE_LOCKFILE), DependencySafety::Mutable);
-    assert_eq!(classify_lockfile(MUTABLE_LINK_LOCKFILE), DependencySafety::Mutable);
-    assert_eq!(classify_lockfile(MUTABLE_WORKSPACE_LOCKFILE), DependencySafety::Mutable);
-    assert_eq!(classify_lockfile(MUTABLE_UNPINNED_GIT_LOCKFILE), DependencySafety::Mutable);
+    assert_eq!(
+        classify_lockfile(MUTABLE_FILE_LOCKFILE),
+        DependencySafety::Mutable
+    );
+    assert_eq!(
+        classify_lockfile(MUTABLE_LINK_LOCKFILE),
+        DependencySafety::Mutable
+    );
+    assert_eq!(
+        classify_lockfile(MUTABLE_WORKSPACE_LOCKFILE),
+        DependencySafety::Mutable
+    );
+    assert_eq!(
+        classify_lockfile(MUTABLE_UNPINNED_GIT_LOCKFILE),
+        DependencySafety::Mutable
+    );
 }
 
 #[test]
@@ -158,11 +170,24 @@ fn lockfiles_with_mutable_dependencies_bypass_fast_path() {
         (MUTABLE_UNPINNED_GIT_LOCKFILE, "unpinned_git"),
     ] {
         let fx = LockfileFixture::new(lock_content);
-        let out = fx.wt(&["create", &format!("wt-{label}")], &[("WT_SNAPSHOTS", "1")], &format!("dest-{label}"));
-        assert!(out.status.success(), "create failed for {label}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = fx.wt(
+            &["create", &format!("wt-{label}")],
+            &[("WT_SNAPSHOTS", "1")],
+            &format!("dest-{label}"),
+        );
+        assert!(
+            out.status.success(),
+            "create failed for {label}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
-        let dest_file = fx.worktree_path(&format!("dest-{label}")).join("node_modules/pkg/lib/index.js");
-        assert!(dest_file.is_file(), "file must be hydrated via fallback ladder for {label}");
+        let dest_file = fx
+            .worktree_path(&format!("dest-{label}"))
+            .join("node_modules/pkg/lib/index.js");
+        assert!(
+            dest_file.is_file(),
+            "file must be hydrated via fallback ladder for {label}"
+        );
     }
 }
 
@@ -170,12 +195,22 @@ fn lockfiles_with_mutable_dependencies_bypass_fast_path() {
 fn pinned_lockfile_evaluates_sha256_and_manifest_header() {
     let fx = LockfileFixture::new(PINNED_LOCKFILE);
     let out = fx.wt(&["create", "one"], &[("WT_SNAPSHOTS", "1")], "dest-one");
-    assert!(out.status.success(), "create one failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "create one failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Second create with identical pinned lockfile
     let out2 = fx.wt(&["create", "two"], &[("WT_SNAPSHOTS", "1")], "dest-two");
-    assert!(out2.status.success(), "create two failed: {}", String::from_utf8_lossy(&out2.stderr));
-    let dest_file = fx.worktree_path("dest-two").join("node_modules/pkg/lib/index.js");
+    assert!(
+        out2.status.success(),
+        "create two failed: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let dest_file = fx
+        .worktree_path("dest-two")
+        .join("node_modules/pkg/lib/index.js");
     assert!(dest_file.is_file());
 }
 
@@ -183,14 +218,24 @@ fn pinned_lockfile_evaluates_sha256_and_manifest_header() {
 fn lockfile_content_change_invalidates_fast_path() {
     let fx = LockfileFixture::new(PINNED_LOCKFILE);
     let out = fx.wt(&["create", "one"], &[("WT_SNAPSHOTS", "1")], "dest-one");
-    assert!(out.status.success(), "create one failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "create one failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Modify lockfile
     fs::write(fx.repo.join("package-lock.json"), PINNED_LOCKFILE_V2).unwrap();
 
     let out2 = fx.wt(&["create", "two"], &[("WT_SNAPSHOTS", "1")], "dest-two");
-    assert!(out2.status.success(), "create two failed: {}", String::from_utf8_lossy(&out2.stderr));
-    let dest_file = fx.worktree_path("dest-two").join("node_modules/pkg/lib/index.js");
+    assert!(
+        out2.status.success(),
+        "create two failed: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let dest_file = fx
+        .worktree_path("dest-two")
+        .join("node_modules/pkg/lib/index.js");
     assert!(dest_file.is_file());
 }
 
@@ -198,17 +243,30 @@ fn lockfile_content_change_invalidates_fast_path() {
 fn directory_timestamp_change_triggers_revalidation() {
     let fx = LockfileFixture::new(PINNED_LOCKFILE);
     let out = fx.wt(&["create", "one"], &[("WT_SNAPSHOTS", "1")], "dest-one");
-    assert!(out.status.success(), "create one failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "create one failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Modify root directory mtime
     let heavy = fx.repo.join("node_modules");
     let future = std::time::SystemTime::now() + std::time::Duration::from_secs(100);
-    let f = fs::OpenOptions::new().write(true).open(heavy.join("pkg/lib/index.js")).unwrap();
-    f.set_times(fs::FileTimes::new().set_modified(future)).unwrap();
+    let f = fs::OpenOptions::new()
+        .write(true)
+        .open(heavy.join("pkg/lib/index.js"))
+        .unwrap();
+    f.set_times(fs::FileTimes::new().set_modified(future))
+        .unwrap();
 
     let out2 = fx.wt(&["create", "two"], &[("WT_SNAPSHOTS", "1")], "dest-two");
-    assert!(out2.status.success(), "create two failed: {}", String::from_utf8_lossy(&out2.stderr));
-    let dest_file = fx.worktree_path("dest-two").join("node_modules/pkg/lib/index.js");
+    assert!(
+        out2.status.success(),
+        "create two failed: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let dest_file = fx
+        .worktree_path("dest-two")
+        .join("node_modules/pkg/lib/index.js");
     assert!(dest_file.is_file());
 }
-

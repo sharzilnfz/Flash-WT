@@ -60,8 +60,11 @@ fn create(
     // Prefer creating the branch from start_point; an existing branch falls
     // back to checking it out directly.
     let dest_text = dest.to_string_lossy().into_owned();
-    gitops::run(&root, &["worktree", "add", "-b", name, &dest_text, start_point])
-        .or_else(|_| gitops::run(&root, &["worktree", "add", &dest_text, name]))?;
+    gitops::run(
+        &root,
+        &["worktree", "add", "-b", name, &dest_text, start_point],
+    )
+    .or_else(|_| gitops::run(&root, &["worktree", "add", &dest_text, name]))?;
     timings.git_worktree_ms = started.elapsed().as_millis();
 
     if !cfg.json {
@@ -253,9 +256,9 @@ fn create(
 
     let hydration_method = if total_files == 0 {
         "none"
-    } else if snapshot_hashes.len() == dirs.len() {
-        "clone"
-    } else if strategy == "copy-on-write" && total_copied == 0 {
+    } else if snapshot_hashes.len() == dirs.len()
+        || (strategy == "copy-on-write" && total_copied == 0)
+    {
         "clone"
     } else if strategy == "hardlink" && total_copied == 0 {
         "hardlink"

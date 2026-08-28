@@ -260,12 +260,8 @@ impl DiskStore {
         for (rel, mode) in &dir_modes {
             let dest = dir.join(rel);
             fs::create_dir_all(&dest)
-                .and_then(|()| {
-                    fs::set_permissions(&dest, fs::Permissions::from_mode(*mode))
-                })
-                .map_err(|e| {
-                    BuildError::Fatal(format!("cannot create {}: {e}", dest.display()))
-                })?;
+                .and_then(|()| fs::set_permissions(&dest, fs::Permissions::from_mode(*mode)))
+                .map_err(|e| BuildError::Fatal(format!("cannot create {}: {e}", dest.display())))?;
         }
         timings.link_train_ms += stage.elapsed().as_millis() as u64;
 
@@ -275,7 +271,10 @@ impl DiskStore {
         for entry in &manifest.entries {
             if entry.kind != EntryKind::Dir {
                 let (parent, filename) = split_parent_and_filename(&entry.rel);
-                parent_groups.entry(parent).or_default().push((entry, filename));
+                parent_groups
+                    .entry(parent)
+                    .or_default()
+                    .push((entry, filename));
             }
         }
 
@@ -402,6 +401,7 @@ impl DiskStore {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn place_entry_relative(
         &self,
         dir_fd: libc::c_int,
@@ -427,8 +427,7 @@ impl DiskStore {
                 let c_target = CString::new(target.as_bytes())
                     .map_err(|_| malformed_entry(entry, "NUL in symlink target"))?;
                 let stage = Instant::now();
-                let rc =
-                    unsafe { libc::symlinkat(c_target.as_ptr(), dir_fd, c_filename.as_ptr()) };
+                let rc = unsafe { libc::symlinkat(c_target.as_ptr(), dir_fd, c_filename.as_ptr()) };
                 if rc != 0 {
                     let err = io::Error::last_os_error();
                     return Err(BuildError::Fatal(format!(
@@ -500,14 +499,11 @@ impl DiskStore {
                     )));
                 }
                 let stat = unsafe { stat_buf.assume_init() };
-                if (stat.st_mode as u32) & 0o7777 != entry.mode {
+                #[allow(clippy::unnecessary_cast)]
+                let current_mode = (stat.st_mode as u32) & 0o7777;
+                if current_mode != entry.mode {
                     let rc = unsafe {
-                        libc::fchmodat(
-                            dir_fd,
-                            c_filename.as_ptr(),
-                            entry.mode as libc::mode_t,
-                            0,
-                        )
+                        libc::fchmodat(dir_fd, c_filename.as_ptr(), entry.mode as libc::mode_t, 0)
                     };
                     if rc != 0 {
                         let err = io::Error::last_os_error();

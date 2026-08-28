@@ -218,7 +218,8 @@ fn bulk_read_dir(
     };
     with_scratch_buffer(|buf| {
         loop {
-            let n = unsafe { getattrlistbulk(fd, &attr_list, buf.as_mut_ptr().cast(), buf.len(), 0) };
+            let n =
+                unsafe { getattrlistbulk(fd, &attr_list, buf.as_mut_ptr().cast(), buf.len(), 0) };
             if n == 0 {
                 return Ok(()); // end of directory
             }
@@ -264,9 +265,13 @@ pub fn parse_bulk_buffer(
                 "getattrlistbulk returned a malformed record length",
             ));
         }
-        if offset.checked_add(record_len).map_or(true, |end| end > buf.len()) {
-            return Err(io::Error::other(
-                "getattrlistbulk record length exceeds buffer bounds",
+        if offset
+            .checked_add(record_len)
+            .is_none_or(|end| end > buf.len())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bulk record length exceeds buffer bounds",
             ));
         }
         let record = &buf[offset..offset + record_len];
@@ -297,7 +302,10 @@ pub fn parse_record(
 
     // Anything beyond what we asked for means the layout assumptions
     // above are void; bail into the portable fallback.
-    if common & !REQUEST_COMMON != 0 || volattr != 0 || dirattr != 0 || filebits & !REQUEST_FILE != 0
+    if common & !REQUEST_COMMON != 0
+        || volattr != 0
+        || dirattr != 0
+        || filebits & !REQUEST_FILE != 0
     {
         return Err(io::Error::other("unexpected attributes in attrbuffer"));
     }
@@ -328,7 +336,10 @@ pub fn parse_record(
         Some(s) if s >= 24 => s as usize,
         _ => return Err(io::Error::other("getattrlistbulk invalid name offset")),
     };
-    if name_start.checked_add(name_len).map_or(true, |end| end > record.len()) {
+    if name_start
+        .checked_add(name_len)
+        .is_none_or(|end| end > record.len())
+    {
         return Err(io::Error::other(
             "getattrlistbulk name bytes exceed record length",
         ));
@@ -396,7 +407,9 @@ pub fn parse_record(
 
     // Trailing NUL verification
     if record[name_start + name_len - 1] != 0 {
-        return Err(io::Error::other("getattrlistbulk name missing trailing NUL"));
+        return Err(io::Error::other(
+            "getattrlistbulk name missing trailing NUL",
+        ));
     }
     let raw_name = &record[name_start..name_start + name_len - 1];
 
@@ -474,6 +487,7 @@ fn read_i64(buf: &[u8], at: usize) -> i64 {
     ])
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,7 +524,7 @@ mod tests {
         // pos 52: accessmask (4 bytes) -> pos 56
         // pos 56: datalength (8 bytes if filebits != 0) -> pos 64 (if file) or pos 56 (if non-file)
         let fixed_len = if filebits != 0 { 64 } else { 56 };
-        let dataoffset = (fixed_len - 24) as i32;
+        let dataoffset: i32 = fixed_len - 24;
         let name_bytes = name.as_bytes();
         let name_len = (name_bytes.len() + 1) as u32;
 
@@ -561,7 +575,10 @@ mod tests {
             ptr2 = buf.as_ptr();
         });
 
-        assert_eq!(ptr1, ptr2, "scratch buffer is reused across calls without reallocating");
+        assert_eq!(
+            ptr1, ptr2,
+            "scratch buffer is reused across calls without reallocating"
+        );
     }
 
     #[test]
@@ -760,4 +777,3 @@ mod tests {
         assert!(parse_bulk_buffer(&unexp_attr, 1, dir, "", &mut out, &mut stack).is_err());
     }
 }
-

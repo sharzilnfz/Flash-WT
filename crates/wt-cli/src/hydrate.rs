@@ -364,15 +364,6 @@ pub struct MaterializeReport {
     pub place_ms: u128,
 }
 
-/// Which placement strategy this run uses, from the startup policy:
-///
-/// - `ForceByteCopy` (`WT_NO_HARDLINK` on): forced byte copies (the
-///   escape hatch). Kept for compatibility with the ticket 07 flag.
-/// - `Hardlink` (`WT_HARDLINK` on): experimental hardlinked
-///   materialization — maximum space sharing, but linked inodes are
-///   made read-only, so tools that rewrite files in place fail loudly.
-/// - `Default`: per-file CoW clones on macOS; byte copies elsewhere
-///   until Linux reflink is validated for store materialization.
 /// Which placement strategy this run uses, from the startup policy and
 /// probed filesystem capabilities:
 ///
@@ -515,7 +506,8 @@ pub fn materialize(
                             let parent = match dest.parent() {
                                 Some(p) => p,
                                 None => {
-                                    let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
+                                    let mut slot =
+                                        err_slot.lock().unwrap_or_else(|p| p.into_inner());
                                     if slot.is_none() {
                                         *slot = Some(Error::Store(format!("{rel} has no parent")));
                                     }
@@ -532,9 +524,11 @@ pub fn materialize(
                             match place(backend.as_deref(), &src, &dest) {
                                 Ok(placed) => placed,
                                 Err(e) => {
-                                    let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
+                                    let mut slot =
+                                        err_slot.lock().unwrap_or_else(|p| p.into_inner());
                                     if slot.is_none() {
-                                        *slot = Some(Error::Store(format!("materialize {rel}: {e}")));
+                                        *slot =
+                                            Some(Error::Store(format!("materialize {rel}: {e}")));
                                     }
                                     break;
                                 }
@@ -581,10 +575,16 @@ pub fn materialize(
                 }
 
                 total_copied.fetch_add(worker_copied, std::sync::atomic::Ordering::Relaxed);
-                total_bytes_shared.fetch_add(worker_bytes_shared, std::sync::atomic::Ordering::Relaxed);
-                total_bytes_copied.fetch_add(worker_bytes_copied, std::sync::atomic::Ordering::Relaxed);
-                total_verify_ms.fetch_add(worker_verify_ms as u64, std::sync::atomic::Ordering::Relaxed);
-                total_place_ms.fetch_add(worker_place_ms as u64, std::sync::atomic::Ordering::Relaxed);
+                total_bytes_shared
+                    .fetch_add(worker_bytes_shared, std::sync::atomic::Ordering::Relaxed);
+                total_bytes_copied
+                    .fetch_add(worker_bytes_copied, std::sync::atomic::Ordering::Relaxed);
+                total_verify_ms.fetch_add(
+                    worker_verify_ms as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                total_place_ms
+                    .fetch_add(worker_place_ms as u64, std::sync::atomic::Ordering::Relaxed);
             });
         }
     });

@@ -33,7 +33,11 @@ fn thread_local_scratch_buffer_reused_without_allocation() {
     for _ in 0..500 {
         bulkwalk::with_scratch_buffer(|buf| {
             assert_eq!(buf.len(), bulkwalk::INITIAL_BUFFER_CAPACITY);
-            assert_eq!(buf.as_ptr(), initial_ptr, "scratch buffer pointer must remain stable");
+            assert_eq!(
+                buf.as_ptr(),
+                initial_ptr,
+                "scratch buffer pointer must remain stable"
+            );
         });
     }
 }

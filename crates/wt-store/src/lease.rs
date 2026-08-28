@@ -91,9 +91,15 @@ impl WorktreeLease {
         if gitdir.as_os_str().is_empty() {
             return Err("empty gitdir path in lease".into());
         }
-        let pid = fields[4].parse::<u32>().map_err(|e| format!("bad pid: {e}"))?;
-        let start_time = fields[5].parse::<u64>().map_err(|e| format!("bad start_time: {e}"))?;
-        let expires_at = fields[6].parse::<u64>().map_err(|e| format!("bad expires_at: {e}"))?;
+        let pid = fields[4]
+            .parse::<u32>()
+            .map_err(|e| format!("bad pid: {e}"))?;
+        let start_time = fields[5]
+            .parse::<u64>()
+            .map_err(|e| format!("bad start_time: {e}"))?;
+        let expires_at = fields[6]
+            .parse::<u64>()
+            .map_err(|e| format!("bad expires_at: {e}"))?;
 
         Ok(Self {
             id: id.to_string(),
@@ -162,7 +168,11 @@ pub fn read_all(root: &Path) -> Vec<ReadLease> {
         if path.extension() != Some(std::ffi::OsStr::new("lease")) {
             continue;
         }
-        let Some(id) = path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()) else {
+        let Some(id) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+        else {
             continue;
         };
         let (modified, text) = match (fs::metadata(&path), fs::read_to_string(&path)) {

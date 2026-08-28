@@ -248,7 +248,8 @@ fn parallel_sharded_scrubbing_detects_multiple_blob_corruptions_and_emits_json()
         }
         fs::write(blob, &bytes).unwrap();
         let f = fs::OpenOptions::new().write(true).open(blob).unwrap();
-        f.set_times(fs::FileTimes::new().set_modified(mtime)).unwrap();
+        f.set_times(fs::FileTimes::new().set_modified(mtime))
+            .unwrap();
     }
 
     // Dry run with --json
@@ -311,7 +312,7 @@ fn scrub_detects_and_purges_snapshot_with_missing_complete_marker() {
     let dry_json: serde_json::Value =
         serde_json::from_str(String::from_utf8_lossy(&dry_out.stdout).trim()).unwrap();
     let corrupt_snaps = dry_json["data"]["corrupt_snapshots"].as_array().unwrap();
-    assert!(corrupt_snaps.len() >= 1);
+    assert!(!corrupt_snaps.is_empty());
     assert_eq!(dry_json["data"]["snapshot_dirs_deleted"], 0);
     assert!(snap.exists());
 
@@ -365,4 +366,3 @@ fn scrub_detects_and_purges_snapshot_with_corrupted_file_tree() {
     assert!(real_json["data"]["snapshot_dirs_deleted"].as_u64().unwrap() >= 1);
     assert!(!snap.exists());
 }
-

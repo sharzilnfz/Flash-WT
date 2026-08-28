@@ -322,10 +322,17 @@ impl DiskStore {
         let mut out = Vec::new();
         let shards = fs::read_dir(self.root.join("objects")).map_err(Error::Io)?;
         for shard in shards.flatten() {
-            if !shard.file_type().map_err(Error::Io)?.is_dir() {
+            let Ok(ft) = shard.file_type() else {
+                continue;
+            };
+            if !ft.is_dir() {
                 continue;
             }
-            let blobs = fs::read_dir(shard.path()).map_err(Error::Io)?;
+            let blobs = match fs::read_dir(shard.path()) {
+                Ok(b) => b,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(Error::Io(e)),
+            };
             for blob in blobs.flatten() {
                 // Rebuild "<shard><name>" and parse it back to bytes.
                 let hex = format!(
@@ -605,11 +612,13 @@ mod tests {
 
         #[cfg(target_os = "linux")]
         {
-            assert!(caps.fs_type > 0, "filesystem magic must be reported on linux");
+            assert!(
+                caps.fs_type > 0,
+                "filesystem magic must be reported on linux"
+            );
         }
 
         let direct_caps = probe_fs(temp.path()).expect("probe_fs");
         assert_eq!(caps, direct_caps);
     }
 }
-

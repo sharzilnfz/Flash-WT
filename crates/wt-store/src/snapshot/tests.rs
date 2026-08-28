@@ -1003,9 +1003,7 @@ fn subtree_partitioned_parallel_snapshot_construction_integrity() {
     }
 
     let manifest = Manifest::new(entries.clone()).unwrap();
-    let receipt = store
-        .publish_snapshot_with_timing(entries, false)
-        .unwrap();
+    let receipt = store.publish_snapshot_with_timing(entries, false).unwrap();
     assert_eq!(receipt.outcome, PublishOutcome::Published);
 
     // Verify tree integrity
@@ -1038,10 +1036,7 @@ fn subtree_partitioned_parallel_snapshot_construction_integrity() {
         let sym_path = tree_path.join(format!("{dir_name}/link_to_file0"));
         let md = fs::symlink_metadata(&sym_path).unwrap();
         assert!(md.file_type().is_symlink());
-        assert_eq!(
-            fs::read_link(&sym_path).unwrap(),
-            Path::new("file_00.txt")
-        );
+        assert_eq!(fs::read_link(&sym_path).unwrap(), Path::new("file_00.txt"));
     }
 
     store.flush().unwrap();
@@ -1123,15 +1118,17 @@ fn large_scale_subtree_partitioned_parallel_ingestion_integrity() {
         for file_idx in 0..50 {
             let file_rel = format!("{dir_rel}/file_{file_idx:02}.txt");
             let mode = if file_idx == 0 { 0o755 } else { 0o644 };
-            let blob = if file_idx == 0 { exec_blob } else { shared_blob };
+            let blob = if file_idx == 0 {
+                exec_blob
+            } else {
+                shared_blob
+            };
             entries.push(SnapshotEntry::file(&file_rel, blob, mode));
         }
     }
 
     let manifest = Manifest::new(entries.clone()).unwrap();
-    let receipt = store
-        .publish_snapshot_with_timing(entries, false)
-        .unwrap();
+    let receipt = store.publish_snapshot_with_timing(entries, false).unwrap();
     assert_eq!(receipt.outcome, PublishOutcome::Published);
 
     let tree_path = snapshot_tree_path(store.root(), &manifest.hash);
@@ -1144,7 +1141,11 @@ fn large_scale_subtree_partitioned_parallel_ingestion_integrity() {
             let p = tree_path.join(&file_rel);
             assert!(p.is_file());
             let md = fs::metadata(&p).unwrap();
-            let expected_mode = if file_idx == 0 { EXEC_FILE_MODE } else { PLAIN_FILE_MODE };
+            let expected_mode = if file_idx == 0 {
+                EXEC_FILE_MODE
+            } else {
+                PLAIN_FILE_MODE
+            };
             assert_eq!(md.permissions().mode() & 0o777, expected_mode);
         }
     }
@@ -1199,7 +1200,8 @@ fn manifest_header_total_bytes_round_trips_and_records_publish_size() {
     ];
 
     let expected_unique_size = 15 + 30; // length of b1 (15 bytes) and b2 (30 bytes)
-    let manifest = Manifest::new_with_lockfile_and_size(entries.clone(), None, expected_unique_size).unwrap();
+    let manifest =
+        Manifest::new_with_lockfile_and_size(entries.clone(), None, expected_unique_size).unwrap();
     assert_eq!(manifest.total_size, expected_unique_size);
 
     let serialized = manifest.serialize();
@@ -1211,12 +1213,9 @@ fn manifest_header_total_bytes_round_trips_and_records_publish_size() {
     assert_eq!(parsed.entries, manifest.entries);
 
     // Publishing computes unique uncompressed blob size totals automatically
-    let receipt = store
-        .publish_snapshot(entries, false)
-        .unwrap();
+    let receipt = store.publish_snapshot(entries, false).unwrap();
     assert_eq!(receipt, PublishOutcome::Published);
 
     let loaded = store.find_snapshot(&manifest.hash).unwrap();
     assert_eq!(loaded.total_size, expected_unique_size);
 }
-

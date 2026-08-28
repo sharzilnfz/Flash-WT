@@ -276,13 +276,15 @@ impl Manifest {
             match fields[i] {
                 "lockfile-sha256" => {
                     if i + 1 < fields.len() {
-                        lockfile_hash = Some(
-                            ContentId::from_hex(fields[i + 1])
-                                .ok_or_else(|| format!("malformed lockfile hash {:?}", fields[i + 1]))?,
-                        );
+                        lockfile_hash =
+                            Some(ContentId::from_hex(fields[i + 1]).ok_or_else(|| {
+                                format!("malformed lockfile hash {:?}", fields[i + 1])
+                            })?);
                         i += 2;
                     } else {
-                        return Err(format!("missing value for lockfile-sha256 in header {header:?}"));
+                        return Err(format!(
+                            "missing value for lockfile-sha256 in header {header:?}"
+                        ));
                     }
                 }
                 "total-bytes" | "size-bytes" => {
@@ -292,7 +294,9 @@ impl Manifest {
                             .map_err(|_| format!("malformed total size {:?}", fields[i + 1]))?;
                         i += 2;
                     } else {
-                        return Err(format!("missing value for total-bytes in header {header:?}"));
+                        return Err(format!(
+                            "missing value for total-bytes in header {header:?}"
+                        ));
                     }
                 }
                 _ => {

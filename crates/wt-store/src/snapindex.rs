@@ -385,8 +385,12 @@ impl SnapshotLru {
         for line in complete.split('\n').filter(|l| !l.is_empty()) {
             if let Some(entry) = parse_journal_line(line) {
                 match entry {
-                    JournalEntry::Publish { hash, timestamp, .. }
-                    | JournalEntry::Hit { hash, timestamp, .. }
+                    JournalEntry::Publish {
+                        hash, timestamp, ..
+                    }
+                    | JournalEntry::Hit {
+                        hash, timestamp, ..
+                    }
                     | JournalEntry::Touch { hash, timestamp } => {
                         self.record(&hash, timestamp);
                     }
@@ -565,11 +569,7 @@ pub fn compact_journal(root: &Path) -> io::Result<()> {
     }
     let _lock = MetadataLock::acquire(root)?;
     let j_path = journal_path(root);
-    let mut journal_file = match fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&j_path)
-    {
+    let mut journal_file = match fs::OpenOptions::new().read(true).write(true).open(&j_path) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
@@ -994,7 +994,11 @@ mod tests {
         assert!(!lru.entries.is_empty(), "LRU should have recorded entries");
 
         let idx = SelectionIndex::load_canonical(&store);
-        assert_eq!(idx.records.len(), num_threads, "All thread keys must be present in index");
+        assert_eq!(
+            idx.records.len(),
+            num_threads,
+            "All thread keys must be present in index"
+        );
     }
 
     #[test]

@@ -24,9 +24,9 @@ pub mod mirror;
 pub use disk::{DiskStore, FsCapabilities, probe_fs};
 pub use gc::{GcMode, MarkReport, MarkSwept};
 pub use lease::{
-    DEFAULT_LEASE_TTL_SECS, ReadLease, WorktreeLease, current_process_start_time,
-    is_lease_expired, is_process_alive, lease_path, process_start_time,
-    publish as publish_lease, read_all as read_leases, remove as remove_lease,
+    DEFAULT_LEASE_TTL_SECS, ReadLease, WorktreeLease, current_process_start_time, is_lease_expired,
+    is_process_alive, lease_path, process_start_time, publish as publish_lease,
+    read_all as read_leases, remove as remove_lease,
 };
 pub use lockfile::{DependencySafety, classify_lockfile, find_lockfile, hash_lockfile};
 pub use mirror::{
@@ -36,8 +36,8 @@ pub use mirror::{
 pub use scrub::ScrubReport;
 pub use snapdiff::SnapshotDiff;
 pub use snapindex::{
-    MAX_RING, MetadataLock, SelectionIndex, SelectionRecord, SnapshotLru,
-    compact_journal, journal_path, lru_path, record_hit as record_snapshot_hit,
+    MAX_RING, MetadataLock, SelectionIndex, SelectionRecord, SnapshotLru, compact_journal,
+    journal_path, lru_path, record_hit as record_snapshot_hit,
     record_publish as record_snapshot_publish, record_snapshot_lru_touch, select_old_snapshot,
 };
 pub use snapshot::{

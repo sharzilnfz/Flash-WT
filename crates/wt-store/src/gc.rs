@@ -143,7 +143,11 @@ impl DiskStore {
     }
 
     /// Read the store mirror for a canonicalized (worktree, gitdir) identity.
-    pub fn read_worktree_mirror(&self, worktree: &Path, gitdir: &Path) -> Result<Option<mirror::StoreMirror>> {
+    pub fn read_worktree_mirror(
+        &self,
+        worktree: &Path,
+        gitdir: &Path,
+    ) -> Result<Option<mirror::StoreMirror>> {
         let worktree =
             fs::canonicalize(worktree).map_err(|e| Error::Io(path_error("worktree", e)))?;
         let gitdir = fs::canonicalize(gitdir).map_err(|e| Error::Io(path_error("gitdir", e)))?;
@@ -303,8 +307,12 @@ impl DiskStore {
             outcome.reclaimed += 1;
         }
 
-        let (swept, cap_evicted) =
-            self.sweep_snapshots(&marks.referenced_snapshots, cutoff, snapshot_cap, max_snapshot_bytes)?;
+        let (swept, cap_evicted) = self.sweep_snapshots(
+            &marks.referenced_snapshots,
+            cutoff,
+            snapshot_cap,
+            max_snapshot_bytes,
+        )?;
         outcome.snapshot_dirs_removed = swept + cap_evicted;
         outcome.snapshot_cap_evicted = cap_evicted;
         Ok(outcome)

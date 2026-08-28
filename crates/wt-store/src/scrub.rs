@@ -84,8 +84,8 @@ fn verify_snapshot_dir(dir: &Path, name: &str) -> std::result::Result<(), String
     };
 
     let manifest_path = dir.join("manifest.tsv");
-    let manifest_text = fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("cannot read manifest.tsv: {e}"))?;
+    let manifest_text =
+        fs::read_to_string(&manifest_path).map_err(|e| format!("cannot read manifest.tsv: {e}"))?;
     let manifest = Manifest::parse(&manifest_text)
         .map_err(|reason| format!("unparseable manifest: {reason}"))?;
     if manifest.hash != hash {
@@ -188,7 +188,7 @@ impl DiskStore {
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
-        let num_workers = num_cpus.min(256).max(1);
+        let num_workers = num_cpus.clamp(1, 256);
 
         let shard_index = AtomicUsize::new(0);
         let total_scanned = AtomicU64::new(0);
@@ -205,20 +205,18 @@ impl DiskStore {
                         if err_slot.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
                             break;
                         }
-
-                        let shard = shard_index.fetch_add(1, Ordering::Relaxed);
-                        if shard >= 256 {
+                        let shard_id = shard_index.fetch_add(1, Ordering::Relaxed);
+                        if shard_id >= 256 {
                             break;
                         }
-
-                        let shard_hex = format!("{shard:02x}");
+                        let shard_hex = format!("{shard_id:02x}");
                         let shard_dir = objects_dir.join(&shard_hex);
                         if !shard_dir.is_dir() {
                             continue;
                         }
 
                         let entries = match fs::read_dir(&shard_dir) {
-                            Ok(entries) => entries,
+                            Ok(e) => e,
                             Err(e) => {
                                 let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
                                 if slot.is_none() {
@@ -229,15 +227,27 @@ impl DiskStore {
                         };
 
                         for entry in entries.flatten() {
-                            let file_name = entry.file_name();
-                            let file_name_str = file_name.to_string_lossy();
-                            let hex = format!("{shard_hex}{file_name_str}");
-                            let Some(id) = ContentId::from_hex(&hex) else {
+                            if err_slot.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
+                                break;
+                            }
+                            let Ok(ft) = entry.file_type() else {
                                 continue;
                             };
-                            let blob_path = entry.path();
+                            if !ft.is_file() {
+                                continue;
+                            }
+                            let name = entry.file_name();
+                            let Some(name_str) = name.to_str() else {
+                                continue;
+                            };
+                            let full_hex = format!("{shard_hex}{name_str}");
+                            let Some(id) = ContentId::from_hex(&full_hex) else {
+                                continue;
+                            };
+
                             worker_scanned += 1;
-                            match DiskStore::verify_file(&blob_path, &id) {
+                            let path = entry.path();
+                            match DiskStore::verify_file(&path, &id) {
                                 Ok(()) => {}
                                 Err(Error::Corrupted(_)) => {
                                     worker_corrupt.push(id);
@@ -245,8 +255,17 @@ impl DiskStore {
                                 Err(Error::UnknownContent(_)) => {
                                     // Blob vanished concurrently; skip.
                                 }
+                                Err(Error::Io(e)) => {
+                                    let mut slot =
+                                        err_slot.lock().unwrap_or_else(|p| p.into_inner());
+                                    if slot.is_none() {
+                                        *slot = Some(Error::Io(e));
+                                    }
+                                    break;
+                                }
                                 Err(e) => {
-                                    let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
+                                    let mut slot =
+                                        err_slot.lock().unwrap_or_else(|p| p.into_inner());
                                     if slot.is_none() {
                                         *slot = Some(e);
                                     }
@@ -256,7 +275,9 @@ impl DiskStore {
                         }
                     }
 
-                    total_scanned.fetch_add(worker_scanned, Ordering::Relaxed);
+                    if worker_scanned > 0 {
+                        total_scanned.fetch_add(worker_scanned, Ordering::Relaxed);
+                    }
                     if !worker_corrupt.is_empty() {
                         let mut guard = corrupt_blobs.lock().unwrap_or_else(|p| p.into_inner());
                         guard.extend(worker_corrupt);
@@ -273,32 +294,37 @@ impl DiskStore {
         corrupt.sort();
         corrupt.dedup();
 
-        // Published snapshot scrubbing
-        let snapshots_dir = self.root().join("snapshots");
+        // 2. Published Snapshot Manifest & Tree scrubbing across all snapshots/*
         let mut snapshot_candidates = Vec::new();
-        if let Ok(entries) = fs::read_dir(&snapshots_dir) {
-            for entry in entries.flatten() {
-                let name_str = entry.file_name().to_string_lossy().into_owned();
-                if ContentId::from_hex(&name_str).is_none() {
-                    continue;
-                }
-                let path = entry.path();
-                if path.is_dir() {
-                    snapshot_candidates.push((name_str, path));
+        let snapshots_dir = self.root().join("snapshots");
+        if snapshots_dir.is_dir() {
+            if let Ok(entries) = fs::read_dir(&snapshots_dir) {
+                for entry in entries.flatten() {
+                    let Ok(ft) = entry.file_type() else {
+                        continue;
+                    };
+                    if !ft.is_dir() {
+                        continue;
+                    }
+                    let name = entry.file_name();
+                    let Some(name_str) = name.to_str() else {
+                        continue;
+                    };
+                    if name_str == "tmp" || name_str == "worktrees" {
+                        continue;
+                    }
+                    snapshot_candidates.push((name_str.to_string(), entry.path()));
                 }
             }
         }
-        snapshot_candidates.sort_by(|a, b| a.0.cmp(&b.0));
 
         let snapshot_scanned_count = snapshot_candidates.len() as u64;
         let corrupt_snapshots = Mutex::new(Vec::new());
 
         if !snapshot_candidates.is_empty() {
             let snap_index = AtomicUsize::new(0);
-            let snap_workers = num_cpus.min(snapshot_candidates.len()).max(1);
-
             std::thread::scope(|s| {
-                for _ in 0..snap_workers {
+                for _ in 0..num_workers {
                     s.spawn(|| {
                         let mut worker_corrupt_snaps = Vec::new();
                         loop {
@@ -307,12 +333,13 @@ impl DiskStore {
                                 break;
                             }
                             let (name, path) = &snapshot_candidates[idx];
-                            if let Err(_) = verify_snapshot_dir(path, name) {
+                            if verify_snapshot_dir(path, name).is_err() {
                                 worker_corrupt_snaps.push(name.clone());
                             }
                         }
                         if !worker_corrupt_snaps.is_empty() {
-                            let mut guard = corrupt_snapshots.lock().unwrap_or_else(|p| p.into_inner());
+                            let mut guard =
+                                corrupt_snapshots.lock().unwrap_or_else(|p| p.into_inner());
                             guard.extend(worker_corrupt_snaps);
                         }
                     });
@@ -339,10 +366,8 @@ impl DiskStore {
         if !dry_run && !corrupt_snaps.is_empty() {
             for snap_name in &corrupt_snaps {
                 let snap_path = snapshots_dir.join(snap_name);
-                if snap_path.exists() {
-                    if fs::remove_dir_all(&snap_path).is_ok() {
-                        snapshot_dirs_deleted += 1;
-                    }
+                if snap_path.exists() && fs::remove_dir_all(&snap_path).is_ok() {
+                    snapshot_dirs_deleted += 1;
                 }
             }
         }
@@ -358,6 +383,7 @@ impl DiskStore {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,9 +493,7 @@ mod tests {
         let mut store = DiskStore::open(temp.path()).unwrap();
 
         let b1 = store.put(b"snap-tree-1").unwrap();
-        let entries = vec![
-            SnapshotEntry::file("file.txt", b1, 0o644),
-        ];
+        let entries = vec![SnapshotEntry::file("file.txt", b1, 0o644)];
 
         let manifest = Manifest::new(entries.clone()).unwrap();
         let snap_hash = manifest.hash;

@@ -44,7 +44,10 @@ fn store_initialization_probes_and_caches_filesystem_capabilities() {
     #[cfg(target_os = "macos")]
     {
         // APFS is reflink/clone capable
-        assert!(caps.reflink_capable, "APFS on macOS should report reflink_capable");
+        assert!(
+            caps.reflink_capable,
+            "APFS on macOS should report reflink_capable"
+        );
     }
 }
 
@@ -94,7 +97,11 @@ fn copy_file_range_accelerated_materialization_produces_identical_trees() {
     fs::write(fx.repo.join(".wtinclude"), "heavy/\n").unwrap();
 
     let out = fx.wt(&["create", "accel", "--json"]);
-    assert!(out.status.success(), "create failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = stdout.trim().lines().collect();
@@ -106,18 +113,29 @@ fn copy_file_range_accelerated_materialization_produces_identical_trees() {
 
     let method = json["data"]["hydration_method"].as_str().unwrap();
     assert!(
-        matches!(method, "clone" | "reflink" | "copy_file_range" | "byte_copy"),
+        matches!(
+            method,
+            "clone" | "reflink" | "copy_file_range" | "byte_copy"
+        ),
         "unexpected hydration method: {method}"
     );
 
-    let hydrated = fx.repo.parent().unwrap().join("origin-accel/heavy/pkg00/nested/file-0.txt");
+    let hydrated = fx
+        .repo
+        .parent()
+        .unwrap()
+        .join("origin-accel/heavy/pkg00/nested/file-0.txt");
     assert!(hydrated.exists());
     assert_eq!(
         fs::read_to_string(&hydrated).unwrap(),
         "fake-heavy file 0 of 50\n"
     );
     let meta = fs::metadata(&hydrated).unwrap();
-    assert_eq!(meta.permissions().mode() & 0o200, 0o200, "file must be writable");
+    assert_eq!(
+        meta.permissions().mode() & 0o200,
+        0o200,
+        "file must be writable"
+    );
 }
 
 #[test]
@@ -147,7 +165,9 @@ fn cross_device_or_fallback_copies_emit_diagnostic_warning_in_json() {
 
     let diags = json["diagnostics"].as_array().unwrap();
     assert!(
-        diags.iter().any(|d| d["code"] == "CROSS_DEVICE_COPY_DEGRADATION"),
+        diags
+            .iter()
+            .any(|d| d["code"] == "CROSS_DEVICE_COPY_DEGRADATION"),
         "expected CROSS_DEVICE_COPY_DEGRADATION diagnostic warning in:\n{stdout}"
     );
 }
@@ -164,7 +184,10 @@ fn sequential_buffered_copy_preserves_executable_mode_and_content() {
 
     let copied_bytes = wt_copy::buffered_copy_file(&src, &dest).expect("buffered_copy_file");
     assert_eq!(copied_bytes, script_content.len() as u64);
-    assert_eq!(fs::read_to_string(&dest).expect("read dest"), script_content);
+    assert_eq!(
+        fs::read_to_string(&dest).expect("read dest"),
+        script_content
+    );
 
     let dest_mode = fs::metadata(&dest).expect("metadata").permissions().mode();
     assert_eq!(dest_mode & 0o7777, 0o755, "mode must be 0755");
