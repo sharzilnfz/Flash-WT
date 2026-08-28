@@ -66,3 +66,10 @@ pub fn default_worktree_dest(root: &Path, name: &str) -> Result<PathBuf> {
                 .to_string_lossy()
         )))
 }
+
+/// Resolve a git reference or branch name to its full commit SHA.
+pub fn resolve_commit(dir: &Path, rev: &str) -> Result<String> {
+    let peel = format!("{rev}^{{commit}}");
+    run(dir, &["rev-parse", "--verify", &peel])
+        .or_else(|_| run(dir, &["rev-parse", "--verify", rev]))
+}

@@ -271,7 +271,14 @@ fn hydrate_impl(
         Ok(entries) => entries,
         Err(msg) => return Outcome::Failed(msg),
     };
-    let manifest = match Manifest::new_with_lockfile(entries, lockfile_hash.copied()) {
+    let mut unique_blobs = std::collections::BTreeMap::new();
+    for (rel, id) in &ingested.files {
+        if let Some(&size) = ingested.file_sizes.get(rel) {
+            unique_blobs.entry(*id).or_insert(size);
+        }
+    }
+    let total_size: u64 = unique_blobs.values().sum();
+    let manifest = match Manifest::new_with_lockfile_and_size(entries, lockfile_hash.copied(), total_size) {
         Ok(m) => m,
         Err(msg) => return Outcome::Failed(format!("cannot build snapshot manifest: {msg}")),
     };

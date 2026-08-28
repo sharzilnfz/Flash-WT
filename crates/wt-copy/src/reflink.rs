@@ -47,7 +47,8 @@ impl CopyBackend for ReflinkBackend {
     }
 }
 
-fn reflink_file(from: &Path, to: &Path) -> io::Result<()> {
+/// Copy `from` to `to` using Linux FICLONE ioctl.
+pub fn reflink_file(from: &Path, to: &Path) -> io::Result<()> {
     let src = fs::File::open(from)?;
     let mode = src.metadata()?.permissions().mode() & 0o7777;
     let dest = fs::OpenOptions::new()

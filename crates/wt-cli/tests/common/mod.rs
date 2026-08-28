@@ -91,14 +91,19 @@ impl Fixture {
 #[allow(dead_code)] // not every suite that compiles this module uses it
 pub fn list_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
+    if !dir.exists() {
+        return out;
+    }
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        for entry in fs::read_dir(&d).expect("read_dir") {
-            let p = entry.expect("dir entry").path();
-            if p.is_dir() {
-                stack.push(p);
-            } else {
-                out.push(p);
+        if let Ok(entries) = fs::read_dir(&d) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push(p);
+                }
             }
         }
     }

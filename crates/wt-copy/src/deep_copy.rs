@@ -1,7 +1,6 @@
 //! Portable byte-by-byte fallback. Slow, but every filesystem
 //! supports it — the floor the selection layer can always stand on.
 
-use std::fs;
 use std::path::Path;
 
 use crate::copy_tree::copy_tree;
@@ -23,7 +22,9 @@ impl CopyBackend for DeepCopyBackend {
 
     fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()> {
         crate::copy_tree::staged_copy(dest, self.safety(), &mut |staging| {
-            let mut copy_file = |from: &Path, to: &Path| fs::copy(from, to).map(|_| ());
+            let mut copy_file = |from: &Path, to: &Path| {
+                crate::sys::buffered_copy_file(from, to).map(|_| ())
+            };
             copy_tree(src, staging, &mut copy_file).map_err(Error::Io)
         })
     }
@@ -32,6 +33,7 @@ impl CopyBackend for DeepCopyBackend {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use super::*;
     use crate::Error;
 

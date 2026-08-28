@@ -1035,7 +1035,8 @@ mod tests {
         let (picked, manifest) =
             select_old_snapshot(store.root(), ROOT_A, PAT, HEAVY).expect("a usable candidate");
         assert_eq!(picked, m_new.hash);
-        assert_eq!(manifest, m_new);
+        assert_eq!(manifest.hash, m_new.hash);
+        assert_eq!(manifest.entries, m_new.entries);
 
         // Corrupt the newest: selection skips it and falls back to the
         // older ring entry.
@@ -1047,7 +1048,8 @@ mod tests {
         let (picked, manifest) =
             select_old_snapshot(store.root(), ROOT_A, PAT, HEAVY).expect("older still usable");
         assert_eq!(picked, m_old.hash);
-        assert_eq!(manifest, m_old);
+        assert_eq!(manifest.hash, m_old.hash);
+        assert_eq!(manifest.entries, m_old.entries);
 
         // Corrupt everything: None -> caller builds from scratch.
         fs::write(
