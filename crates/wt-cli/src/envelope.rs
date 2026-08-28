@@ -144,6 +144,48 @@ pub struct MigrateData {
     pub purged_legacy_refs: Option<usize>,
 }
 
+/// Payload for `wt list --json` / `wt ls --json` (ticket 02).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListData {
+    pub worktrees: Vec<WorktreeEntry>,
+    pub total_disk_saved: u64,
+    pub total_files_hydrated: usize,
+}
+
+/// Individual worktree entry within `ListData`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeEntry {
+    pub path: String,
+    pub branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    pub is_active: bool,
+    pub is_main: bool,
+    pub is_ephemeral: bool,
+    pub files_hydrated: usize,
+    pub bytes_hydrated: u64,
+    pub bytes_saved: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hydrated_dirs: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease: Option<LeaseEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_secs: Option<u64>,
+}
+
+/// Ephemeral scratch lease details for a worktree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LeaseEntry {
+    pub lease_id: String,
+    pub pid: u32,
+    pub pid_alive: bool,
+    pub expires_at: u64,
+    pub ttl_remaining_secs: u64,
+    pub is_expired: bool,
+}
+
 /// Payload for `wt scratch --json` / `wt isolate --json` (ticket 03).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScratchData {
@@ -163,6 +205,36 @@ pub struct ScratchData {
     pub exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cleaned_up: Option<bool>,
+}
+
+/// Payload for `wt demo --json` / `wt test-drive --json` (ticket 01).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DemoData {
+    pub files_count: usize,
+    pub total_bytes: u64,
+    pub baseline_copy_duration_ms: u64,
+    pub baseline_copy_bytes: u64,
+    pub wt_hydration_duration_ms: u64,
+    pub speedup_ratio: f64,
+    pub hydration_method: String,
+    pub bytes_shared_cow: u64,
+    pub bytes_copied: u64,
+    pub space_savings_bytes: u64,
+    pub isolation_verified: bool,
+    pub cleaned_up: bool,
+    pub total_duration_ms: u64,
+}
+
+/// Payload for `wt clean --json` (ticket 03 / ticket 05).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CleanData {
+    pub removed_worktrees: Vec<String>,
+    pub branches_removed: Vec<String>,
+    pub references_released: usize,
+    pub mirrors_removed: usize,
+    pub reclaimed_bytes: u64,
+    pub sweep_examined: usize,
+    pub sweep_reclaimed: usize,
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -265,5 +337,66 @@ mod tests {
         assert_eq!(parsed["data"]["leases_examined"], 3);
         assert_eq!(parsed["data"]["leases_reclaimed"], 2);
         assert_eq!(parsed["data"]["lease_bytes_reclaimed"], 4096);
+    }
+
+    #[test]
+    fn demo_envelope_ok_serialization() {
+        let data = DemoData {
+            files_count: 10000,
+            total_bytes: 2500000,
+            baseline_copy_duration_ms: 200,
+            baseline_copy_bytes: 2500000,
+            wt_hydration_duration_ms: 15,
+            speedup_ratio: 13.33,
+            hydration_method: "clone".into(),
+            bytes_shared_cow: 2500000,
+            bytes_copied: 0,
+            space_savings_bytes: 2500000,
+            isolation_verified: true,
+            cleaned_up: true,
+            total_duration_ms: 350,
+        };
+        let env = Envelope::ok("demo", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize demo json");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse demo json");
+        assert_eq!(parsed["command"], "demo");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["data"]["files_count"], 10000);
+        assert_eq!(parsed["data"]["isolation_verified"], true);
+        assert_eq!(parsed["data"]["cleaned_up"], true);
+    }
+
+    #[test]
+    fn list_envelope_serialization() {
+        let data = ListData {
+            worktrees: vec![WorktreeEntry {
+                path: "/tmp/repo".into(),
+                branch: "main".into(),
+                head: Some("abcdef1234567890".into()),
+                is_active: true,
+                is_main: true,
+                is_ephemeral: false,
+                files_hydrated: 10,
+                bytes_hydrated: 2048,
+                bytes_saved: 2048,
+                hydrated_dirs: Some(vec!["heavy".into()]),
+                base_branch: None,
+                lease: None,
+                age_secs: Some(120),
+            }],
+            total_disk_saved: 2048,
+            total_files_hydrated: 10,
+        };
+        let env = Envelope::ok("list", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize list json");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse list json");
+        assert_eq!(parsed["command"], "list");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["data"]["total_disk_saved"], 2048);
+        assert_eq!(parsed["data"]["total_files_hydrated"], 10);
+        assert_eq!(parsed["data"]["worktrees"][0]["branch"], "main");
+        assert_eq!(parsed["data"]["worktrees"][0]["is_active"], true);
     }
 }

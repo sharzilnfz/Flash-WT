@@ -180,7 +180,11 @@ fn manifest_patterns_match_nested_directories() {
     fs::write(fx.repo.join(".wtinclude"), "/heavy/pkg0*/nested\n").unwrap();
 
     let out = fx.wt(&["create", "demo"]);
-    assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "wt create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let dest = fx.repo.parent().unwrap().join("origin-demo");
     let hydrated = list_files(&dest.join("heavy"));

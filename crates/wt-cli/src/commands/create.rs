@@ -13,6 +13,38 @@ use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
 use crate::manifest::{self, LoadedPatterns, load_patterns};
 use crate::timing::StageTimings;
 
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_count(n: usize) -> String {
+    if n >= 10_000 {
+        let s = n.to_string();
+        let mut out = String::new();
+        for (i, c) in s.chars().rev().enumerate() {
+            if i > 0 && i % 3 == 0 {
+                out.push(',');
+            }
+            out.push(c);
+        }
+        format!("{} files", out.chars().rev().collect::<String>())
+    } else {
+        format!("{n} files")
+    }
+}
+
 pub fn run(
     name: &str,
     base: Option<&str>,
@@ -98,6 +130,34 @@ fn create(
 
     if !cfg.json {
         report.timings.emit(started, timing_enabled);
+
+        let total_bytes = report.bytes_shared_cow + report.bytes_copied;
+        let total_ms = started.elapsed().as_millis();
+        println!("✓ Created worktree {} ({name})", dest.display());
+        if report.total_files > 0 {
+            println!(
+                "✓ Hydrated {} ({}) via {} in {} ms",
+                format_count(report.total_files),
+                format_bytes(total_bytes),
+                report.hydration_method,
+                total_ms
+            );
+        }
+        if let Ok(curr) = std::env::current_dir() {
+            if let Ok(rel) = dest.strip_prefix(&curr) {
+                println!("  Next: cd {}", rel.display());
+            } else if let Some(parent) = dest.parent() {
+                if parent == curr.parent().unwrap_or(&curr) {
+                    println!("  Next: cd ../{}", dest.file_name().unwrap_or_default().to_string_lossy());
+                } else {
+                    println!("  Next: cd {}", dest.display());
+                }
+            } else {
+                println!("  Next: cd {}", dest.display());
+            }
+        } else {
+            println!("  Next: cd {}", dest.display());
+        }
     }
 
     let data = CreateData {

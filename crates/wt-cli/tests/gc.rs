@@ -26,6 +26,8 @@ fn store_files(store: &Path) -> usize {
             let name = p.file_name();
             name != Some(std::ffi::OsStr::new("ingest-cache.tsv"))
                 && name != Some(std::ffi::OsStr::new("verified.tsv"))
+                && !p.starts_with(store.join("snapshots"))
+                && !p.starts_with(store.join("worktrees"))
         })
         .count()
 }
@@ -42,11 +44,13 @@ fn ledger_ids(wt_root: &Path) -> Vec<String> {
         .expect("hydration ledger exists");
     ledger
         .lines()
-        .map(|line| {
-            line.split('\t')
-                .nth(1)
-                .expect("ledger row has id")
-                .to_owned()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split('\t').collect();
+            match fields.as_slice() {
+                [_, id] => Some((*id).to_owned()),
+                [_, "blob", id] => Some((*id).to_owned()),
+                _ => None,
+            }
         })
         .collect()
 }

@@ -31,6 +31,39 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum WtCommand {
+    /// Create a worktree for NAME and hydrate heavy directories (modern primary verb).
+    New {
+        /// Branch name; also names the new worktree directory.
+        name: String,
+        /// Base branch or ref to create the worktree from (records symbolic tracking).
+        #[arg(long)]
+        base: Option<String>,
+        /// Manifest listing heavy directories (gitignore syntax).
+        /// Defaults to `.wtinclude` in the repository root.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Destination for the new worktree. Defaults to a sibling of
+        /// the current repository named `<repo>-<name>`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Clean and remove worktrees, reclaiming unreferenced store storage (modern primary verb).
+    Clean {
+        /// Branch name to remove. If omitted, interactively prompts or batches cleanup.
+        name: Option<String>,
+        /// Path of the worktree to remove. Defaults to the sibling `<repo>-<name>`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Remove all stale/merged worktrees non-interactively.
+        #[arg(long)]
+        all: bool,
+        /// Force removal of unmerged worktrees.
+        #[arg(long, short)]
+        force: bool,
+        /// Minimum age threshold for GC sweep.
+        #[arg(long, value_parser = parse_age_value)]
+        age: Option<Duration>,
+    },
     /// Create a worktree for NAME (used as the git branch name) and
     /// hydrate the heavy directories listed in the .wtinclude manifest.
     #[command(long_about = "Create a worktree for NAME (used as the git branch \
@@ -55,13 +88,9 @@ GC bookkeeping: each successful create publishes one store-local mirror
 (<store>/worktrees/) naming the blobs it hydrates from. WT_TIMING=1
 prints per-stage timings (`wt-stage ingest=...` and friends) to stderr.
 
-WT_SNAPSHOTS=1 (macOS/APFS, opt-in) hydrates each heavy directory by
-one recursive clonefile(2) from a whole-directory snapshot in the store
-when one matches: hits cost no per-file work. Misses build and publish
-a snapshot first. WT_VERIFY=1 bypasses snapshot hits entirely and
-rebuilds from freshly hashed blobs. Filesystems without clone support,
-and clone refusals like cross-device destinations, fall back to the
-per-file ladder above.")]
+Whole-directory snapshots are automatically enabled by default on macOS APFS.
+WT_SNAPSHOTS=0 opts out and forces per-file hydration. WT_VERIFY=1 bypasses
+snapshot hits entirely and rebuilds from freshly hashed blobs.")]
     Create {
         /// Branch name; also names the new worktree directory.
         name: String,
@@ -153,12 +182,23 @@ per-file ladder above.")]
         #[arg(long, value_parser = parse_age_value)]
         ttl: Option<Duration>,
     },
+    /// List active git worktrees with disk usage and shared savings.
+    #[command(name = "list", alias = "ls")]
+    List,
+    /// Run an end-to-end zero-setup demonstration and benchmark:
+    /// creates a synthetic 10,000-file project fixture, measures baseline copy
+    /// vs. wt CoW hydration, validates mutation isolation, and cleans up.
+    Demo,
+    /// Alias for `wt demo`.
+    TestDrive,
 }
 
 impl WtCommand {
     /// Return the canonical command name for JSON envelopes and logs.
     pub fn name(&self) -> &'static str {
         match self {
+            WtCommand::New { .. } => "new",
+            WtCommand::Clean { .. } => "clean",
             WtCommand::Create { .. } => "create",
             WtCommand::Remove { .. } => "remove",
             WtCommand::Sweep { .. } => "sweep",
@@ -166,6 +206,9 @@ impl WtCommand {
             WtCommand::Store { .. } => "store",
             WtCommand::Scratch { .. } => "scratch",
             WtCommand::Isolate { .. } => "isolate",
+            WtCommand::List => "list",
+            WtCommand::Demo => "demo",
+            WtCommand::TestDrive => "test-drive",
         }
     }
 }

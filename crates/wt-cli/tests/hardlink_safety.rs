@@ -67,6 +67,8 @@ fn wt_hardlinked(fx: &Fixture, name: &str, store: &Path) -> std::process::Output
         .args(["create", name])
         .env("WT_STORE", store)
         .env("WT_HARDLINK", "1")
+        .env("WT_SNAPSHOTS", "0")
+        .env("WT_SNAPSHOTS_V2", "0")
         .current_dir(&fx.repo)
         .output()
         .expect("run wt binary")

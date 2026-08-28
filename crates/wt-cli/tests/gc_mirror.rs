@@ -28,7 +28,8 @@ fn content_files(store: &Path) -> Vec<std::path::PathBuf> {
             name != Some(std::ffi::OsStr::new("ingest-cache.tsv"))
                 && name != Some(std::ffi::OsStr::new("verified.tsv"))
                 && name != Some(std::ffi::OsStr::new("gc-mode"))
-                && p.parent().unwrap().file_name() != Some(std::ffi::OsStr::new("worktrees"))
+                && !p.starts_with(store.join("worktrees"))
+                && !p.starts_with(store.join("snapshots"))
         })
         .collect()
 }
@@ -55,11 +56,13 @@ fn ledger_ids(wt_root: &Path) -> Vec<String> {
     ledger
         .lines()
         .filter(|l| !l.is_empty())
-        .map(|line| {
-            line.split('\t')
-                .nth(1)
-                .expect("ledger row has id")
-                .to_owned()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split('\t').collect();
+            match fields.as_slice() {
+                [_, id] => Some((*id).to_owned()),
+                [_, "blob", id] => Some((*id).to_owned()),
+                _ => None,
+            }
         })
         .collect()
 }
@@ -421,6 +424,7 @@ fn timing_env_emits_wt_stage_lines_to_stderr_and_stays_silent_without_it() {
         .collect();
     let ms: Vec<Option<u64>> = stages
         .iter()
+        .filter(|l| !l.starts_with("wt-stage snapshot-mode="))
         .map(|l| l.split('=').nth(1).and_then(|v| v.parse().ok()))
         .collect();
     assert!(

@@ -165,7 +165,11 @@ fn remove_surfaces_base_movement_diagnostic() {
     fs::write(fx.repo.join(".wtinclude"), "heavy/\n").unwrap();
 
     let out_create = fx.wt(&["create", "feat-to-remove", "--base", "main"]);
-    assert!(out_create.status.success());
+    assert!(
+        out_create.status.success(),
+        "wt create failed: {}",
+        String::from_utf8_lossy(&out_create.stderr)
+    );
 
     // Advance main
     fs::write(fx.repo.join("advance.txt"), "advance\n").unwrap();

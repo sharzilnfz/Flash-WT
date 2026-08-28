@@ -174,6 +174,7 @@ fn assert_tree_matches_source(source: &Path, hydrated_heavy: &Path) {
 }
 
 const SNAPSHOTS_ON: &[(&str, &str)] = &[("WT_SNAPSHOTS", "1")];
+const SNAPSHOTS_OFF: &[(&str, &str)] = &[("WT_SNAPSHOTS", "0"), ("WT_SNAPSHOTS_V2", "0")];
 
 #[test]
 fn timing_lines_attribute_snapshot_lookup_build_and_clone() {
@@ -317,7 +318,11 @@ fn miss_builds_publishes_and_second_create_hits_with_private_files() {
 #[test]
 fn gate_off_changes_nothing_at_all() {
     let fx = RichFixture::new();
-    let out = fx.wt(&["create", "one"], &[], "origin-one");
+    let out = fx.wt(
+        &["create", "one"],
+        &[("WT_SNAPSHOTS", "0"), ("WT_SNAPSHOTS_V2", "0")],
+        "origin-one",
+    );
     assert_created(&out);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -515,7 +520,7 @@ fn fifo_fails_loudly_under_gate_and_is_skipped_without_it() {
 
     // Gate OFF: long-standing behavior — skipped silently, create
     // succeeds exactly as it always did.
-    let out = fx.wt(&["create", "two"], &[], "origin-two");
+    let out = fx.wt(&["create", "two"], SNAPSHOTS_OFF, "origin-two");
     assert_created(&out);
     assert!(
         fx.worktree_path("origin-two")
@@ -650,7 +655,11 @@ fn ladder_and_snapshot_hydrate_identical_trees() {
     // Both hydration paths represent every manifest kind faithfully,
     // so their trees must be the same path set — symlink included.
     let fx = RichFixture::new();
-    assert_created(&fx.wt(&["create", "plain"], &[], "origin-plain"));
+    assert_created(&fx.wt(
+        &["create", "plain"],
+        &[("WT_SNAPSHOTS", "0"), ("WT_SNAPSHOTS_V2", "0")],
+        "origin-plain",
+    ));
     assert_created(&fx.wt(&["create", "snap"], SNAPSHOTS_ON, "origin-snap"));
 
     let rel_prefix = |root: &Path| {

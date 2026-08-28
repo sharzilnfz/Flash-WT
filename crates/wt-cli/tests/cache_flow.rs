@@ -25,8 +25,10 @@ fn store_footprint(store: &Path) -> (usize, usize) {
         for entry in fs::read_dir(&dir).expect("read store dir") {
             let p = entry.expect("store entry").path();
             if p.is_dir() {
-                // GC bookkeeping (ticket 07 mirrors) is not content.
-                if p.file_name() == Some(std::ffi::OsStr::new("worktrees")) {
+                // GC bookkeeping (ticket 07 mirrors, ticket 08 snapshots) is not blob content.
+                if p.file_name() == Some(std::ffi::OsStr::new("worktrees"))
+                    || p.file_name() == Some(std::ffi::OsStr::new("snapshots"))
+                {
                     continue;
                 }
                 stack.push(p);

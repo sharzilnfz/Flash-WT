@@ -515,6 +515,12 @@ fn finish_clone(
     tree: &Path,
     dest_heavy: &Path,
 ) -> Result<(), CloneFailure> {
+    if let Some(parent) = dest_heavy.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            CloneFailure::Fatal(format!("cannot create parent dirs for {}: {e}", dest_heavy.display()))
+        })?;
+    }
+
     let mut restore_empty_dir = false;
     match fs::symlink_metadata(dest_heavy) {
         Ok(md) if md.is_dir() => {
