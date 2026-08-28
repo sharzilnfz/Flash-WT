@@ -122,6 +122,12 @@ pub struct ScrubData {
     pub scanned: u64,
     pub corrupt: Vec<String>,
     pub deleted: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_dirs_scanned: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corrupt_snapshots: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_dirs_deleted: Option<u64>,
 }
 
 /// Payload for `wt store migrate --json`.
@@ -132,9 +138,59 @@ pub struct MigrateData {
     pub purged_legacy_refs: Option<usize>,
 }
 
+/// Payload for `wt scratch --json` / `wt isolate --json` (ticket 03).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScratchData {
+    pub worktree_path: String,
+    pub branch: String,
+    pub lease_id: String,
+    pub lease_file: String,
+    pub expires_at: u64,
+    pub files_hydrated: usize,
+    pub hydration_method: String,
+    pub bytes_shared_cow: u64,
+    pub bytes_copied: u64,
+    pub duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleaned_up: Option<bool>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scratch_envelope_ok_serialization() {
+        let data = ScratchData {
+            worktree_path: "/tmp/wt-scratch-demo".into(),
+            branch: "scratch-demo".into(),
+            lease_id: "demo".into(),
+            lease_file: "/tmp/store/worktrees/scratch-demo.lease".into(),
+            expires_at: 1900000000,
+            files_hydrated: 5,
+            hydration_method: "clone".into(),
+            bytes_shared_cow: 512,
+            bytes_copied: 0,
+            duration_ms: 25,
+            command: Some("cargo test".into()),
+            exit_code: Some(0),
+            cleaned_up: Some(true),
+        };
+        let env = Envelope::ok("scratch", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize scratch json");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse scratch json");
+        assert_eq!(parsed["command"], "scratch");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["data"]["branch"], "scratch-demo");
+        assert_eq!(parsed["data"]["command"], "cargo test");
+        assert_eq!(parsed["data"]["exit_code"], 0);
+        assert_eq!(parsed["data"]["cleaned_up"], true);
+    }
 
     #[test]
     fn envelope_ok_serialization() {

@@ -3,6 +3,7 @@
 //! live in `cli.rs`, dispatch in `commands/`, and the machinery in
 //! `hydrate`, `manifest`, `snapshots`, `gc`, `gitops`, and `timing`.
 
+mod base;
 mod cli;
 mod commands;
 mod config;
@@ -28,23 +29,29 @@ fn main() {
     // the machinery as data.
     let mut cfg = RunConfig::from_env();
     cfg.json = cli.json;
-    if let Err(e) = commands::run(cli.command, &cfg) {
-        if cfg.json {
-            let env = envelope::Envelope::<()>::error(
-                command_name,
-                vec![envelope::Diagnostic::error("ERROR", e.to_string())],
-            );
-            if let Ok(json) = serde_json::to_string(&env) {
-                println!("{json}");
-            }
-        } else {
-            eprintln!("wt: {e}");
+    match commands::run(cli.command, &cfg) {
+        Ok(Some(code)) if code != 0 => {
+            std::process::exit(code);
         }
-        // Usage mistakes exit 2 like clap's own parse errors; every
-        // other failure exits 1.
-        std::process::exit(match e {
-            error::Error::Usage(_) => 2,
-            _ => 1,
-        });
+        Ok(_) => {}
+        Err(e) => {
+            if cfg.json {
+                let env = envelope::Envelope::<()>::error(
+                    command_name,
+                    vec![envelope::Diagnostic::error("ERROR", e.to_string())],
+                );
+                if let Ok(json) = serde_json::to_string(&env) {
+                    println!("{json}");
+                }
+            } else {
+                eprintln!("wt: {e}");
+            }
+            // Usage mistakes exit 2 like clap's own parse errors; every
+            // other failure exits 1.
+            std::process::exit(match e {
+                error::Error::Usage(_) => 2,
+                _ => 1,
+            });
+        }
     }
 }

@@ -6,9 +6,9 @@
 
 **Status:** ready-for-agent
 
-- [ ] `wt scratch` and `wt isolate` subcommands are registered in the CLI command dispatcher.
-- [ ] Bare `wt scratch` generates uniquely named temporary worktrees marked with ephemeral lease tags.
-- [ ] `wt scratch --run "<command>"` creates a temporary sandbox, executes the command, returns the command exit code, and removes the worktree on clean process exit.
-- [ ] A lease record is written to `<store>/worktrees/scratch-<id>.lease` containing worktree path, git directory, process ID, process start time fingerprint, and expiration timestamp.
-- [ ] `--json` mode returns structured worktree creation and command execution status.
-- [ ] CLI tests verify ephemeral creation, command execution, and exit cleanup.
+- [x] `wt scratch` and `wt isolate` subcommands are registered in the CLI command dispatcher.
+- [x] Bare `wt scratch` generates uniquely named temporary worktrees marked with ephemeral lease tags.
+- [x] `wt scratch --run "<command>"` creates a temporary sandbox, executes the command, returns the command exit code, and removes the worktree on clean process exit.
+- [x] A lease record is written to `<store>/worktrees/scratch-<id>.lease` containing worktree path, git directory, process ID, process start time fingerprint, and expiration timestamp.
+- [x] `--json` mode returns structured worktree creation and command execution status.
+- [x] CLI tests verify ephemeral creation, command execution, and exit cleanup.

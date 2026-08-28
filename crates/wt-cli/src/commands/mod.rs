@@ -4,6 +4,7 @@
 pub mod create;
 pub mod migrate;
 pub mod remove;
+pub mod scratch;
 pub mod scrub;
 pub mod sweep;
 
@@ -12,15 +13,16 @@ use crate::config::RunConfig;
 use crate::envelope::Envelope;
 use crate::error::{Error, Result};
 
-pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<()> {
+pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
     let command_name = command.name();
     match command {
         WtCommand::Create {
             name,
+            base,
             manifest,
             dir,
         } => {
-            let (data, diags) = create::run(&name, manifest.as_deref(), dir.as_deref(), cfg)?;
+            let (data, diags) = create::run(&name, base.as_deref(), manifest.as_deref(), dir.as_deref(), cfg)?;
             if cfg.json {
                 let env = Envelope::ok(command_name, data, diags);
                 println!(
@@ -28,7 +30,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<()> {
                     serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
                 );
             }
-            Ok(())
+            Ok(None)
         }
         WtCommand::Remove { name, dir } => {
             let (data, diags) = remove::run(&name, dir.as_deref(), cfg)?;
@@ -39,7 +41,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<()> {
                     serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
                 );
             }
-            Ok(())
+            Ok(None)
         }
         WtCommand::Sweep { age } => {
             let (data, diags) = sweep::run(age, cfg)?;
@@ -50,7 +52,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<()> {
                     serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
                 );
             }
-            Ok(())
+            Ok(None)
         }
         WtCommand::Scrub { dry_run } => {
             let (data, diags) = scrub::run(dry_run, cfg)?;
@@ -61,7 +63,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<()> {
                     serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
                 );
             }
-            Ok(())
+            Ok(None)
         }
         WtCommand::Store { action } => match action {
             StoreAction::Migrate {
@@ -76,8 +78,39 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<()> {
                         serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
                     );
                 }
-                Ok(())
+                Ok(None)
             }
         },
+        WtCommand::Scratch {
+            name,
+            manifest,
+            dir,
+            run: run_cmd,
+            ttl,
+        }
+        | WtCommand::Isolate {
+            name,
+            manifest,
+            dir,
+            run: run_cmd,
+            ttl,
+        } => {
+            let (data, diags, exit_code) = scratch::run(
+                name.as_deref(),
+                manifest.as_deref(),
+                dir.as_deref(),
+                run_cmd.as_deref(),
+                ttl,
+                cfg,
+            )?;
+            if cfg.json {
+                let env = Envelope::ok(command_name, data, diags);
+                println!(
+                    "{}",
+                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
+                );
+            }
+            Ok(exit_code)
+        }
     }
 }

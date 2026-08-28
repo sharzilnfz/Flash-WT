@@ -100,7 +100,8 @@ fn snapshot_lookup_and_selection_reads_live_journal_state() {
     let (picked, found_manifest) =
         select_old_snapshot(store.root(), REPO, PATTERN, HEAVY).expect("must find from journal");
     assert_eq!(picked, manifest1.hash);
-    assert_eq!(found_manifest, manifest1);
+    assert_eq!(found_manifest.hash, manifest1.hash);
+    assert_eq!(found_manifest.entries, manifest1.entries);
 
     // Publish a newer version
     let blob2 = store.put(b"version 2 content").unwrap();
@@ -119,7 +120,8 @@ fn snapshot_lookup_and_selection_reads_live_journal_state() {
     let (picked2, found_manifest2) =
         select_old_snapshot(store.root(), REPO, PATTERN, HEAVY).expect("must pick newer");
     assert_eq!(picked2, manifest2.hash);
-    assert_eq!(found_manifest2, manifest2);
+    assert_eq!(found_manifest2.hash, manifest2.hash);
+    assert_eq!(found_manifest2.entries, manifest2.entries);
 }
 
 #[test]

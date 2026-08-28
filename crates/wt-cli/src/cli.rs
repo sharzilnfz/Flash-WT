@@ -65,6 +65,9 @@ per-file ladder above.")]
     Create {
         /// Branch name; also names the new worktree directory.
         name: String,
+        /// Base branch or ref to create the worktree from (records symbolic tracking).
+        #[arg(long)]
+        base: Option<String>,
         /// Manifest listing heavy directories (gitignore syntax).
         /// Defaults to `.wtinclude` in the repository root.
         #[arg(long)]
@@ -115,6 +118,41 @@ per-file ladder above.")]
         #[command(subcommand)]
         action: StoreAction,
     },
+    /// Create an ephemeral scratch worktree with lease persistence.
+    /// Optionally execute a command inside the sandbox and clean up on exit.
+    Scratch {
+        /// Optional branch/worktree name (defaults to auto-generated scratch-<id>).
+        name: Option<String>,
+        /// Manifest listing heavy directories (.wtinclude).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Destination for the worktree.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Command to execute inside the sandbox.
+        #[arg(long)]
+        run: Option<String>,
+        /// Lease time-to-live duration (e.g. 15m, 1h, 24h).
+        #[arg(long, value_parser = parse_age_value)]
+        ttl: Option<Duration>,
+    },
+    /// Alias for `wt scratch` for isolated agent execution.
+    Isolate {
+        /// Optional branch/worktree name (defaults to auto-generated scratch-<id>).
+        name: Option<String>,
+        /// Manifest listing heavy directories (.wtinclude).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Destination for the worktree.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Command to execute inside the sandbox.
+        #[arg(long)]
+        run: Option<String>,
+        /// Lease time-to-live duration (e.g. 15m, 1h, 24h).
+        #[arg(long, value_parser = parse_age_value)]
+        ttl: Option<Duration>,
+    },
 }
 
 impl WtCommand {
@@ -126,6 +164,8 @@ impl WtCommand {
             WtCommand::Sweep { .. } => "sweep",
             WtCommand::Scrub { .. } => "scrub",
             WtCommand::Store { .. } => "store",
+            WtCommand::Scratch { .. } => "scratch",
+            WtCommand::Isolate { .. } => "isolate",
         }
     }
 }

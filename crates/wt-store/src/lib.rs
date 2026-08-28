@@ -9,7 +9,7 @@
 mod disk;
 mod fsutil;
 mod gc;
-mod mirror;
+mod lease;
 mod scrub;
 mod snapdiff;
 mod snapindex;
@@ -19,9 +19,15 @@ mod verified;
 
 pub mod bulkwalk;
 pub mod lockfile;
+pub mod mirror;
 
-pub use disk::DiskStore;
+pub use disk::{DiskStore, FsCapabilities, probe_fs};
 pub use gc::{GcMode, MarkReport, MarkSwept};
+pub use lease::{
+    DEFAULT_LEASE_TTL_SECS, ReadLease, WorktreeLease, current_process_start_time,
+    is_lease_expired, is_process_alive, lease_path, process_start_time,
+    publish as publish_lease, read_all as read_leases, remove as remove_lease,
+};
 pub use lockfile::{DependencySafety, classify_lockfile, find_lockfile, hash_lockfile};
 pub use mirror::{
     ReadMirror, StoreMirror, escape, mirror_path, publish as publish_mirror,
