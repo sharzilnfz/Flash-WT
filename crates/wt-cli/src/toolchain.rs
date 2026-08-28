@@ -106,22 +106,43 @@ pub fn relocate_toolchains(
 
 /// Sanitize and relocate a single Python virtual environment directory.
 pub fn relocate_venv(src_root: &Path, dest_root: &Path, venv_dir: &Path) -> Result<()> {
+    let mut replacements: Vec<(String, String)> = Vec::new();
+
+    let mut add_pair = |s: &str, d: &str| {
+        if !s.is_empty()
+            && !d.is_empty()
+            && s != d
+            && !replacements.iter().any(|(from, _)| from == s)
+        {
+            replacements.push((s.to_string(), d.to_string()));
+        }
+    };
+
     let src_str = src_root.to_string_lossy().into_owned();
     let dest_str = dest_root.to_string_lossy().into_owned();
+    add_pair(&src_str, &dest_str);
 
-    let src_canonical = fs::canonicalize(src_root)
-        .map(|p| p.to_string_lossy().into_owned())
-        .ok();
-    let dest_canonical = fs::canonicalize(dest_root)
-        .map(|p| p.to_string_lossy().into_owned())
-        .ok();
+    if let (Ok(sc), Ok(dc)) = (fs::canonicalize(src_root), fs::canonicalize(dest_root)) {
+        let sc_str = sc.to_string_lossy().into_owned();
+        let dc_str = dc.to_string_lossy().into_owned();
+        add_pair(&sc_str, &dc_str);
+
+        if let Some(stripped_s) = sc_str.strip_prefix("/private") {
+            if let Some(stripped_d) = dc_str.strip_prefix("/private") {
+                add_pair(stripped_s, stripped_d);
+            }
+        }
+    }
+    if let Some(stripped_s) = src_str.strip_prefix("/private") {
+        if let Some(stripped_d) = dest_str.strip_prefix("/private") {
+            add_pair(stripped_s, stripped_d);
+        }
+    }
 
     let replace_paths = |text: &str| -> String {
-        let mut result = text.replace(&src_str, &dest_str);
-        if let (Some(sc), Some(dc)) = (&src_canonical, &dest_canonical) {
-            if sc != &src_str {
-                result = result.replace(sc, dc);
-            }
+        let mut result = text.to_string();
+        for (from, to) in &replacements {
+            result = result.replace(from, to);
         }
         result
     };
