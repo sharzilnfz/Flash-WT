@@ -19,6 +19,8 @@ workspace = true
 clap.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 wt-copy = { path = "../wt-copy" }
 wt-store = { path = "../wt-store" }
 

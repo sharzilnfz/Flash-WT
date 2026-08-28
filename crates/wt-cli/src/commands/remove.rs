@@ -1,11 +1,11 @@
-//! `wt remove` handler (arch-hardening ticket 03): the work happens
-//! in `gc::remove`; this wrapper keeps command dispatch uniform.
-
 use std::path::Path;
 
+use crate::config::RunConfig;
+use crate::envelope::{Diagnostic, RemoveData};
 use crate::error::Result;
 use crate::gc;
 
-pub fn run(name: &str, dir: Option<&Path>) -> Result<()> {
-    gc::remove(name, dir)
+pub fn run(name: &str, dir: Option<&Path>, cfg: &RunConfig) -> Result<(RemoveData, Vec<Diagnostic>)> {
+    gc::remove(name, dir, cfg)
 }
+

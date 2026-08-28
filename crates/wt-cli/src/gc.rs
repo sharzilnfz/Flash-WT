@@ -31,6 +31,8 @@ use std::time::Duration;
 
 use wt_store::{ContentId, GcMode, Store};
 
+use crate::config::RunConfig;
+use crate::envelope::{Diagnostic, MigrateData, RemoveData, SweepData};
 use crate::error::{Error, Result};
 use crate::gitops;
 use crate::hydrate::open_store;
@@ -132,7 +134,7 @@ fn read_ledger(git_dir: &Path) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
     Ok((blobs, snapshots))
 }
 
-pub fn remove(name: &str, dir: Option<&Path>) -> Result<()> {
+pub fn remove(name: &str, dir: Option<&Path>, cfg: &RunConfig) -> Result<(RemoveData, Vec<Diagnostic>)> {
     let root = gitops::repo_root()?;
 
     let dest = match dir {
@@ -201,7 +203,8 @@ pub fn remove(name: &str, dir: Option<&Path>) -> Result<()> {
         }
     }
 
-    if !ledger_blobs.is_empty() || !ledger_snapshots.is_empty() {
+    let mirror_removed = !ledger_blobs.is_empty() || !ledger_snapshots.is_empty();
+    if mirror_removed {
         fs::remove_file(git_dir.join("wt-hydrated.tsv")).map_err(|e| {
             Error::io_unanchored("remove ledger", git_dir.join("wt-hydrated.tsv"), e)
         })?;
@@ -216,15 +219,25 @@ pub fn remove(name: &str, dir: Option<&Path>) -> Result<()> {
         ))
     })?;
 
-    println!(
-        "removed worktree {}; released {released} reference{}",
-        dest.display(),
-        if released == 1 { "" } else { "s" }
-    );
-    Ok(())
+    if !cfg.json {
+        println!(
+            "removed worktree {}; released {released} reference{}",
+            dest.display(),
+            if released == 1 { "" } else { "s" }
+        );
+    }
+
+    let data = RemoveData {
+        worktree_path: dest.display().to_string(),
+        branch: name.to_string(),
+        references_released: released,
+        mirror_removed,
+    };
+
+    Ok((data, Vec::new()))
 }
 
-pub fn sweep(age: Option<Duration>) -> Result<()> {
+pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<Diagnostic>)> {
     let mut store = open_store()?;
     match store.gc_mode() {
         GcMode::Legacy => {
@@ -236,13 +249,24 @@ pub fn sweep(age: Option<Duration>) -> Result<()> {
             for line in store.audit_marks_against_refs(grace_from_env()?)? {
                 eprintln!("{line}");
             }
-            println!(
-                "swept store: examined {}, reclaimed {} entr{}",
-                swept.examined,
-                swept.reclaimed,
-                if swept.reclaimed == 1 { "y" } else { "ies" }
-            );
-            Ok(())
+            if !cfg.json {
+                println!(
+                    "swept store: examined {}, reclaimed {} entr{}",
+                    swept.examined,
+                    swept.reclaimed,
+                    if swept.reclaimed == 1 { "y" } else { "ies" }
+                );
+            }
+            let data = SweepData {
+                mode: "legacy".to_string(),
+                examined: swept.examined as usize,
+                reclaimed: swept.reclaimed as usize,
+                mirrors_removed: None,
+                snapshot_dirs_removed: None,
+                snapshot_cap_evicted: None,
+                deferred_by_grace: None,
+            };
+            Ok((data, Vec::new()))
         }
         GcMode::MarkSweep | GcMode::MarkSweepNoRefs => {
             let grace = match age {
@@ -255,15 +279,26 @@ pub fn sweep(age: Option<Duration>) -> Result<()> {
                     "wt-gc-audit: malformed young mirror deferred this sweep; rerun after the grace period"
                 );
             }
-            println!(
-                "swept store (mark-and-sweep): examined {}, reclaimed {}, mirrors removed {}, snapshots removed {}, cap evicted {}",
-                swept.examined,
-                swept.reclaimed,
-                swept.mirrors_removed,
-                swept.snapshot_dirs_removed,
-                swept.snapshot_cap_evicted,
-            );
-            Ok(())
+            if !cfg.json {
+                println!(
+                    "swept store (mark-and-sweep): examined {}, reclaimed {}, mirrors removed {}, snapshots removed {}, cap evicted {}",
+                    swept.examined,
+                    swept.reclaimed,
+                    swept.mirrors_removed,
+                    swept.snapshot_dirs_removed,
+                    swept.snapshot_cap_evicted,
+                );
+            }
+            let data = SweepData {
+                mode: "mark-sweep".to_string(),
+                examined: swept.examined as usize,
+                reclaimed: swept.reclaimed as usize,
+                mirrors_removed: Some(swept.mirrors_removed as usize),
+                snapshot_dirs_removed: Some(swept.snapshot_dirs_removed as usize),
+                snapshot_cap_evicted: Some(swept.snapshot_cap_evicted as usize),
+                deferred_by_grace: Some(swept.deferred_by_grace),
+            };
+            Ok((data, Vec::new()))
         }
     }
 }
@@ -271,7 +306,7 @@ pub fn sweep(age: Option<Duration>) -> Result<()> {
 /// The explicit one-way cutover (ADR-0004): activate mark-and-sweep,
 /// or drop legacy refcount files entirely with a loud warning that
 /// pre-cutover binaries must not use this store afterwards.
-pub fn migrate(activate: bool, drop_refs: bool) -> Result<()> {
+pub fn migrate(activate: bool, drop_refs: bool, cfg: &RunConfig) -> Result<(MigrateData, Vec<Diagnostic>)> {
     let mut store = open_store()?;
     if drop_refs {
         eprintln!(
@@ -284,20 +319,35 @@ touches {} understands mirrors.",
         store
             .set_gc_mode(GcMode::MarkSweepNoRefs)
             .map_err(|e| Error::Store(e.to_string()))?;
-        println!(
-            "gc-mode set to {}; purged {purged} legacy ref file{}",
-            GcMode::MARK_SWEEP_NO_REFS,
-            if purged == 1 { "" } else { "s" }
-        );
+        if !cfg.json {
+            println!(
+                "gc-mode set to {}; purged {purged} legacy ref file{}",
+                GcMode::MARK_SWEEP_NO_REFS,
+                if purged == 1 { "" } else { "s" }
+            );
+        }
+        let data = MigrateData {
+            gc_mode: GcMode::MARK_SWEEP_NO_REFS.to_string(),
+            purged_legacy_refs: Some(purged),
+        };
+        Ok((data, Vec::new()))
     } else if activate {
         store
             .set_gc_mode(GcMode::MarkSweep)
             .map_err(|e| Error::Store(e.to_string()))?;
-        println!(
-            "gc-mode set to {}: sweep now collects from live-mirror marks plus the \
+        if !cfg.json {
+            println!(
+                "gc-mode set to {}: sweep now collects from live-mirror marks plus the \
 grace period; refs/ stay maintained but ignored",
-            GcMode::MARK_SWEEP
-        );
+                GcMode::MARK_SWEEP
+            );
+        }
+        let data = MigrateData {
+            gc_mode: GcMode::MARK_SWEEP.to_string(),
+            purged_legacy_refs: None,
+        };
+        Ok((data, Vec::new()))
+    } else {
+        Err(Error::Usage("must specify a migration action".into()))
     }
-    Ok(())
 }

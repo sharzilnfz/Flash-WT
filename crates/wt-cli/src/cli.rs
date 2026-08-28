@@ -21,6 +21,10 @@ fn parse_age_value(text: &str) -> Result<Duration, String> {
     about = "Instant git worktrees with heavy directories already hydrated"
 )]
 pub struct Cli {
+    /// Emit machine-readable JSON output on stdout.
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: WtCommand,
 }
@@ -111,6 +115,19 @@ per-file ladder above.")]
         #[command(subcommand)]
         action: StoreAction,
     },
+}
+
+impl WtCommand {
+    /// Return the canonical command name for JSON envelopes and logs.
+    pub fn name(&self) -> &'static str {
+        match self {
+            WtCommand::Create { .. } => "create",
+            WtCommand::Remove { .. } => "remove",
+            WtCommand::Sweep { .. } => "sweep",
+            WtCommand::Scrub { .. } => "scrub",
+            WtCommand::Store { .. } => "store",
+        }
+    }
 }
 
 #[derive(Subcommand)]

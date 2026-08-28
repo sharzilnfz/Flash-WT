@@ -6,9 +6,9 @@
 
 **Status:** ready-for-agent
 
-- [ ] Global `--json` flag is parsed across `create`, `remove`, `sweep`, and `scrub` subcommands.
-- [ ] Command execution on stdout emits a single line NDJSON envelope with `wt_version`, integer `schema_version` (value `1`), `command`, `status` (`"ok"` or `"error"`), `data`, and `diagnostics` array.
-- [ ] Non-JSON human progress lines and warnings are suppressed or redirected to stderr when `--json` is active.
-- [ ] `wt create --json` data payload includes worktree path, branch, cache hit status, duration, `hydration_method`, `bytes_shared_cow`, and `bytes_copied`.
-- [ ] `wt remove --json`, `wt sweep --json`, and `wt scrub --json` emit typed machine-readable payload summaries.
-- [ ] Automated CLI integration tests verify schema conformance and stderr isolation for all commands.
+- [x] Global `--json` flag is parsed across `create`, `remove`, `sweep`, and `scrub` subcommands.
+- [x] Command execution on stdout emits a single line NDJSON envelope with `wt_version`, integer `schema_version` (value `1`), `command`, `status` (`"ok"` or `"error"`), `data`, and `diagnostics` array.
+- [x] Non-JSON human progress lines and warnings are suppressed or redirected to stderr when `--json` is active.
+- [x] `wt create --json` data payload includes worktree path, branch, cache hit status, duration, `hydration_method`, `bytes_shared_cow`, and `bytes_copied`.
+- [x] `wt remove --json`, `wt sweep --json`, and `wt scrub --json` emit typed machine-readable payload summaries.
+- [x] Automated CLI integration tests verify schema conformance and stderr isolation for all commands.

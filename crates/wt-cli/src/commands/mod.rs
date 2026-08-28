@@ -9,23 +9,75 @@ pub mod sweep;
 
 use crate::cli::{StoreAction, WtCommand};
 use crate::config::RunConfig;
-use crate::error::Result;
+use crate::envelope::Envelope;
+use crate::error::{Error, Result};
 
 pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<()> {
+    let command_name = command.name();
     match command {
         WtCommand::Create {
             name,
             manifest,
             dir,
-        } => create::run(&name, manifest.as_deref(), dir.as_deref(), cfg),
-        WtCommand::Remove { name, dir } => remove::run(&name, dir.as_deref()),
-        WtCommand::Sweep { age } => sweep::run(age),
-        WtCommand::Scrub { dry_run } => scrub::run(dry_run),
+        } => {
+            let (data, diags) = create::run(&name, manifest.as_deref(), dir.as_deref(), cfg)?;
+            if cfg.json {
+                let env = Envelope::ok(command_name, data, diags);
+                println!(
+                    "{}",
+                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
+                );
+            }
+            Ok(())
+        }
+        WtCommand::Remove { name, dir } => {
+            let (data, diags) = remove::run(&name, dir.as_deref(), cfg)?;
+            if cfg.json {
+                let env = Envelope::ok(command_name, data, diags);
+                println!(
+                    "{}",
+                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
+                );
+            }
+            Ok(())
+        }
+        WtCommand::Sweep { age } => {
+            let (data, diags) = sweep::run(age, cfg)?;
+            if cfg.json {
+                let env = Envelope::ok(command_name, data, diags);
+                println!(
+                    "{}",
+                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
+                );
+            }
+            Ok(())
+        }
+        WtCommand::Scrub { dry_run } => {
+            let (data, diags) = scrub::run(dry_run, cfg)?;
+            if cfg.json {
+                let env = Envelope::ok(command_name, data, diags);
+                println!(
+                    "{}",
+                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
+                );
+            }
+            Ok(())
+        }
         WtCommand::Store { action } => match action {
             StoreAction::Migrate {
                 activate_mark_sweep,
                 drop_legacy_refs,
-            } => migrate::run(activate_mark_sweep, drop_legacy_refs),
+            } => {
+                let (data, diags) = migrate::run(activate_mark_sweep, drop_legacy_refs, cfg)?;
+                if cfg.json {
+                    let env = Envelope::ok(command_name, data, diags);
+                    println!(
+                        "{}",
+                        serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
+                    );
+                }
+                Ok(())
+            }
         },
     }
 }

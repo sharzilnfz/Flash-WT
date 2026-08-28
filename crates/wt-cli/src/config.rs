@@ -52,6 +52,8 @@ pub struct RunConfig {
     pub v2: bool,
     /// `WT_TIMING`: print `wt-stage` lines to stderr.
     pub timing: bool,
+    /// `--json`: emit single-line NDJSON output envelope.
+    pub json: bool,
 }
 
 impl RunConfig {
@@ -69,6 +71,7 @@ impl RunConfig {
             snapshots: flag("WT_SNAPSHOTS"),
             v2: flag("WT_SNAPSHOTS_V2"),
             timing: flag("WT_TIMING"),
+            json: false,
         }
     }
 }
