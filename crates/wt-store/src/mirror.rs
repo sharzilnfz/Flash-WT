@@ -116,6 +116,10 @@ pub struct StoreMirror {
     /// Canonical path of the worktree's git dir (the directory that
     /// holds the `wt-hydrated.tsv` sidecar).
     pub gitdir: PathBuf,
+    /// Symbolic name of the parent base branch (ticket 02).
+    pub base_branch: Option<String>,
+    /// Initial head commit hash of the base branch (ticket 02).
+    pub base_commit: Option<String>,
     /// Every distinct blob the hydration placed, one `file` record
     /// each.
     pub files: BTreeSet<ContentId>,
@@ -131,6 +135,8 @@ impl StoreMirror {
         StoreMirror {
             worktree,
             gitdir,
+            base_branch: None,
+            base_commit: None,
             files: BTreeSet::new(),
             snapshots: BTreeSet::new(),
         }
@@ -144,6 +150,15 @@ impl StoreMirror {
         out.push('\t');
         out.push_str(&escape(&self.gitdir.to_string_lossy()));
         out.push('\n');
+        if let Some(ref base) = self.base_branch {
+            out.push_str("base\t");
+            out.push_str(&escape(base));
+            if let Some(ref commit) = self.base_commit {
+                out.push('\t');
+                out.push_str(commit);
+            }
+            out.push('\n');
+        }
         for id in &self.files {
             out.push_str("file\t");
             out.push_str(&id.to_string());
@@ -186,6 +201,20 @@ impl StoreMirror {
         for line in lines {
             let fields: Vec<&str> = line.split('\t').collect();
             match fields.as_slice() {
+                ["base", symbolic, commit] => {
+                    if mirror.base_branch.is_some() {
+                        return Err("duplicate base record".into());
+                    }
+                    mirror.base_branch = Some(unescape(symbolic)?);
+                    mirror.base_commit = Some((*commit).to_string());
+                }
+                ["base", symbolic] => {
+                    if mirror.base_branch.is_some() {
+                        return Err("duplicate base record".into());
+                    }
+                    mirror.base_branch = Some(unescape(symbolic)?);
+                    mirror.base_commit = None;
+                }
                 ["file", hex] | ["snapshot", hex] => {
                     let id = ContentId::from_hex(hex)
                         .ok_or_else(|| format!("malformed 64-hex id {hex:?}"))?;
@@ -429,5 +458,27 @@ mod tests {
         assert!(remove(&root, &m.worktree, &m.gitdir).expect("remove"));
         assert!(!remove(&root, &m.worktree, &m.gitdir).expect("remove again"));
         assert!(read_all(&root).is_empty());
+    }
+
+    #[test]
+    fn base_branch_record_round_trips_and_escapes() {
+        let mut m = StoreMirror::new(
+            PathBuf::from("/worktree/feature-1"),
+            PathBuf::from("/repo/.git/worktrees/feature-1"),
+        );
+        m.base_branch = Some("feat/special\tbranch\n%name".into());
+        m.base_commit = Some("0123456789abcdef0123456789abcdef01234567".into());
+        m.files.insert(ContentId([42u8; 32]));
+
+        let text = m.serialize();
+        assert!(text.contains("base\tfeat/special%09branch%0A%25name\t0123456789abcdef0123456789abcdef01234567\n"));
+        let parsed = StoreMirror::parse(&text).expect("parse");
+        assert_eq!(parsed, m);
+    }
+
+    #[test]
+    fn duplicate_base_record_rejects_the_mirror() {
+        let text = "v1\tworktree\t/w/one\t/r/.git/worktrees/one\nbase\tmain\t1111\nbase\tmain\t2222\n";
+        assert!(StoreMirror::parse(text).is_err());
     }
 }

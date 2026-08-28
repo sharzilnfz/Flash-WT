@@ -23,15 +23,17 @@ use crate::timing::StageTimings;
 
 pub fn run(
     name: &str,
+    base: Option<&str>,
     manifest: Option<&Path>,
     dir: Option<&Path>,
     cfg: &RunConfig,
 ) -> Result<(CreateData, Vec<Diagnostic>)> {
-    create(name, manifest, dir, cfg)
+    create(name, base, manifest, dir, cfg)
 }
 
 fn create(
     name: &str,
+    base: Option<&str>,
     manifest: Option<&Path>,
     dir: Option<&Path>,
     cfg: &RunConfig,
@@ -48,10 +50,17 @@ fn create(
     let timing_enabled = cfg.timing;
     let mut timings = StageTimings::new();
     let started = Instant::now();
-    // Prefer creating the branch from HEAD; an existing branch falls
+    let start_point = base.unwrap_or("HEAD");
+    let base_commit = if let Some(base_ref) = base {
+        Some(gitops::resolve_commit(&root, base_ref)?)
+    } else {
+        None
+    };
+
+    // Prefer creating the branch from start_point; an existing branch falls
     // back to checking it out directly.
     let dest_text = dest.to_string_lossy().into_owned();
-    gitops::run(&root, &["worktree", "add", "-b", name, &dest_text, "HEAD"])
+    gitops::run(&root, &["worktree", "add", "-b", name, &dest_text, start_point])
         .or_else(|_| gitops::run(&root, &["worktree", "add", &dest_text, name]))?;
     timings.git_worktree_ms = started.elapsed().as_millis();
 
@@ -79,6 +88,33 @@ fn create(
     };
     let dirs = collect_matches(&root, &patterns)?;
     if dirs.is_empty() {
+        let mut store = open_store()?;
+        let git_dir = gitops::git_dir(&dest)?;
+        let combined = Ingested {
+            dirs: Vec::new(),
+            dir_modes: BTreeMap::new(),
+            files: BTreeMap::new(),
+            file_sizes: BTreeMap::new(),
+            symlinks: BTreeMap::new(),
+            modes: BTreeMap::new(),
+        };
+        publish_mirror(
+            &mut store,
+            &dest,
+            &git_dir,
+            &combined,
+            &[],
+            base,
+            base_commit.as_deref(),
+        )?;
+
+        let diagnostics = crate::base::check_base_movement(&store, &root, base);
+        for d in &diagnostics {
+            if !cfg.json {
+                eprintln!("wt: warning: {}", d.message);
+            }
+        }
+
         if !cfg.json {
             println!("nothing to hydrate");
             timings.emit(started, timing_enabled);
@@ -93,7 +129,7 @@ fn create(
             bytes_copied: 0,
             files_hydrated: 0,
         };
-        return Ok((data, Vec::new()));
+        return Ok((data, diagnostics));
     }
 
     let mut store = open_store()?;
@@ -150,7 +186,15 @@ fn create(
     // the GC bookkeeping mark-and-sweep marks through. Ticket 08:
     // snapshot-hydrated dirs appear as `snapshot` records here.
     let stage = Instant::now();
-    publish_mirror(&mut store, &dest, &git_dir, &combined, &snapshot_hashes)?;
+    publish_mirror(
+        &mut store,
+        &dest,
+        &git_dir,
+        &combined,
+        &snapshot_hashes,
+        base,
+        base_commit.as_deref(),
+    )?;
     timings.references_ms += stage.elapsed().as_millis();
 
     // Post-hydration toolchain relocation pass (ticket 08).
@@ -192,14 +236,19 @@ fn create(
         timings.emit(started, timing_enabled);
     }
 
-    let mut diagnostics = Vec::new();
-    if total_copied > 0 && cfg.strategy_policy != StrategyPolicy::ForceByteCopy {
+    let mut diagnostics = crate::base::check_base_movement(&store, &root, base);
+    if total_copied > 0 {
         diagnostics.push(Diagnostic::warning(
             "CROSS_DEVICE_COPY_DEGRADATION",
             format!(
                 "Storage boundaries or filesystem refusal forced fallback byte copies for {total_copied} of {total_files} file(s)"
             ),
         ));
+    }
+    for d in &diagnostics {
+        if !cfg.json {
+            eprintln!("wt: warning: {}", d.message);
+        }
     }
 
     let hydration_method = if total_files == 0 {

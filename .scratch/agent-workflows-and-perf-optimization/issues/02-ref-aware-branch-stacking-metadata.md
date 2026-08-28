@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] `wt create <name> --base <ref>` records the symbolic name of the parent base branch in worktree mirror metadata.
-- [ ] Base branch head commit resolution tracks whether the parent branch ref has changed since worktree initialization.
-- [ ] Diagnostic warnings are emitted in both human output and `--json` envelope diagnostics when parent branch movement is detected.
-- [ ] Integration tests verify symbolic ref preservation, detection of upstream rebase shifts, and diagnostic envelope formatting.
+- [x] `wt create <name> --base <ref>` records the symbolic name of the parent base branch in worktree mirror metadata.
+- [x] Base branch head commit resolution tracks whether the parent branch ref has changed since worktree initialization.
+- [x] Diagnostic warnings are emitted in both human output and `--json` envelope diagnostics when parent branch movement is detected.
+- [x] Integration tests verify symbolic ref preservation, detection of upstream rebase shifts, and diagnostic envelope formatting.
