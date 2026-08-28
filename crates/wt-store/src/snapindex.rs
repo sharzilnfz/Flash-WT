@@ -66,7 +66,8 @@ pub struct SelectionRecord {
 }
 
 impl SelectionRecord {
-    fn matches(&self, repo_root: &str, pattern: &str, heavy_dir: &str) -> bool {
+    /// True when this record matches the given repo root, pattern, and heavy directory.
+    pub fn matches(&self, repo_root: &str, pattern: &str, heavy_dir: &str) -> bool {
         self.repo_root == repo_root && self.pattern == pattern && self.heavy_dir == heavy_dir
     }
 

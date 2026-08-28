@@ -620,7 +620,7 @@ fn gc_marks_through_valid_manifests_only() {
     fs::create_dir_all(&gitdir).unwrap();
     fs::write(gitdir.join("wt-hydrated.tsv"), "").unwrap();
     store
-        .publish_worktree_mirror(&wt_dir, &gitdir, std::iter::empty(), [&m.hash])
+        .publish_worktree_mirror(&wt_dir, &gitdir, std::iter::empty(), [&m.hash], None, None)
         .unwrap();
 
     let now = std::time::SystemTime::now();

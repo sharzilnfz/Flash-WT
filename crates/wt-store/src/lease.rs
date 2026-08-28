@@ -248,7 +248,7 @@ pub fn process_start_time(pid: u32) -> Option<u64> {
             pbi_start_tvsec: u64,
             pbi_start_tvusec: u64,
         }
-        extern "C" {
+        unsafe extern "C" {
             fn proc_pidinfo(
                 pid: libc::c_int,
                 flavor: libc::c_int,

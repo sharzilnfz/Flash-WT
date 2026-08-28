@@ -58,14 +58,13 @@ pub fn buffered_copy_file(from: &Path, to: &Path) -> io::Result<u64> {
     let mut src = fs::File::open(from)?;
     let meta = src.metadata()?;
     let mode = meta.permissions().mode() & 0o7777;
-    let len = meta.len();
 
     #[cfg(target_os = "linux")]
     unsafe {
         libc::posix_fadvise(
             src.as_raw_fd(),
             0,
-            len as libc::off_t,
+            meta.len() as libc::off_t,
             libc::POSIX_FADV_SEQUENTIAL,
         );
     }
@@ -85,7 +84,7 @@ pub fn buffered_copy_file(from: &Path, to: &Path) -> io::Result<u64> {
         libc::posix_fadvise(
             dest.as_raw_fd(),
             0,
-            len as libc::off_t,
+            meta.len() as libc::off_t,
             libc::POSIX_FADV_SEQUENTIAL,
         );
     }
