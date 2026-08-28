@@ -959,3 +959,194 @@ fn scattered_changes_clone_once_and_relink_only_what_changed() {
     );
     store.flush().unwrap();
 }
+
+#[test]
+fn subtree_partitioned_parallel_snapshot_construction_integrity() {
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+
+    let mut entries = Vec::new();
+    let mut ref_contents = std::collections::HashMap::new();
+
+    // Create 30 distinct directories with 10 files each, plus symlinks and empty directories
+    for dir_idx in 0..30 {
+        let dir_name = format!("pkg_{dir_idx:03}");
+        entries.push(SnapshotEntry::dir(&dir_name));
+
+        // Subdirectory
+        let sub_dir = format!("{dir_name}/nested");
+        entries.push(SnapshotEntry::dir(&sub_dir));
+
+        // Empty directory
+        let empty_dir = format!("{dir_name}/empty");
+        entries.push(SnapshotEntry::dir(&empty_dir));
+
+        for file_idx in 0..10 {
+            let data = format!("content of dir {dir_idx} file {file_idx}\n");
+            let blob = store.put(data.as_bytes()).unwrap();
+            let rel = format!("{dir_name}/file_{file_idx:02}.txt");
+            let mode = if file_idx % 2 == 0 { 0o755 } else { 0o644 };
+            entries.push(SnapshotEntry::file(&rel, blob, mode));
+            ref_contents.insert(rel, (data.into_bytes(), mode));
+        }
+
+        // Nested file
+        let nested_data = format!("nested content {dir_idx}\n");
+        let nested_blob = store.put(nested_data.as_bytes()).unwrap();
+        let nested_rel = format!("{sub_dir}/item.txt");
+        entries.push(SnapshotEntry::file(&nested_rel, nested_blob, 0o644));
+        ref_contents.insert(nested_rel, (nested_data.into_bytes(), 0o644));
+
+        // Symlink
+        let symlink_rel = format!("{dir_name}/link_to_file0");
+        entries.push(SnapshotEntry::symlink(&symlink_rel, "file_00.txt"));
+    }
+
+    let manifest = Manifest::new(entries.clone()).unwrap();
+    let receipt = store
+        .publish_snapshot_with_timing(entries, false)
+        .unwrap();
+    assert_eq!(receipt.outcome, PublishOutcome::Published);
+
+    // Verify tree integrity
+    let tree_path = snapshot_tree_path(store.root(), &manifest.hash);
+    for (rel, (expected_bytes, expected_mode)) in ref_contents {
+        let path = tree_path.join(&rel);
+        assert!(path.is_file(), "missing file: {rel}");
+        let actual_bytes = fs::read(&path).unwrap();
+        assert_eq!(actual_bytes, expected_bytes, "content mismatch for {rel}");
+
+        let md = fs::metadata(&path).unwrap();
+        let norm_mode = if expected_mode & 0o111 != 0 {
+            EXEC_FILE_MODE
+        } else {
+            PLAIN_FILE_MODE
+        };
+        assert_eq!(
+            md.permissions().mode() & 0o777,
+            norm_mode,
+            "mode mismatch for {rel}"
+        );
+    }
+
+    for dir_idx in 0..30 {
+        let dir_name = format!("pkg_{dir_idx:03}");
+        assert!(tree_path.join(&dir_name).is_dir());
+        assert!(tree_path.join(format!("{dir_name}/nested")).is_dir());
+        assert!(tree_path.join(format!("{dir_name}/empty")).is_dir());
+
+        let sym_path = tree_path.join(format!("{dir_name}/link_to_file0"));
+        let md = fs::symlink_metadata(&sym_path).unwrap();
+        assert!(md.file_type().is_symlink());
+        assert_eq!(
+            fs::read_link(&sym_path).unwrap(),
+            Path::new("file_00.txt")
+        );
+    }
+
+    store.flush().unwrap();
+}
+
+#[test]
+fn parallel_snapshot_construction_missing_blob_fails_safely() {
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+
+    let b1 = store.put(b"blob 1").unwrap();
+    let ghost = ContentId(Sha256::digest(b"ghost missing").into());
+
+    let entries = vec![
+        SnapshotEntry::dir("sub_a"),
+        SnapshotEntry::file("sub_a/a.txt", b1, 0o644),
+        SnapshotEntry::dir("sub_b"),
+        SnapshotEntry::file("sub_b/b.txt", ghost, 0o644),
+    ];
+
+    let err = store.publish_snapshot(entries.clone(), false).unwrap_err();
+    match err {
+        BuildError::MissingBlob(id) => assert_eq!(id, ghost),
+        other => panic!("expected MissingBlob, got {other:?}"),
+    }
+
+    // Now heal ghost and publish successfully
+    store.put(b"ghost missing").unwrap();
+    let receipt = store.publish_snapshot(entries, false).unwrap();
+    assert_eq!(receipt, PublishOutcome::Published);
+    store.flush().unwrap();
+}
+
+#[test]
+fn parallel_snapshot_construction_paranoid_fails_on_corruption() {
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+
+    let b1 = store.put(b"valid content").unwrap();
+    let b2 = store.put(b"corrupted content").unwrap();
+
+    // Tamper with b2 on disk preserving mtime/size
+    let path = store.blob_path(&b2);
+    let orig_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::write(&path, b"CORRUPTED CONTENT").unwrap();
+    let f = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    f.set_times(std::fs::FileTimes::new().set_modified(orig_mtime))
+        .unwrap();
+
+    let entries = vec![
+        SnapshotEntry::dir("dir1"),
+        SnapshotEntry::file("dir1/f1.txt", b1, 0o644),
+        SnapshotEntry::dir("dir2"),
+        SnapshotEntry::file("dir2/f2.txt", b2, 0o644),
+    ];
+
+    let err = store.publish_snapshot(entries, true).unwrap_err();
+    match err {
+        BuildError::Fatal(msg) => assert!(msg.contains("hash verification"), "{msg}"),
+        other => panic!("expected Fatal error on corrupt blob, got {other:?}"),
+    }
+    store.flush().unwrap();
+}
+
+#[test]
+fn large_scale_subtree_partitioned_parallel_ingestion_integrity() {
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+
+    let mut entries = Vec::new();
+    let shared_blob = store.put(b"common file payload for scale test\n").unwrap();
+    let exec_blob = store.put(b"#!/bin/bash\necho executable\n").unwrap();
+
+    // 40 directories, 50 files each = 2,000 files
+    for dir_idx in 0..40 {
+        let dir_rel = format!("module_{dir_idx:02}");
+        entries.push(SnapshotEntry::dir(&dir_rel));
+
+        for file_idx in 0..50 {
+            let file_rel = format!("{dir_rel}/file_{file_idx:02}.txt");
+            let mode = if file_idx == 0 { 0o755 } else { 0o644 };
+            let blob = if file_idx == 0 { exec_blob } else { shared_blob };
+            entries.push(SnapshotEntry::file(&file_rel, blob, mode));
+        }
+    }
+
+    let manifest = Manifest::new(entries.clone()).unwrap();
+    let receipt = store
+        .publish_snapshot_with_timing(entries, false)
+        .unwrap();
+    assert_eq!(receipt.outcome, PublishOutcome::Published);
+
+    let tree_path = snapshot_tree_path(store.root(), &manifest.hash);
+    for dir_idx in 0..40 {
+        let dir_rel = format!("module_{dir_idx:02}");
+        assert!(tree_path.join(&dir_rel).is_dir());
+
+        for file_idx in 0..50 {
+            let file_rel = format!("{dir_rel}/file_{file_idx:02}.txt");
+            let p = tree_path.join(&file_rel);
+            assert!(p.is_file());
+            let md = fs::metadata(&p).unwrap();
+            let expected_mode = if file_idx == 0 { EXEC_FILE_MODE } else { PLAIN_FILE_MODE };
+            assert_eq!(md.permissions().mode() & 0o777, expected_mode);
+        }
+    }
+    store.flush().unwrap();
+}

@@ -6,9 +6,9 @@
 
 **Status:** ready-for-agent
 
-- [ ] Directory skeleton creation runs sequentially in sorted order before file linking starts.
-- [ ] File and symlink entries are grouped by parent directory into subtree batches.
-- [ ] Batches are dispatched across worker threads scoped by `std::thread::scope`.
-- [ ] Worker tasks link files using relative `openat` operations without contending on shared parent directory locks.
-- [ ] File descriptors are closed eagerly within each batch.
-- [ ] Snapshot ingestion benchmarks verify multi-core speedup and tree integrity matching serial ingestion.
+- [x] Directory skeleton creation runs sequentially in sorted order before file linking starts.
+- [x] File and symlink entries are grouped by parent directory into subtree batches.
+- [x] Batches are dispatched across worker threads scoped by `std::thread::scope`.
+- [x] Worker tasks link files using relative `openat` operations without contending on shared parent directory locks.
+- [x] File descriptors are closed eagerly within each batch.
+- [x] Snapshot ingestion benchmarks verify multi-core speedup and tree integrity matching serial ingestion.
