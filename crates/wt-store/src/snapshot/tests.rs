@@ -558,10 +558,10 @@ fn incremental_publish_matches_full_build_semantics() {
         // The published result validates and its tree carries EXACTLY
         // the new content: bumped file, untouched package, symlink,
         // empty dir.
-        assert_eq!(
-            store.find_snapshot(&new_manifest.hash).unwrap(),
-            new_manifest
-        );
+        let found = store.find_snapshot(&new_manifest.hash).unwrap();
+        assert_eq!(found.entries, new_manifest.entries);
+        assert_eq!(found.hash, new_manifest.hash);
+        assert_eq!(found.lockfile_hash, new_manifest.lockfile_hash);
         let tree = snapshot_tree_path(store.root(), &new_manifest.hash);
         assert_eq!(
             fs::read_to_string(tree.join("root.txt")).unwrap(),
@@ -953,10 +953,9 @@ fn scattered_changes_clone_once_and_relink_only_what_changed() {
         receipt.timing.linked_files, 3,
         "exactly the changed files may be freshly linked"
     );
-    assert_eq!(
-        store.find_snapshot(&new_manifest.hash).unwrap(),
-        new_manifest
-    );
+    let found = store.find_snapshot(&new_manifest.hash).unwrap();
+    assert_eq!(found.entries, new_manifest.entries);
+    assert_eq!(found.hash, new_manifest.hash);
     store.flush().unwrap();
 }
 

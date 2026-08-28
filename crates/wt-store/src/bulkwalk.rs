@@ -585,17 +585,23 @@ mod tests {
     fn thread_local_scratch_buffer_thread_isolation() {
         use std::sync::mpsc::channel;
 
-        let (tx, rx) = channel();
+        let (tx_child, rx_child) = channel();
+        let (tx_done, rx_done) = channel();
+
+        with_scratch_buffer(|buf| {
+            buf[0] = 10;
+        });
+
         let handle = std::thread::spawn(move || {
             with_scratch_buffer(|buf| {
                 assert_eq!(buf.len(), INITIAL_BUFFER_CAPACITY);
                 buf[0] = 42;
-                tx.send(buf.as_ptr() as usize).unwrap();
+                tx_child.send(buf.as_ptr() as usize).unwrap();
             });
+            let _ = rx_done.recv();
         });
 
-        let child_ptr = rx.recv().unwrap();
-        handle.join().unwrap();
+        let child_ptr = rx_child.recv().unwrap();
 
         with_scratch_buffer(|buf| {
             assert_ne!(
@@ -603,8 +609,11 @@ mod tests {
                 child_ptr,
                 "different threads receive independent scratch buffers"
             );
-            assert_eq!(buf[0], 0, "main thread scratch buffer is isolated");
+            assert_eq!(buf[0], 10, "main thread scratch buffer is isolated");
         });
+
+        let _ = tx_done.send(());
+        handle.join().unwrap();
     }
 
     #[test]
