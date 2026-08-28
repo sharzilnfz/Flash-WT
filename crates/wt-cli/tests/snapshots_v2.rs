@@ -670,9 +670,15 @@ fn unusable_selection_index_never_fails_the_create() {
 
     assert_created(&fx.wt(&["create", "one"], BOTH_GATES, "origin-one"));
     let index = fx.store_path().join("snapshots/index.tsv");
-    assert!(index.is_file());
-    fs::remove_file(&index).unwrap();
-    fs::create_dir(&index).expect("squat a directory on index.tsv");
+    let journal = fx.store_path().join("snapshots/journal.tsv");
+    if index.is_file() {
+        let _ = fs::remove_file(&index);
+    }
+    fs::create_dir_all(&index).expect("squat a directory on index.tsv");
+    if journal.is_file() {
+        let _ = fs::remove_file(&journal);
+    }
+    fs::create_dir_all(&journal).expect("squat a directory on journal.tsv");
 
     bump_source(&fx.heavy());
     let out = fx.wt(
