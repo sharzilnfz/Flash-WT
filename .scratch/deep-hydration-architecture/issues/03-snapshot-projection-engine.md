@@ -1,6 +1,6 @@
 # Issue 03: Snapshot Projection Engine Relocation
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Context
 `wt-cli/src/snapshots.rs` contains 700+ lines of storage-layer caching policies: v2 delta rebuild heuristics, selection index rotation, ENOENT healing retries, and lockfile validation tiers.

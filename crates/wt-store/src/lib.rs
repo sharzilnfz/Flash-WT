@@ -22,7 +22,10 @@ pub mod lockfile;
 pub mod mirror;
 
 pub use disk::{DiskStore, FsCapabilities, probe_fs};
-pub use gc::{GcMode, MarkReport, MarkSwept};
+pub use gc::{
+    GcMode, MarkReport, MarkSwept, NoopWorkspaceCleaner, StoreReclaimer, SweepPolicy, SweepSummary,
+    WorkspaceCleaner,
+};
 pub use lease::{
     DEFAULT_LEASE_TTL_SECS, ReadLease, WorktreeLease, current_process_start_time, is_lease_expired,
     is_process_alive, lease_path, process_start_time, publish as publish_lease,
@@ -42,7 +45,8 @@ pub use snapindex::{
 };
 pub use snapshot::{
     BuildError, EntryKind, Manifest, PublishOutcome, PublishReceipt, SnapshotBuildTiming,
-    SnapshotEntry, read_published as read_published_snapshot, snapshot_path, snapshot_tree_path,
+    SnapshotEntry, SnapshotHydration, SnapshotOutcome, SnapshotProjectionEngine,
+    read_published as read_published_snapshot, snapshot_path, snapshot_tree_path,
 };
 pub use validation::{Entry, ValidationCache};
 pub use verified::{Fingerprint, VerifiedLedger};

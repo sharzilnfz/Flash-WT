@@ -1,6 +1,6 @@
 # Issue 02: Autonomous Store & Lease Reclamation Engine
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Context
 Garbage collection and lease expiration are split between `wt-cli/src/gc.rs` and `wt-store/src/gc.rs`. `wt-cli` contains raw store GC logic (`sweep_leases`) that inspects PID tables, parses ledgers, removes mirrors, and runs `git worktree remove` and `git branch -D`.

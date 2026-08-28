@@ -47,6 +47,7 @@ pub use materialize::{
 };
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub use materialize::{FileMaterialize, HardlinkOut, placement_refused};
+pub use materialize::{Materializer, PlacementOutcome, StrategyPolicy};
 #[cfg(target_os = "linux")]
 pub use reflink::{ReflinkBackend, reflink_file};
 pub use selection::{SourcePolicy, candidates, select_backend};

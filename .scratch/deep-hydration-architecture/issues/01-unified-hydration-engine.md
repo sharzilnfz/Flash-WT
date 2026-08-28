@@ -1,6 +1,6 @@
 # Issue 01: Unified Hydration Engine
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Context
 `wt-cli/src/hydrate.rs` and `wt-cli/src/commands/create.rs` currently expose six separate functions for ingesting files, selecting strategy, materializing blobs, writing sidecar manifests, claiming references, and publishing mirrors. This shallowness forces `create.rs` and `scratch.rs` to manually coordinate storage and copy invariants.

@@ -608,3 +608,292 @@ fn remove_tree(path: &Path) -> bool {
 fn path_error(what: &str, e: io::Error) -> io::Error {
     io::Error::other(format!("cannot canonicalize {what}: {e}"))
 }
+
+/// Workspace cleaning adapter trait for external worktree and directory removal.
+pub trait WorkspaceCleaner: Send + Sync {
+    /// Compute the disk size of a worktree path in bytes.
+    fn worktree_size(&self, path: &Path) -> u64;
+    /// Clean up a worktree from git tracking and disk.
+    fn clean_workspace(&self, worktree: &Path, gitdir: &Path, branch_name: &str) -> io::Result<()>;
+}
+
+/// Fallback / no-op workspace cleaner.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopWorkspaceCleaner;
+
+impl WorkspaceCleaner for NoopWorkspaceCleaner {
+    fn worktree_size(&self, _path: &Path) -> u64 {
+        0
+    }
+
+    fn clean_workspace(
+        &self,
+        _worktree: &Path,
+        _gitdir: &Path,
+        _branch_name: &str,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Garbage collection and lease sweep policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweepPolicy {
+    /// Grace duration before unreferenced objects and dead mirrors become eligible for reclamation.
+    pub grace: Duration,
+    /// Maximum number of unreferenced snapshots to retain past grace period.
+    pub snapshot_cap: usize,
+    /// Maximum disk byte budget for unreferenced snapshots.
+    pub max_snapshot_bytes: Option<u64>,
+}
+
+impl Default for SweepPolicy {
+    fn default() -> Self {
+        Self {
+            grace: Duration::from_secs(15 * 60),
+            snapshot_cap: 64,
+            max_snapshot_bytes: None,
+        }
+    }
+}
+
+/// Summary outcome of a full reclamation sweep pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweepSummary {
+    /// Active GC collection mode during the sweep.
+    pub mode: GcMode,
+    /// Total blob objects examined.
+    pub examined_blobs: u64,
+    /// Unreferenced, aged-out blobs deleted.
+    pub reclaimed_blobs: u64,
+    /// Stale or dead mirrors removed.
+    pub mirrors_removed: u64,
+    /// Snapshot directories (including temp debris) removed.
+    pub snapshot_dirs_removed: u64,
+    /// Snapshots evicted strictly to satisfy snapshot retention caps/budgets.
+    pub snapshot_cap_evicted: u64,
+    /// Whether deletion of unmarked objects was deferred due to young malformed mirrors.
+    pub deferred_by_grace: bool,
+    /// Total lease files examined.
+    pub leases_examined: usize,
+    /// Dead or expired leases successfully reclaimed.
+    pub leases_reclaimed: usize,
+    /// Estimated bytes of scratch worktrees reclaimed.
+    pub lease_bytes_reclaimed: u64,
+    /// Audit disagreement lines between mark-and-sweep and legacy refcounts.
+    pub audit_disagreements: Vec<String>,
+}
+
+/// Unified store and lease reclamation engine.
+pub struct StoreReclaimer<'a, C: WorkspaceCleaner> {
+    store: &'a mut DiskStore,
+    cleaner: &'a C,
+}
+
+impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
+    /// Construct a new `StoreReclaimer` on the given store with a workspace cleaner adapter.
+    pub fn new(store: &'a mut DiskStore, cleaner: &'a C) -> Self {
+        Self { store, cleaner }
+    }
+
+    /// Sweep dead or expired worktree leases.
+    fn sweep_leases(&mut self, policy: &SweepPolicy) -> Result<(usize, usize, u64)> {
+        let now = SystemTime::now();
+        let cutoff = cutoff_of(now, policy.grace);
+        let leases = crate::lease::read_all(self.store.root());
+        let leases_examined = leases.len();
+        let mut leases_reclaimed = 0usize;
+        let mut lease_bytes_reclaimed = 0u64;
+
+        for read in leases {
+            let crate::lease::ReadLease {
+                path,
+                id,
+                modified,
+                lease,
+            } = read;
+
+            match lease {
+                Ok(lease) => {
+                    let is_dead = !crate::lease::is_process_alive(lease.pid, lease.start_time);
+                    let is_expired = crate::lease::is_lease_expired(&lease);
+                    let is_orphaned = !lease.worktree.exists();
+
+                    if is_dead || is_expired || is_orphaned {
+                        let bytes = if lease.worktree.exists() {
+                            self.cleaner.worktree_size(&lease.worktree)
+                        } else {
+                            0
+                        };
+                        lease_bytes_reclaimed += bytes;
+
+                        if lease.gitdir.exists() {
+                            let ledger_path = lease.gitdir.join("wt-hydrated.tsv");
+                            if ledger_path.exists() {
+                                if let Ok(text) = fs::read_to_string(&ledger_path) {
+                                    if self.store.gc_mode() != GcMode::MarkSweepNoRefs {
+                                        for line in text.lines() {
+                                            if line.is_empty() {
+                                                continue;
+                                            }
+                                            let fields: Vec<&str> = line.split('\t').collect();
+                                            match fields.as_slice() {
+                                                [_, id_str] => {
+                                                    if let Some(cid) = ContentId::from_hex(id_str) {
+                                                        match Store::release_ref(self.store, &cid) {
+                                                            Ok(()) => {}
+                                                            Err(Error::RefCountUnderflow(_)) => {}
+                                                            Err(e) => return Err(e),
+                                                        }
+                                                    }
+                                                }
+                                                [_, kind, id_str] if *kind == "blob" => {
+                                                    if let Some(cid) = ContentId::from_hex(id_str) {
+                                                        match Store::release_ref(self.store, &cid) {
+                                                            Ok(()) => {}
+                                                            Err(Error::RefCountUnderflow(_)) => {}
+                                                            Err(e) => return Err(e),
+                                                        }
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                                let _ = fs::remove_file(&ledger_path);
+                            }
+                        }
+                        let _ = self
+                            .store
+                            .remove_worktree_mirror(&lease.worktree, &lease.gitdir);
+
+                        let branch_name = if lease.gitdir.exists() {
+                            fs::read_to_string(lease.gitdir.join("HEAD"))
+                                .ok()
+                                .and_then(|h| {
+                                    let h = h.trim();
+                                    h.strip_prefix("ref: refs/heads/").map(|s| s.to_string())
+                                })
+                        } else {
+                            None
+                        };
+                        let branch_name = branch_name.unwrap_or_else(|| {
+                            if lease.id.starts_with("scratch-") {
+                                lease.id.clone()
+                            } else {
+                                format!("scratch-{}", lease.id)
+                            }
+                        });
+
+                        let _ = self.cleaner.clean_workspace(
+                            &lease.worktree,
+                            &lease.gitdir,
+                            &branch_name,
+                        );
+
+                        let _ = crate::lease::remove(self.store.root(), &id);
+                        let _ = fs::remove_file(&path);
+
+                        leases_reclaimed += 1;
+                    }
+                }
+                Err(_reason) => {
+                    if modified <= cutoff {
+                        let _ = fs::remove_file(&path);
+                        leases_reclaimed += 1;
+                    }
+                }
+            }
+        }
+
+        Ok((leases_examined, leases_reclaimed, lease_bytes_reclaimed))
+    }
+
+    /// Perform a full sweep across leases and store objects under the given policy.
+    pub fn sweep(&mut self, policy: &SweepPolicy) -> Result<SweepSummary> {
+        let (leases_examined, leases_reclaimed, lease_bytes_reclaimed) =
+            self.sweep_leases(policy)?;
+
+        let mode = self.store.gc_mode();
+        match mode {
+            GcMode::Legacy => {
+                let swept = self.store.sweep(policy.grace)?;
+                let audit_disagreements = self.store.audit_marks_against_refs(policy.grace)?;
+                Ok(SweepSummary {
+                    mode,
+                    examined_blobs: swept.examined,
+                    reclaimed_blobs: swept.reclaimed,
+                    mirrors_removed: 0,
+                    snapshot_dirs_removed: 0,
+                    snapshot_cap_evicted: 0,
+                    deferred_by_grace: false,
+                    leases_examined,
+                    leases_reclaimed,
+                    lease_bytes_reclaimed,
+                    audit_disagreements,
+                })
+            }
+            GcMode::MarkSweep | GcMode::MarkSweepNoRefs => {
+                let swept = self.store.sweep_mark_sweep_with_budget(
+                    policy.grace,
+                    policy.snapshot_cap,
+                    policy.max_snapshot_bytes,
+                )?;
+                Ok(SweepSummary {
+                    mode,
+                    examined_blobs: swept.examined,
+                    reclaimed_blobs: swept.reclaimed,
+                    mirrors_removed: swept.mirrors_removed,
+                    snapshot_dirs_removed: swept.snapshot_dirs_removed,
+                    snapshot_cap_evicted: swept.snapshot_cap_evicted,
+                    deferred_by_grace: swept.deferred_by_grace,
+                    leases_examined,
+                    leases_reclaimed,
+                    lease_bytes_reclaimed,
+                    audit_disagreements: Vec::new(),
+                })
+            }
+        }
+    }
+}
+
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_reclaimer_sweeps_dead_leases_and_unreferenced_blobs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_root = dir.path().join("store");
+        let mut store = DiskStore::open(&store_root).expect("open store");
+
+        let _id = store.put(b"hello world").expect("put blob");
+
+        // Dead lease
+        let lease = crate::lease::WorktreeLease::new(
+            "scratch-1",
+            dir.path().join("worktree-dead"),
+            dir.path().join("gitdir-dead"),
+            999_999_999,
+            0,
+            1900000000,
+        );
+        crate::lease::publish(&store_root, &lease).expect("publish lease");
+
+        let cleaner = NoopWorkspaceCleaner;
+        let mut reclaimer = StoreReclaimer::new(&mut store, &cleaner);
+        let policy = SweepPolicy {
+            grace: Duration::ZERO,
+            snapshot_cap: 64,
+            max_snapshot_bytes: None,
+        };
+
+        let summary = reclaimer.sweep(&policy).expect("sweep");
+        assert_eq!(summary.leases_examined, 1);
+        assert_eq!(summary.leases_reclaimed, 1);
+        assert_eq!(summary.reclaimed_blobs, 1);
+        assert_eq!(summary.examined_blobs, 1);
+    }
+}

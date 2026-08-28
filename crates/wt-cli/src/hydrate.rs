@@ -37,18 +37,19 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-#[cfg(target_os = "macos")]
-use wt_copy::CloneOut;
-#[cfg(target_os = "linux")]
-use wt_copy::{CopyFileRangeOut, ReflinkOut};
-use wt_copy::{FileMaterialize, HardlinkOut, buffered_copy_file, placement_refused};
+use wt_copy::Materializer;
 #[cfg(target_os = "macos")]
 use wt_store::bulkwalk;
 use wt_store::{ContentId, DiskStore, Entry as CacheEntry, GcMode, Store, ValidationCache};
 
 use crate::config::{RunConfig, StrategyPolicy};
+use crate::envelope::Diagnostic;
 use crate::error::{Error, Result};
 use crate::gitops;
+use crate::manifest::{collect_matches, pattern_matches};
+use crate::snapshots;
+use crate::snapshots::Outcome as SnapshotOutcome;
+use crate::timing::StageTimings;
 
 /// Where the per-machine store lives. `$WT_STORE` wins (tests use it
 /// for isolation); otherwise XDG cache conventions.
@@ -72,6 +73,432 @@ pub fn open_store() -> Result<DiskStore> {
     let dir = store_dir()?;
     DiskStore::open(&dir)
         .map_err(|e| Error::Store(format!("cannot open store at {}: {e}", dir.display())))
+}
+
+/// Request parameters for worktree hydration.
+pub struct HydrationRequest<'a> {
+    pub root: &'a Path,
+    pub dest: &'a Path,
+    pub patterns: &'a [String],
+    pub base_branch: Option<&'a str>,
+    pub base_commit: Option<&'a str>,
+    pub cfg: &'a RunConfig,
+}
+
+/// Consolidated report of worktree hydration operations and metrics.
+#[allow(dead_code)]
+pub struct HydrationReport {
+    pub total_files: usize,
+    pub total_copied: usize,
+    pub bytes_shared_cow: u64,
+    pub bytes_copied: u64,
+    pub strategy: &'static str,
+    pub hydration_method: String,
+    pub cache_hit: bool,
+    pub snapshot_hashes: Vec<ContentId>,
+    pub dirs_hydrated: Vec<PathBuf>,
+    pub timings: StageTimings,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Deep hydration engine coordinating discovery, caching, snapshot
+/// projection, parallel materialization, mirror publishing, and ledger persistence.
+pub struct HydrationEngine<'a> {
+    store: &'a mut DiskStore,
+}
+
+impl<'a> HydrationEngine<'a> {
+    /// Create a new `HydrationEngine` backed by the given disk store.
+    pub fn new(store: &'a mut DiskStore) -> Self {
+        Self { store }
+    }
+
+    /// Execute the complete hydration pipeline for the given request.
+    pub fn hydrate(&mut self, req: HydrationRequest<'_>) -> Result<HydrationReport> {
+        let mut timings = StageTimings::new();
+        let dirs = collect_matches(req.root, req.patterns)?;
+
+        if dirs.is_empty() {
+            let git_dir = gitops::git_dir(req.dest)?;
+            let combined = Ingested {
+                dirs: Vec::new(),
+                dir_modes: BTreeMap::new(),
+                files: BTreeMap::new(),
+                file_sizes: BTreeMap::new(),
+                symlinks: BTreeMap::new(),
+                modes: BTreeMap::new(),
+            };
+            publish_mirror(
+                self.store,
+                req.dest,
+                &git_dir,
+                &combined,
+                &[],
+                req.base_branch,
+                req.base_commit,
+            )?;
+
+            let diagnostics =
+                crate::base::check_base_movement(self.store, req.root, req.base_branch);
+            for d in &diagnostics {
+                if !req.cfg.json {
+                    eprintln!("wt: warning: {}", d.message);
+                }
+            }
+
+            if !req.cfg.json {
+                println!("nothing to hydrate");
+            }
+
+            return Ok(HydrationReport {
+                total_files: 0,
+                total_copied: 0,
+                bytes_shared_cow: 0,
+                bytes_copied: 0,
+                strategy: "none",
+                hydration_method: "none".to_string(),
+                cache_hit: false,
+                snapshot_hashes: Vec::new(),
+                dirs_hydrated: Vec::new(),
+                timings,
+                diagnostics,
+            });
+        }
+
+        let mut total_files = 0usize;
+        let mut total_copied = 0usize;
+        let mut bytes_shared_cow = 0u64;
+        let mut bytes_copied = 0u64;
+        let mut strategy = "byte-copy";
+        let mut combined = Ingested {
+            dirs: Vec::new(),
+            dir_modes: BTreeMap::new(),
+            files: BTreeMap::new(),
+            file_sizes: BTreeMap::new(),
+            symlinks: BTreeMap::new(),
+            modes: BTreeMap::new(),
+        };
+        let mut snapshot_hashes: Vec<ContentId> = Vec::new();
+        let mut git_dir = req.dest.to_path_buf();
+        let mut dirs_hydrated = Vec::new();
+
+        for rel in &dirs {
+            dirs_hydrated.push(rel.clone());
+            let outcome =
+                self.hydrate_one_dir(req.patterns, req.root, req.dest, rel, req.cfg, &mut timings)?;
+            git_dir = outcome.git_dir;
+            if let Some(hash) = outcome.snapshot_hash {
+                snapshot_hashes.push(hash);
+            }
+            match outcome.ladder {
+                None => {
+                    total_files += outcome.ingested.files.len();
+                    bytes_shared_cow += outcome.ingested.file_sizes.values().sum::<u64>();
+                }
+                Some(report) => {
+                    combined.dirs.extend(outcome.ingested.dirs.iter().cloned());
+                    for (r, mode) in &outcome.ingested.dir_modes {
+                        combined.dir_modes.insert(r.clone(), *mode);
+                    }
+                    for (r, id) in &outcome.ingested.files {
+                        combined.files.insert(r.clone(), *id);
+                    }
+                    for (r, size) in &outcome.ingested.file_sizes {
+                        combined.file_sizes.insert(r.clone(), *size);
+                    }
+                    total_files += report.files;
+                    total_copied += report.copied;
+                    bytes_shared_cow += report.bytes_shared;
+                    bytes_copied += report.bytes_copied;
+                    strategy = report.strategy;
+                }
+            }
+        }
+
+        let stage = Instant::now();
+        publish_mirror(
+            self.store,
+            req.dest,
+            &git_dir,
+            &combined,
+            &snapshot_hashes,
+            req.base_branch,
+            req.base_commit,
+        )?;
+        timings.references_ms += stage.elapsed().as_millis();
+
+        crate::toolchain::relocate_toolchains(req.root, req.dest, &dirs)?;
+
+        if !req.cfg.json {
+            if req.cfg.strategy_policy == StrategyPolicy::ForceByteCopy {
+                println!(
+                    "hardlink mode off (WT_NO_HARDLINK): wrote byte copies for all {total_files} file(s)"
+                );
+            } else {
+                match (strategy, total_copied) {
+                    ("hardlink", 0) => println!(
+                        "experimental hardlink mode (WT_HARDLINK): linked shared inodes for all {total_files} file(s)"
+                    ),
+                    ("hardlink", n) => println!(
+                        "experimental hardlink mode (WT_HARDLINK): hardlinks refused for {n} of {total_files} file(s); wrote byte copies"
+                    ),
+                    (_, 0) => {}
+                    (name, n) => println!(
+                        "{name} unavailable on this filesystem: wrote byte copies for {n} of {total_files} file(s)"
+                    ),
+                }
+            }
+        }
+
+        self.store.flush().map_err(|e| {
+            Error::io_unanchored("update verified-blob ledger", self.store.root(), e)
+        })?;
+
+        if !req.cfg.json {
+            println!(
+                "hydration complete: {total_files} file{} through the store",
+                if total_files == 1 { "" } else { "s" }
+            );
+        }
+
+        let mut diagnostics =
+            crate::base::check_base_movement(self.store, req.root, req.base_branch);
+        if total_copied > 0 {
+            diagnostics.push(Diagnostic::warning(
+                "CROSS_DEVICE_COPY_DEGRADATION",
+                format!(
+                    "Storage boundaries or filesystem refusal forced fallback byte copies for {total_copied} of {total_files} file(s)"
+                ),
+            ));
+        }
+        for d in &diagnostics {
+            if !req.cfg.json {
+                eprintln!("wt: warning: {}", d.message);
+            }
+        }
+
+        let hydration_method = if total_files == 0 {
+            "none"
+        } else if snapshot_hashes.len() == dirs.len()
+            || (strategy == "copy-on-write" && total_copied == 0)
+        {
+            "clone"
+        } else if strategy == "hardlink" && total_copied == 0 {
+            "hardlink"
+        } else if total_copied == total_files {
+            "byte_copy"
+        } else {
+            match strategy {
+                "copy-on-write" => "clone",
+                "reflink" => "reflink",
+                "copy_file_range" => "copy_file_range",
+                "hardlink" => "hardlink",
+                _ => "byte_copy",
+            }
+        }
+        .to_string();
+
+        let cache_hit = (snapshot_hashes.len() == dirs.len() && !timings.snapshot_built)
+            || (total_files > 0 && total_copied == 0 && !timings.snapshot_built);
+
+        Ok(HydrationReport {
+            total_files,
+            total_copied,
+            bytes_shared_cow,
+            bytes_copied,
+            strategy,
+            hydration_method,
+            cache_hit,
+            snapshot_hashes,
+            dirs_hydrated,
+            timings,
+            diagnostics,
+        })
+    }
+
+    fn hydrate_one_dir(
+        &mut self,
+        patterns: &[String],
+        root: &Path,
+        dest: &Path,
+        rel: &Path,
+        cfg: &RunConfig,
+        timings: &mut StageTimings,
+    ) -> Result<DirOutcome> {
+        let src = root.join(rel);
+        let heavy = rel.to_string_lossy().into_owned();
+
+        let pattern = patterns
+            .iter()
+            .find(|p| pattern_matches(p, rel))
+            .map(String::as_str)
+            .unwrap_or("");
+
+        let lockfile_info = wt_store::find_lockfile(root, rel).and_then(|lp| {
+            let content = std::fs::read(&lp).ok()?;
+            let text = std::str::from_utf8(&content).ok()?;
+            let safety = wt_store::classify_lockfile(text);
+            let hash = wt_store::hash_lockfile(&content);
+            Some((safety, hash))
+        });
+
+        let pinned_lockfile_hash = match lockfile_info {
+            Some((wt_store::DependencySafety::Pinned, hash)) => Some(hash),
+            _ => None,
+        };
+
+        if cfg.snapshots && !cfg.verify {
+            if let Some(ref lock_hash) = pinned_lockfile_hash {
+                let stage = Instant::now();
+                match snapshots::try_lockfile_hit(
+                    self.store, root, pattern, root, &heavy, dest, lock_hash, cfg,
+                ) {
+                    SnapshotOutcome::Hydrated(h) => {
+                        timings.snapshot_ms += stage.elapsed().as_millis();
+                        timings.snapshot_engaged = true;
+                        timings.snapshot_lookup_ms += h.lookup_ms;
+                        timings.snapshot_clonefile_ms += h.clonefile_ms;
+                        timings.snapshot_mode = h.mode;
+                        timings.v2_cloned += h.cloned_units;
+                        timings.v2_linked += h.linked_files;
+                        let refs = Instant::now();
+                        let empty_ingested = Ingested {
+                            dirs: Vec::new(),
+                            dir_modes: BTreeMap::new(),
+                            files: BTreeMap::new(),
+                            file_sizes: BTreeMap::new(),
+                            symlinks: BTreeMap::new(),
+                            modes: BTreeMap::new(),
+                        };
+                        let git_dir =
+                            claim_snapshot_references(self.store, dest, &empty_ingested, h.hash)?;
+                        timings.references_ms += refs.elapsed().as_millis();
+                        if !cfg.json {
+                            println!(
+                                "hydrated {heavy} from {} via snapshot {} (one clone, {} file{})",
+                                src.display(),
+                                &h.hash.to_string()[..12],
+                                h.files,
+                                if h.files == 1 { "" } else { "s" },
+                            );
+                        }
+                        return Ok(DirOutcome {
+                            git_dir,
+                            snapshot_hash: Some(h.hash),
+                            ingested: empty_ingested,
+                            ladder: None,
+                        });
+                    }
+                    SnapshotOutcome::FellBack(Some(reason)) => {
+                        eprintln!("wt-snapshots: {heavy}: lockfile fast path fell back ({reason})");
+                    }
+                    SnapshotOutcome::FellBack(None) => {}
+                    SnapshotOutcome::Failed(msg) => {
+                        return Err(Error::Store(format!("hydration of {heavy} failed: {msg}")));
+                    }
+                }
+            }
+        }
+
+        let stage = Instant::now();
+        let ingested = ingest_dir(self.store, root, &src, cfg)?;
+        timings.ingest_ms += stage.elapsed().as_millis();
+
+        if cfg.snapshots {
+            let stage = Instant::now();
+            match snapshots::hydrate(
+                self.store,
+                &ingested,
+                root,
+                pattern,
+                &src,
+                &heavy,
+                dest,
+                pinned_lockfile_hash.as_ref(),
+                cfg,
+            ) {
+                SnapshotOutcome::Hydrated(h) => {
+                    timings.snapshot_ms += stage.elapsed().as_millis();
+                    timings.snapshot_engaged = true;
+                    timings.snapshot_lookup_ms += h.lookup_ms;
+                    timings.snapshot_clonefile_ms += h.clonefile_ms;
+                    timings.snapshot_mode = h.mode;
+                    timings.v2_cloned += h.cloned_units;
+                    timings.v2_linked += h.linked_files;
+                    if let Some(b) = h.build {
+                        timings.snapshot_built = true;
+                        timings.build_verify_ms += b.verify_ms;
+                        timings.build_link_train_ms += b.link_train_ms;
+                        timings.build_publish_ms += b.publish_ms;
+                    }
+                    let refs = Instant::now();
+                    let git_dir = claim_snapshot_references(self.store, dest, &ingested, h.hash)?;
+                    timings.references_ms += refs.elapsed().as_millis();
+                    if !cfg.json {
+                        println!(
+                            "hydrated {heavy} from {} via snapshot {} (one clone, {} file{})",
+                            src.display(),
+                            &h.hash.to_string()[..12],
+                            h.files,
+                            if h.files == 1 { "" } else { "s" },
+                        );
+                    }
+                    return Ok(DirOutcome {
+                        git_dir,
+                        snapshot_hash: Some(h.hash),
+                        ingested,
+                        ladder: None,
+                    });
+                }
+                SnapshotOutcome::FellBack(Some(reason)) => {
+                    eprintln!(
+                        "wt-snapshots: {heavy}: falling back to per-file placement ({reason})"
+                    );
+                }
+                SnapshotOutcome::FellBack(None) => {}
+                SnapshotOutcome::Failed(msg) => {
+                    return Err(Error::Store(format!("hydration of {heavy} failed: {msg}")));
+                }
+            }
+        }
+
+        let stage = Instant::now();
+        let git_dir = claim_references(self.store, dest, &ingested)?;
+        timings.references_ms += stage.elapsed().as_millis();
+
+        let stage = Instant::now();
+        let report = materialize(self.store, &ingested, dest, cfg)
+            .map_err(|e| Error::Store(format!("hydration of {} failed: {e}", rel.display())))?;
+        timings.materialize_ms += stage.elapsed().as_millis();
+        timings.verify_ms += report.verify_ms;
+        timings.place_ms += report.place_ms;
+        if !cfg.json {
+            println!(
+                "hydrated {} from {} via store ({} file{})",
+                rel.display(),
+                src.display(),
+                report.files,
+                if report.files == 1 { "" } else { "s" }
+            );
+        }
+        Ok(DirOutcome {
+            git_dir,
+            snapshot_hash: None,
+            ingested,
+            ladder: Some(report),
+        })
+    }
+}
+
+/// What one heavy directory contributed to the worktree and the mirror.
+struct DirOutcome {
+    /// The worktree's resolved git dir (captured while claiming references).
+    git_dir: PathBuf,
+    /// Manifest hash when the snapshot fast path served this directory.
+    snapshot_hash: Option<ContentId>,
+    ingested: Ingested,
+    /// Per-file ladder placement report; `None` means snapshot served the directory.
+    ladder: Option<MaterializeReport>,
 }
 
 /// Everything one heavy directory contributed to the store.
@@ -335,105 +762,59 @@ fn rel_text(root: &Path, path: &Path) -> Result<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
-/// Outcome of materializing one heavy directory.
+/// Outcome of materializing one heavy directory via the per-file ladder.
 pub struct MaterializeReport {
     /// Total files placed.
     pub files: usize,
     /// Files written as plain byte copies because the selected
     /// strategy was disabled, refused by the filesystem, or could not
-    /// carry the recorded mode (a hardlink whose exec bits mismatched
-    /// is replaced by a private copy — that replacement counts here).
+    /// carry the recorded mode.
     pub copied: usize,
     /// Bytes placed via shared copy-on-write / hardlink inodes.
     pub bytes_shared: u64,
     /// Bytes written as plain byte copies.
     pub bytes_copied: u64,
-    /// Strategy attempted for this directory: `"copy-on-write"`
-    /// (default), `"hardlink"` (`WT_HARDLINK=1`), or `"byte-copy"`
-    /// (forced by `WT_NO_HARDLINK`, and the answer on platforms with
-    /// no clone support yet). Check `copied` to see how much of it
-    /// actually happened.
+    /// Strategy attempted for this directory.
     pub strategy: &'static str,
-    /// Step 0 instrumentation: milliseconds spent proving blobs
-    /// before placement (`Store::get` under `WT_VERIFY`, else
-    /// `DiskStore::ensure_verified`).
+    /// Milliseconds spent proving blobs before placement.
     pub verify_ms: u128,
-    /// Step 0 instrumentation: milliseconds spent placing files —
-    /// the selected strategy, byte-copy fallbacks, and the ENOENT
-    /// parent-repair retry included.
+    /// Milliseconds spent placing files.
     pub place_ms: u128,
-}
-
-/// Which placement strategy this run uses, from the startup policy and
-/// probed filesystem capabilities:
-///
-/// - `ForceByteCopy` (`WT_NO_HARDLINK` on): forced byte copies.
-/// - `Hardlink` (`WT_HARDLINK` on): experimental hardlinked materialization.
-/// - `Default`: per-file CoW clones on macOS APFS; reflink on Linux btrfs/XFS;
-///   copy_file_range on Linux ext4; fallback byte copy with posix_fadvise on cross-device.
-fn select_strategy(
-    policy: StrategyPolicy,
-    store: &DiskStore,
-    dest_root: &Path,
-) -> (Option<Box<dyn FileMaterialize>>, &'static str) {
-    match policy {
-        StrategyPolicy::ForceByteCopy => (None, "byte-copy"),
-        StrategyPolicy::Hardlink => (Some(Box::new(HardlinkOut)), "hardlink"),
-        StrategyPolicy::Default => {
-            let store_caps = store.fs_capabilities();
-            let dest_caps = wt_store::probe_fs(dest_root).ok();
-            let is_cross_device = dest_caps
-                .map(|d| d.device_id != store_caps.device_id)
-                .unwrap_or(false);
-
-            #[cfg(target_os = "macos")]
-            {
-                if !is_cross_device && store_caps.reflink_capable {
-                    (Some(Box::new(CloneOut)), "copy-on-write")
-                } else {
-                    (None, "copy-on-write")
-                }
-            }
-
-            #[cfg(target_os = "linux")]
-            {
-                if !is_cross_device && store_caps.reflink_capable {
-                    (Some(Box::new(ReflinkOut)), "reflink")
-                } else if !is_cross_device && store_caps.is_ext4() {
-                    (Some(Box::new(CopyFileRangeOut)), "copy_file_range")
-                } else {
-                    (None, "copy-on-write")
-                }
-            }
-
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-            {
-                (None, "copy-on-write")
-            }
-        }
-    }
 }
 
 /// Recreate the ingested tree under `dest_root` from store content.
 ///
-/// Per file: verify first, and only then place anything — a corrupt
-/// blob never lands in a fresh tree. Verification is
+/// Per file: verify first, and only then place anything. Verification is
 /// `Store::get`'s read-and-hash when `RunConfig::verify` is set, and
-/// `DiskStore::ensure_verified` otherwise: a blob whose verified
-/// ledger fingerprint still matches its stat is trusted without
-/// reading a byte; everything else is hashed once and remembered.
+/// `DiskStore::ensure_verified` otherwise.
 ///
-/// Placement tries the selected strategy (CoW clone / reflink / copy_file_range)
-/// against the verified blob; filesystem refusals fall back silently
-/// to a sequential buffered copy with `posix_fadvise`. Placement is
-/// dispatched in parallel across worker threads.
+/// Placement uses [`Materializer`], attempting the selected strategy (CoW clone /
+/// reflink / copy_file_range) and falling back to sequential buffered copy.
+/// Placement is dispatched in parallel across worker threads.
 pub fn materialize(
     store: &DiskStore,
     ingested: &Ingested,
     dest_root: &Path,
     cfg: &RunConfig,
 ) -> Result<MaterializeReport> {
-    let (backend, strategy_name) = select_strategy(cfg.strategy_policy, store, dest_root);
+    let store_caps = store.fs_capabilities();
+    let dest_caps = wt_store::probe_fs(dest_root).ok();
+    let is_cross_device = dest_caps
+        .map(|d| d.device_id != store_caps.device_id)
+        .unwrap_or(false);
+
+    let materializer = Materializer::new(
+        match cfg.strategy_policy {
+            StrategyPolicy::Default => wt_copy::StrategyPolicy::Default,
+            StrategyPolicy::Hardlink => wt_copy::StrategyPolicy::Hardlink,
+            StrategyPolicy::ForceByteCopy => wt_copy::StrategyPolicy::ForceByteCopy,
+        },
+        dest_root,
+        is_cross_device,
+        store_caps.reflink_capable,
+        store_caps.is_ext4(),
+    );
+    let strategy_name = materializer.strategy();
     let paranoid = cfg.verify;
 
     for rel in &ingested.dirs {
@@ -494,42 +875,11 @@ pub fn materialize(
 
                     let src = store.blob_path(id);
                     let dest = dest_root.join(rel);
+                    let mode = ingested.modes.get(rel).copied();
 
                     let p_start = Instant::now();
-                    let placed = match place(backend.as_deref(), &src, &dest) {
-                        Ok(placed) => placed,
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            let parent = match dest.parent() {
-                                Some(p) => p,
-                                None => {
-                                    let mut slot =
-                                        err_slot.lock().unwrap_or_else(|p| p.into_inner());
-                                    if slot.is_none() {
-                                        *slot = Some(Error::Store(format!("{rel} has no parent")));
-                                    }
-                                    break;
-                                }
-                            };
-                            if let Err(e) = fs::create_dir_all(parent) {
-                                let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
-                                if slot.is_none() {
-                                    *slot = Some(Error::io("prepare", parent, e));
-                                }
-                                break;
-                            }
-                            match place(backend.as_deref(), &src, &dest) {
-                                Ok(placed) => placed,
-                                Err(e) => {
-                                    let mut slot =
-                                        err_slot.lock().unwrap_or_else(|p| p.into_inner());
-                                    if slot.is_none() {
-                                        *slot =
-                                            Some(Error::Store(format!("materialize {rel}: {e}")));
-                                    }
-                                    break;
-                                }
-                            }
-                        }
+                    let outcome = match materializer.materialize_file(&src, &dest, mode) {
+                        Ok(outcome) => outcome,
                         Err(e) => {
                             let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
                             if slot.is_none() {
@@ -538,36 +888,14 @@ pub fn materialize(
                             break;
                         }
                     };
+                    worker_place_ms += p_start.elapsed().as_millis();
 
-                    let mut is_byte_copied = !placed;
-                    if let Some(&mode) = ingested.modes.get(rel) {
-                        let shared_inode = placed
-                            && backend
-                                .as_deref()
-                                .is_some_and(|b| b.shares_inode_with_source());
-                        match finalize_mode(shared_inode, mode, &src, &dest) {
-                            Ok(repaired) => {
-                                if repaired {
-                                    is_byte_copied = true;
-                                }
-                            }
-                            Err(e) => {
-                                let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
-                                if slot.is_none() {
-                                    *slot = Some(Error::Store(format!("materialize {rel}: {e}")));
-                                }
-                                break;
-                            }
-                        }
-                    }
-
-                    if is_byte_copied {
+                    if outcome.is_shared_cow {
+                        worker_bytes_shared += size;
+                    } else {
                         worker_copied += 1;
                         worker_bytes_copied += size;
-                    } else {
-                        worker_bytes_shared += size;
                     }
-                    worker_place_ms += p_start.elapsed().as_millis();
                 }
 
                 total_copied.fetch_add(worker_copied, std::sync::atomic::Ordering::Relaxed);
@@ -619,59 +947,6 @@ pub fn materialize(
         place_ms: total_place_ms.into_inner() as u128,
     })
 }
-
-/// Bring one freshly placed file to the mode recorded at ingest time.
-///
-/// Blobs are normalized (0644) and deduped by content only, so the
-/// recorded mode is per PATH and must be applied after placement. On
-/// a private inode that is a plain chmod. A hardlinked placement
-/// shares its inode with the store blob and every sibling tree —
-/// chmod there would leak both directions, and re-adding write bits
-/// would defeat the read-only guard — so a link whose exec bits do
-/// not match the record is replaced by a private byte copy first,
-/// which then takes any mode safely. Exec-bit parity is all a shared
-/// inode can ever carry faithfully; the stripped write bits stay.
-///
-/// Returns `true` when that replacement happened: the caller counts
-/// it as a byte copy in [`MaterializeReport::copied`].
-fn finalize_mode(shared_inode: bool, mode: u32, src: &Path, dest: &Path) -> io::Result<bool> {
-    let current = fs::metadata(dest)?.permissions().mode();
-    if shared_inode {
-        if current & 0o111 == mode & 0o111 {
-            return Ok(false);
-        }
-        fs::remove_file(dest)?;
-        buffered_copy_file(src, dest)?;
-        fs::set_permissions(dest, fs::Permissions::from_mode(mode))?;
-        return Ok(true);
-    }
-    if current & 0o7777 != mode {
-        fs::set_permissions(dest, fs::Permissions::from_mode(mode))?;
-    }
-    Ok(false)
-}
-
-/// One placement attempt for one file. Returns whether the selected
-/// strategy placed it; `false` means the filesystem refused the
-/// strategy and the caller got a plain byte copy instead. Errors come
-/// back raw so the caller can distinguish ENOENT (retry after
-/// repairing directories) from real failures.
-fn place(backend: Option<&dyn FileMaterialize>, src: &Path, dest: &Path) -> std::io::Result<bool> {
-    if let Some(backend) = backend {
-        match backend.materialize_file(src, dest) {
-            Ok(()) => return Ok(true),
-            Err(e) if placement_refused(&e) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    // Byte-copy fallback reads straight from the verified blob with sequential hint.
-    buffered_copy_file(src, dest)?;
-    Ok(false)
-}
-
-// Placement refusals ("this filesystem cannot do that") are
-// classified by `wt_copy::placement_refused`; everything else is a
-// real failure.
 
 /// Resolve the (absolute) git dir of a freshly created worktree.
 fn worktree_git_dir(worktree: &Path) -> Result<PathBuf> {

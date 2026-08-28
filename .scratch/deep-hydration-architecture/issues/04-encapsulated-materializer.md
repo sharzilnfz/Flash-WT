@@ -1,6 +1,6 @@
 # Issue 04: Encapsulated Materializer & Capability Matrix
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Context
 Filesystem probing, strategy selection (APFS clonefile, Linux reflink, copy_file_range, byte fallback), and inode permission repairs (`finalize_mode` replacing shared hardlinks with private copies) are currently scattered between `wt-cli` and `wt-copy`.

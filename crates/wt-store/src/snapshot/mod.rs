@@ -39,6 +39,7 @@
 //! - [`tree`]: staging-tree construction and the paranoid proof pass.
 
 mod manifest;
+mod projection;
 mod publish;
 mod tree;
 
@@ -47,6 +48,7 @@ mod tree;
 mod tests;
 
 pub use manifest::{EntryKind, Manifest, SnapshotEntry};
+pub use projection::{SnapshotHydration, SnapshotOutcome, SnapshotProjectionEngine};
 pub use publish::{BuildError, PublishOutcome, PublishReceipt, SnapshotBuildTiming};
 
 use std::fs;

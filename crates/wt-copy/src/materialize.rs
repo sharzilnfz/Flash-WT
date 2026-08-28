@@ -190,6 +190,209 @@ pub fn placement_refused(_e: &io::Error) -> bool {
     true
 }
 
+use crate::sys::buffered_copy_file;
+
+/// Placement strategy policy controlling how blobs are materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum StrategyPolicy {
+    /// Default: per-file CoW clones where the filesystem supports
+    /// them (APFS clonefile, Linux reflink, or copy_file_range), byte copies elsewhere.
+    #[default]
+    Default,
+    /// Experimental hardlinked materialization: linked inodes are made
+    /// read-only, so in-place rewrites fail loudly.
+    Hardlink,
+    /// Forced byte copies — the portable fallback.
+    ForceByteCopy,
+}
+
+/// The result and diagnostics of placing one file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlacementOutcome {
+    /// The display name of the strategy attempted or used.
+    pub strategy: &'static str,
+    /// Whether the file is sharing storage (CoW clone / shared hardlink inode).
+    pub is_shared_cow: bool,
+    /// Whether the file required a permission mode repair (e.g. replacing a shared hardlink
+    /// with a private byte copy because executable bits differed from target mode).
+    pub is_mode_repaired: bool,
+}
+
+/// Encapsulated file materializer that handles backend selection,
+/// fallback placement, directory repair on ENOENT, and permission mode normalization.
+pub struct Materializer {
+    backend: Option<Box<dyn FileMaterialize>>,
+    strategy: &'static str,
+}
+
+impl Materializer {
+    /// Create a new materializer based on the strategy policy and probed filesystem capabilities.
+    pub fn new(
+        policy: StrategyPolicy,
+        _dest_dir: &Path,
+        is_cross_device: bool,
+        reflink_capable: bool,
+        is_ext4: bool,
+    ) -> Self {
+        Self::select(policy, is_cross_device, reflink_capable, is_ext4)
+    }
+
+    /// Select a materializer based on strategy policy and filesystem capabilities.
+    pub fn select(
+        policy: StrategyPolicy,
+        is_cross_device: bool,
+        reflink_capable: bool,
+        is_ext4: bool,
+    ) -> Self {
+        match policy {
+            StrategyPolicy::ForceByteCopy => Self {
+                backend: None,
+                strategy: "byte-copy",
+            },
+            StrategyPolicy::Hardlink => Self {
+                backend: Some(Box::new(HardlinkOut)),
+                strategy: "hardlink",
+            },
+            StrategyPolicy::Default => {
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = is_ext4;
+                    if !is_cross_device && reflink_capable {
+                        Self {
+                            backend: Some(Box::new(CloneOut)),
+                            strategy: "copy-on-write",
+                        }
+                    } else {
+                        Self {
+                            backend: None,
+                            strategy: "copy-on-write",
+                        }
+                    }
+                }
+
+                #[cfg(target_os = "linux")]
+                {
+                    if !is_cross_device && reflink_capable {
+                        Self {
+                            backend: Some(Box::new(ReflinkOut)),
+                            strategy: "reflink",
+                        }
+                    } else if !is_cross_device && is_ext4 {
+                        Self {
+                            backend: Some(Box::new(CopyFileRangeOut)),
+                            strategy: "copy_file_range",
+                        }
+                    } else {
+                        Self {
+                            backend: None,
+                            strategy: "copy-on-write",
+                        }
+                    }
+                }
+
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                {
+                    let _ = (is_cross_device, reflink_capable, is_ext4);
+                    Self {
+                        backend: None,
+                        strategy: "copy-on-write",
+                    }
+                }
+            }
+        }
+    }
+
+    /// Construct a materializer with a custom backend and strategy name.
+    pub fn custom(backend: Option<Box<dyn FileMaterialize>>, strategy: &'static str) -> Self {
+        Self { backend, strategy }
+    }
+
+    /// The display name of the strategy this materializer attempts.
+    pub fn strategy(&self) -> &'static str {
+        self.strategy
+    }
+
+    /// The inner backend used for placement, if any.
+    pub fn backend(&self) -> Option<&dyn FileMaterialize> {
+        self.backend.as_deref()
+    }
+
+    /// Place one file at `dest` from `src`, creating parent directories if missing,
+    /// falling back to byte copy if placement is refused, and normalizing permission `mode`.
+    pub fn materialize_file(
+        &self,
+        src: &Path,
+        dest: &Path,
+        mode: Option<u32>,
+    ) -> io::Result<PlacementOutcome> {
+        let placed = match self.place_once(src, dest) {
+            Ok(placed) => placed,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                    self.place_once(src, dest)?
+                } else {
+                    return Err(e);
+                }
+            }
+            Err(e) => return Err(e),
+        };
+
+        let mut is_mode_repaired = false;
+        if let Some(target_mode) = mode {
+            let shared_inode = placed
+                && self
+                    .backend
+                    .as_deref()
+                    .is_some_and(|b| b.shares_inode_with_source());
+            is_mode_repaired = self.finalize_mode(shared_inode, target_mode, src, dest)?;
+        }
+
+        let is_shared_cow = placed && !is_mode_repaired;
+
+        Ok(PlacementOutcome {
+            strategy: self.strategy,
+            is_shared_cow,
+            is_mode_repaired,
+        })
+    }
+
+    fn place_once(&self, src: &Path, dest: &Path) -> io::Result<bool> {
+        if let Some(backend) = &self.backend {
+            match backend.materialize_file(src, dest) {
+                Ok(()) => return Ok(true),
+                Err(e) if placement_refused(&e) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        buffered_copy_file(src, dest)?;
+        Ok(false)
+    }
+
+    fn finalize_mode(
+        &self,
+        shared_inode: bool,
+        target_mode: u32,
+        src: &Path,
+        dest: &Path,
+    ) -> io::Result<bool> {
+        let current = fs::metadata(dest)?.permissions().mode();
+        if shared_inode {
+            if current & 0o111 == target_mode & 0o111 {
+                return Ok(false);
+            }
+            fs::remove_file(dest)?;
+            buffered_copy_file(src, dest)?;
+            fs::set_permissions(dest, fs::Permissions::from_mode(target_mode))?;
+            return Ok(true);
+        }
+        if current & 0o7777 != target_mode & 0o7777 {
+            fs::set_permissions(dest, fs::Permissions::from_mode(target_mode))?;
+        }
+        Ok(false)
+    }
+}
+
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests;

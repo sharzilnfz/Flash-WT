@@ -1218,3 +1218,70 @@ fn manifest_header_total_bytes_round_trips_and_records_publish_size() {
     let loaded = store.find_snapshot(&manifest.hash).unwrap();
     assert_eq!(loaded.total_size, expected_unique_size);
 }
+
+#[test]
+fn projection_engine_api_sanity() {
+    use std::collections::BTreeMap;
+
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+    let repo_root = base.path().join("repo");
+    let src_root = repo_root.clone();
+    let dest_root = base.path().join("dest");
+    let lockfile_hash = id(42);
+
+    let hit = SnapshotProjectionEngine::try_lockfile_hit(
+        &mut store,
+        &repo_root,
+        "heavy/**",
+        &src_root,
+        "heavy",
+        &dest_root,
+        &lockfile_hash,
+        false,
+    );
+    match hit {
+        SnapshotOutcome::FellBack(None) => {}
+        SnapshotOutcome::Hydrated(_)
+        | SnapshotOutcome::FellBack(Some(_))
+        | SnapshotOutcome::Failed(_) => {
+            #[cfg(not(target_os = "macos"))]
+            panic!("expected FellBack(None) on non-macOS");
+        }
+    }
+
+    let dirs = vec!["heavy".to_string(), "heavy/sub".to_string()];
+    let dir_modes = BTreeMap::new();
+    let files = BTreeMap::new();
+    let file_sizes = BTreeMap::new();
+    let symlinks = BTreeMap::new();
+    let modes = BTreeMap::new();
+
+    let outcome = SnapshotProjectionEngine::hydrate(
+        &mut store,
+        &dirs,
+        &dir_modes,
+        &files,
+        &file_sizes,
+        &symlinks,
+        &modes,
+        &repo_root,
+        "heavy/**",
+        &src_root,
+        "heavy",
+        &dest_root,
+        Some(&lockfile_hash),
+        false,
+        false,
+        false,
+    );
+    match outcome {
+        SnapshotOutcome::FellBack(None) => {}
+        SnapshotOutcome::Hydrated(_)
+        | SnapshotOutcome::FellBack(Some(_))
+        | SnapshotOutcome::Failed(_) => {
+            #[cfg(not(target_os = "macos"))]
+            panic!("expected FellBack(None) when snapshots are disabled");
+        }
+    }
+}

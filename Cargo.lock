@@ -443,6 +443,7 @@ dependencies = [
  "libc",
  "sha2",
  "tempfile",
+ "wt-copy",
 ]
 
 [[package]]

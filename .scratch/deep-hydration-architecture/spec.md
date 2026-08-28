@@ -1,6 +1,6 @@
 # Spec: Deep Architecture for Hydration & Storage Reclamation
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Problem Statement
 
