@@ -11,11 +11,11 @@ use std::time::Instant;
 
 #[cfg(target_os = "macos")]
 use crate::snapdiff::SnapshotDiff;
+#[cfg(target_os = "macos")]
+use crate::snapindex::select_old_snapshot;
 use crate::snapshot::SnapshotBuildTiming;
 #[cfg(target_os = "macos")]
-use crate::snapshot::{
-    BuildError, Manifest, PublishOutcome, SnapshotEntry, select_old_snapshot, snapshot_tree_path,
-};
+use crate::snapshot::{BuildError, Manifest, PublishOutcome, SnapshotEntry, snapshot_tree_path};
 use crate::{ContentId, DiskStore};
 #[cfg(target_os = "macos")]
 use wt_copy::{ClonefileBackend, CopyBackend};
