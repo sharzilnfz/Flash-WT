@@ -86,6 +86,41 @@ pub fn snapshot_cap_from_env() -> Result<usize> {
     }
 }
 
+/// Parse a size string like `1048576`, `100KB`, `500MB`, `20GB`, `1TB`, `100KiB`, etc.
+pub fn parse_bytes(text: &str) -> Option<u64> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(bytes) = trimmed.parse::<u64>() {
+        return Some(bytes);
+    }
+    let split = trimmed.find(|c: char| c.is_alphabetic())?;
+    let (num, unit) = trimmed.split_at(split);
+    let count: u64 = num.trim().parse().ok()?;
+    let unit_lower = unit.trim().to_lowercase();
+    let multiplier: u64 = match unit_lower.as_str() {
+        "b" | "byte" | "bytes" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
+        "t" | "tb" | "tib" => 1024 * 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    count.checked_mul(multiplier)
+}
+
+/// Maximum disk byte budget for unreferenced snapshots: `WT_MAX_SNAPSHOT_BYTES` if set
+/// and valid (e.g. `20GB`, `500MB`, `1048576`), else `None`.
+pub fn max_snapshot_bytes_from_env() -> Result<Option<u64>> {
+    match std::env::var("WT_MAX_SNAPSHOT_BYTES") {
+        Ok(text) => parse_bytes(&text)
+            .map(Some)
+            .ok_or_else(|| Error::Usage(format!("invalid WT_MAX_SNAPSHOT_BYTES {text:?} (try 20GB, 500MB)"))),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Content ids named by a worktree's hydration ledger, deduplicated:
 /// one ledger row per materialized file, but references are claimed
 /// once per distinct blob.
@@ -187,7 +222,15 @@ pub fn remove(name: &str, dir: Option<&Path>, cfg: &RunConfig) -> Result<(Remove
                     .ok_or_else(|| Error::Store(format!("malformed content id in ledger: {hex}")))
             })
             .collect::<Result<Vec<_>>>()?;
-        store.publish_worktree_mirror(&dest, &git_dir, ids.iter(), snaps.iter())?;
+        store.publish_worktree_mirror(&dest, &git_dir, ids.iter(), snaps.iter(), None, None)?;
+    }
+
+    let mut diagnostics = Vec::new();
+    if let Some(diag) = crate::base::check_worktree_base_movement(&store, &root, &dest, &git_dir) {
+        if !cfg.json {
+            eprintln!("wt: warning: {}", diag.message);
+        }
+        diagnostics.push(diag);
     }
 
     let mut released = 0usize;
@@ -234,7 +277,7 @@ pub fn remove(name: &str, dir: Option<&Path>, cfg: &RunConfig) -> Result<(Remove
         mirror_removed,
     };
 
-    Ok((data, Vec::new()))
+    Ok((data, diagnostics))
 }
 
 pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<Diagnostic>)> {
@@ -273,7 +316,12 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
                 Some(explicit) => explicit,
                 None => grace_from_env()?,
             };
-            let swept = store.sweep_mark_sweep(grace, snapshot_cap_from_env()?)?;
+            let max_snapshot_bytes = max_snapshot_bytes_from_env()?;
+            let swept = store.sweep_mark_sweep_with_budget(
+                grace,
+                snapshot_cap_from_env()?,
+                max_snapshot_bytes,
+            )?;
             if swept.deferred_by_grace {
                 eprintln!(
                     "wt-gc-audit: malformed young mirror deferred this sweep; rerun after the grace period"

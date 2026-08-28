@@ -124,6 +124,8 @@ impl DiskStore {
         gitdir: &Path,
         file_blobs: impl IntoIterator<Item = &'a ContentId>,
         snapshots: impl IntoIterator<Item = &'a ContentId>,
+        base_branch: Option<&str>,
+        base_commit: Option<&str>,
     ) -> Result<PathBuf> {
         let worktree =
             fs::canonicalize(worktree).map_err(|e| Error::Io(path_error("worktree", e)))?;
@@ -135,7 +137,24 @@ impl DiskStore {
         for id in snapshots {
             m.snapshots.insert(*id);
         }
+        m.base_branch = base_branch.map(ToString::to_string);
+        m.base_commit = base_commit.map(ToString::to_string);
         mirror::publish(self.root(), &m).map_err(Error::Io)
+    }
+
+    /// Read the store mirror for a canonicalized (worktree, gitdir) identity.
+    pub fn read_worktree_mirror(&self, worktree: &Path, gitdir: &Path) -> Result<Option<mirror::StoreMirror>> {
+        let worktree =
+            fs::canonicalize(worktree).map_err(|e| Error::Io(path_error("worktree", e)))?;
+        let gitdir = fs::canonicalize(gitdir).map_err(|e| Error::Io(path_error("gitdir", e)))?;
+        let path = mirror::mirror_path(self.root(), &worktree, &gitdir);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let text = fs::read_to_string(&path).map_err(Error::Io)?;
+        let mirror = mirror::StoreMirror::parse(&text)
+            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+        Ok(Some(mirror))
     }
 
     /// Remove the mirror of a removed worktree. Missing is fine: an
@@ -236,6 +255,16 @@ impl DiskStore {
     /// cannot see, and waiting one more grace period costs disk, not
     /// correctness.
     pub fn sweep_mark_sweep(&mut self, grace: Duration, snapshot_cap: usize) -> Result<MarkSwept> {
+        self.sweep_mark_sweep_with_budget(grace, snapshot_cap, None)
+    }
+
+    /// Sweep with dual-budget snapshot limits (snapshot count cap plus max snapshot bytes).
+    pub fn sweep_mark_sweep_with_budget(
+        &mut self,
+        grace: Duration,
+        snapshot_cap: usize,
+        max_snapshot_bytes: Option<u64>,
+    ) -> Result<MarkSwept> {
         let now = SystemTime::now();
         let cutoff = cutoff_of(now, grace);
         let marks = self.compute_marks(now, grace)?;
@@ -270,26 +299,16 @@ impl DiskStore {
         }
 
         let (swept, cap_evicted) =
-            self.sweep_snapshots(&marks.referenced_snapshots, cutoff, snapshot_cap)?;
+            self.sweep_snapshots(&marks.referenced_snapshots, cutoff, snapshot_cap, max_snapshot_bytes)?;
         outcome.snapshot_dirs_removed = swept + cap_evicted;
         outcome.snapshot_cap_evicted = cap_evicted;
         Ok(outcome)
     }
 
-    /// Snapshot retention (plan's eviction rule + §7.4 LRU cap):
-    /// snapshots are rebuildable caches, not roots. The grace rule is
-    /// unchanged — anything under `snapshots/` that is unreferenced by
-    /// a live mirror (or debris) and older than the cutoff goes. On
-    /// top of that, the retention cap bounds how many UNREFERENCED
-    /// snapshots may pile up INSIDE the grace window between sweeps:
-    /// if more than `cap` young unreferenced ones remain after the
-    /// grace pass, the surplus is deleted least-recently-used first
-    /// (LRU sidecar stamp, falling back to directory mtime; unknown
-    /// age counts as oldest). Referenced snapshots never count
-    /// against the cap and are never collected here whatever their
-    /// age; a cap eviction racing an in-flight create is survived by
-    /// the hydration retry path. Phase 1 stores have no snapshots
-    /// directory, so this is normally a no-op scan.
+    /// Snapshot retention (dual-budget eviction: count cap + disk byte limits with anti-thrashing protection):
+    /// snapshots are rebuildable caches, not roots. Unreferenced snapshots face dual budget limits
+    /// using both count caps (`WT_SNAPSHOT_CAP`) and byte limits (`WT_MAX_SNAPSHOT_BYTES`).
+    /// Snapshots younger than the grace period are protected against budget eviction to prevent cache thrashing.
     ///
     /// Returns `(grace-and-debris removals, retention-cap evictions)`.
     fn sweep_snapshots(
@@ -297,6 +316,7 @@ impl DiskStore {
         referenced: &BTreeSet<ContentId>,
         cutoff: SystemTime,
         cap: usize,
+        max_bytes: Option<u64>,
     ) -> Result<(u64, u64)> {
         let mut removed = 0u64;
         let dir = self.root().join("snapshots");
@@ -305,9 +325,15 @@ impl DiskStore {
         };
         let _ = crate::snapindex::compact_journal(self.root());
         let lru = crate::snapindex::SnapshotLru::load(self.root());
-        // Young, unreferenced survivors of the grace pass, awaiting
-        // the retention-cap decision.
-        let mut candidates: Vec<(ContentId, PathBuf)> = Vec::new();
+
+        struct Candidate {
+            path: PathBuf,
+            last_use: u64,
+            size: u64,
+            is_young: bool,
+        }
+
+        let mut candidates: Vec<Candidate> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name();
@@ -315,9 +341,23 @@ impl DiskStore {
             match name.as_ref() {
                 "index.tsv" | "lru.tsv" | "journal.tsv" | "metadata.lock" => {
                     // Live selection/LRU-retention metadata, not
-                    // rebuildable cache: never collected. (Their own
-                    // temp-file debris has a non-hex name and falls
-                    // through to collection below.)
+                    // rebuildable cache: never collected.
+                    continue;
+                }
+                "tmp" => {
+                    // Temp build debris past the grace window.
+                    if let Ok(tmp_entries) = fs::read_dir(&path) {
+                        for tmp_entry in tmp_entries.flatten() {
+                            let tmp_p = tmp_entry.path();
+                            if let Ok(meta) = fs::metadata(&tmp_p) {
+                                if let Ok(modified) = meta.modified() {
+                                    if modified <= cutoff {
+                                        removed += u64::from(remove_tree(&tmp_p));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     continue;
                 }
                 _ => {}
@@ -330,32 +370,74 @@ impl DiskStore {
             let id = ContentId::from_hex(&name);
             match id {
                 Some(id) if referenced.contains(&id) => {}
-                Some(_) if aged_out => removed += u64::from(remove_tree(&path)),
-                Some(id) => candidates.push((id, path)),
+                Some(id) => {
+                    let manifest = crate::snapshot::read_published(self.root(), &id);
+                    if let Some(m) = manifest {
+                        let size = if m.total_size > 0 {
+                            m.total_size
+                        } else {
+                            let mut unique_blobs = BTreeSet::new();
+                            let mut sum = 0u64;
+                            for e in &m.entries {
+                                if let Some(blob) = e.blob {
+                                    if unique_blobs.insert(blob) {
+                                        if let Ok(meta) = fs::metadata(self.blob_path(&blob)) {
+                                            sum += meta.len();
+                                        }
+                                    }
+                                }
+                            }
+                            sum
+                        };
+                        let last_use = lru.last_use(&id).unwrap_or_else(|| path_mtime_secs(&path));
+                        candidates.push(Candidate {
+                            path,
+                            last_use,
+                            size,
+                            is_young: !aged_out,
+                        });
+                    } else if aged_out {
+                        // Debris older than grace window is collected.
+                        removed += u64::from(remove_tree(&path));
+                    }
+                }
                 None if aged_out => {
-                    // Non-hex names are sidecar temp debris or tmp
-                    // build dirs past the grace window.
+                    // Non-hex names are sidecar temp debris or tmp build dirs past the grace window.
                     removed += u64::from(remove_tree(&path));
                 }
                 None => {}
             }
         }
 
+        // Sort MRU first (highest last_use timestamp first)
+        candidates.sort_by_key(|c| std::cmp::Reverse(c.last_use));
+
+        let mut retained_count = 0usize;
+        let mut retained_bytes = 0u64;
         let mut cap_evicted = 0u64;
-        if candidates.len() > cap {
-            // Least-recently-used first; the sort key falls back to
-            // the publish-time directory mtime and finally to 0 for
-            // anything unreadable, so unknown age loses.
-            candidates.sort_by_key(|(id, path)| {
-                lru.last_use(id).unwrap_or_else(|| path_mtime_secs(path))
-            });
-            let excess = candidates.len() - cap;
-            for (_, path) in candidates.drain(..excess) {
-                if remove_tree(&path) {
+
+        for c in candidates {
+            let count_ok = retained_count < cap;
+            let bytes_ok = match max_bytes {
+                Some(max) => retained_bytes.saturating_add(c.size) <= max,
+                None => true,
+            };
+
+            if count_ok && bytes_ok {
+                retained_count += 1;
+                retained_bytes = retained_bytes.saturating_add(c.size);
+            } else if c.is_young {
+                // Anti-thrashing grace window: recently published snapshots younger than the grace period
+                // are protected from budget eviction even when budgets are tight.
+                retained_count += 1;
+                retained_bytes = retained_bytes.saturating_add(c.size);
+            } else {
+                if remove_tree(&c.path) {
                     cap_evicted += 1;
                 }
             }
         }
+
         Ok((removed, cap_evicted))
     }
 

@@ -6,9 +6,9 @@
 
 **Status:** ready-for-agent
 
-- [ ] Ingestion calculates unique uncompressed blob size totals and records them in `manifest.tsv`.
-- [ ] `wt sweep` evaluates cumulative snapshot sizes using precomputed manifest values.
-- [ ] Disk byte budget limits configured via `WT_MAX_SNAPSHOT_BYTES` evict oldest unreferenced snapshots once thresholds are exceeded.
-- [ ] Snapshot count cap pruning (`WT_SNAPSHOT_CAP`) operates alongside byte limits.
-- [ ] Anti-thrashing grace window protects young snapshots from eviction even when budgets are tight.
-- [ ] Garbage collection tests verify dual-budget enforcement and anti-thrashing protection.
+- [x] Ingestion calculates unique uncompressed blob size totals and records them in `manifest.tsv`.
+- [x] `wt sweep` evaluates cumulative snapshot sizes using precomputed manifest values.
+- [x] Disk byte budget limits configured via `WT_MAX_SNAPSHOT_BYTES` evict oldest unreferenced snapshots once thresholds are exceeded.
+- [x] Snapshot count cap pruning (`WT_SNAPSHOT_CAP`) operates alongside byte limits.
+- [x] Anti-thrashing grace window protects young snapshots from eviction even when budgets are tight.
+- [x] Garbage collection tests verify dual-budget enforcement and anti-thrashing protection.

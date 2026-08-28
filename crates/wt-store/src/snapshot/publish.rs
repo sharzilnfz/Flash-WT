@@ -489,7 +489,18 @@ impl DiskStore {
         let mut timing = SnapshotBuildTiming::default();
 
         let stage = Instant::now();
-        let manifest = Manifest::new_with_lockfile(entries, lockfile_hash)?;
+        let mut unique_blobs = std::collections::BTreeSet::new();
+        let mut total_size = 0u64;
+        for e in &entries {
+            if let Some(blob) = e.blob {
+                if unique_blobs.insert(blob) {
+                    if let Ok(meta) = fs::metadata(self.blob_path(&blob)) {
+                        total_size += meta.len();
+                    }
+                }
+            }
+        }
+        let manifest = Manifest::new_with_lockfile_and_size(entries, lockfile_hash, total_size)?;
         timing.publish_ms += stage.elapsed().as_millis() as u64;
 
         // Staging prep counts as the start of the link train.

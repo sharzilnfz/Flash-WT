@@ -93,7 +93,7 @@ fn env_override_caps_unreferenced_snapshots_keeping_mru() {
     let store = base.path().join("store");
 
     let swept = fx.wt_with_store_env(
-        &["sweep", "--age", "1h"],
+        &["sweep", "--age", "0s"],
         &store,
         &[("WT_SNAPSHOT_CAP", "2")],
     );
@@ -115,6 +115,124 @@ fn env_override_caps_unreferenced_snapshots_keeping_mru() {
 }
 
 #[test]
+fn anti_thrashing_grace_window_protects_young_snapshots_from_budget_eviction() {
+    let fx = Fixture::heavy_repo(1);
+    let (base, hashes) = capped_store(4);
+    let store = base.path().join("store");
+
+    // Even with a tight cap of 1, young snapshots within the 1h grace window are protected against eviction
+    let swept = fx.wt_with_store_env(
+        &["sweep", "--age", "1h"],
+        &store,
+        &[("WT_SNAPSHOT_CAP", "1"), ("WT_MAX_SNAPSHOT_BYTES", "10B")],
+    );
+    assert!(
+        swept.status.success(),
+        "{}",
+        String::from_utf8_lossy(&swept.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&swept.stdout);
+    assert!(stdout.contains("cap evicted 0"), "anti-thrashing must protect young snapshots: {stdout}");
+    assert_eq!(surviving_snapshots(&store).len(), hashes.len());
+}
+
+#[test]
+fn byte_budget_env_evicts_oldest_unreferenced_snapshots_once_threshold_exceeded() {
+    let fx = Fixture::heavy_repo(1);
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+
+    // 4 snapshots with 1000-byte blobs each (stamps 100, 200, 300, 400)
+    let payload = vec![b'a'; 1000];
+    let hashes: Vec<ContentId> = (0..4)
+        .map(|i| {
+            let mut p = payload.clone();
+            p[0] = i as u8;
+            publish_snapshot(&mut store, &p)
+        })
+        .collect();
+
+    SnapshotLru {
+        entries: hashes
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (*h, 100 * (i as u64 + 1)))
+            .collect(),
+    }
+    .save(store.root())
+    .unwrap();
+    fs::write(base.path().join("store").join("gc-mode"), "mark-sweep\n").unwrap();
+
+    let store_path = base.path().join("store");
+
+    // Byte limit of 2500 bytes allows only 2 snapshots (2000 bytes). 2 oldest are evicted.
+    let swept = fx.wt_with_store_env(
+        &["sweep", "--age", "0s"],
+        &store_path,
+        &[("WT_MAX_SNAPSHOT_BYTES", "2500B")],
+    );
+    assert!(
+        swept.status.success(),
+        "{}",
+        String::from_utf8_lossy(&swept.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&swept.stdout);
+    assert!(stdout.contains("cap evicted 2"), "stdout: {stdout}");
+
+    let mut expected: Vec<String> = hashes[2..].iter().map(|h| h.to_string()).collect();
+    expected.sort();
+    assert_eq!(surviving_snapshots(&store_path), expected);
+}
+
+#[test]
+fn dual_budget_count_and_bytes_operate_alongside() {
+    let fx = Fixture::heavy_repo(1);
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+
+    // 4 snapshots with 500-byte blobs each
+    let payload = vec![b'b'; 500];
+    let hashes: Vec<ContentId> = (0..4)
+        .map(|i| {
+            let mut p = payload.clone();
+            p[0] = i as u8;
+            publish_snapshot(&mut store, &p)
+        })
+        .collect();
+
+    SnapshotLru {
+        entries: hashes
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (*h, 100 * (i as u64 + 1)))
+            .collect(),
+    }
+    .save(store.root())
+    .unwrap();
+    fs::write(base.path().join("store").join("gc-mode"), "mark-sweep\n").unwrap();
+
+    let store_path = base.path().join("store");
+
+    // Cap=3 and MaxBytes=1200B: bytes budget limits to 2 snapshots (1000B <= 1200B, 1500B > 1200B)
+    let swept = fx.wt_with_store_env(
+        &["sweep", "--age", "0s"],
+        &store_path,
+        &[("WT_SNAPSHOT_CAP", "3"), ("WT_MAX_SNAPSHOT_BYTES", "1200B")],
+    );
+    assert!(
+        swept.status.success(),
+        "{}",
+        String::from_utf8_lossy(&swept.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&swept.stdout);
+    assert!(stdout.contains("cap evicted 2"), "stdout: {stdout}");
+
+    let mut expected: Vec<String> = hashes[2..].iter().map(|h| h.to_string()).collect();
+    expected.sort();
+    assert_eq!(surviving_snapshots(&store_path), expected);
+}
+
+#[test]
 fn invalid_cap_value_fails_loudly_like_other_wt_knobs() {
     let fx = Fixture::heavy_repo(1);
     let (base, _hashes) = capped_store(2);
@@ -132,3 +250,23 @@ fn invalid_cap_value_fails_loudly_like_other_wt_knobs() {
         "error must name the knob: {stderr}"
     );
 }
+
+#[test]
+fn invalid_max_snapshot_bytes_value_fails_loudly() {
+    let fx = Fixture::heavy_repo(1);
+    let (base, _hashes) = capped_store(2);
+    let store = base.path().join("store");
+
+    let swept = fx.wt_with_store_env(
+        &["sweep", "--age", "0s"],
+        &store,
+        &[("WT_MAX_SNAPSHOT_BYTES", "invalid_size_str")],
+    );
+    assert!(!swept.status.success(), "garbage max bytes must fail the sweep");
+    let stderr = String::from_utf8_lossy(&swept.stderr);
+    assert!(
+        stderr.contains("WT_MAX_SNAPSHOT_BYTES"),
+        "error must name the knob: {stderr}"
+    );
+}
+

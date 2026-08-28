@@ -45,6 +45,7 @@ fn reference_snapshot(store: &DiskStore, base: &Path, name: &str, hash: &Content
     let gitdir = base.join(format!("{name}.gitdir"));
     fs::create_dir_all(&worktree).unwrap();
     fs::create_dir_all(&gitdir).unwrap();
+    fs::write(gitdir.join("wt-hydrated.tsv"), "").unwrap();
     let no_files: [ContentId; 0] = [];
     store
         .publish_worktree_mirror(
@@ -52,6 +53,8 @@ fn reference_snapshot(store: &DiskStore, base: &Path, name: &str, hash: &Content
             &gitdir,
             no_files.iter(),
             std::slice::from_ref(hash),
+            None,
+            None,
         )
         .unwrap();
 }
@@ -94,12 +97,17 @@ fn surviving_snapshots(store: &Path) -> Vec<String> {
     names
 }
 
-/// One-hour sweep: long enough that backdated (epoch+1000s)
-/// directories are past the cutoff while freshly published ones are
-/// safely inside the grace window.
-fn sweep(store: &mut DiskStore, cap: usize) -> MarkSwept {
+/// Sweep helper with zero grace for immediate retention-cap testing.
+fn sweep_now(store: &mut DiskStore, cap: usize) -> MarkSwept {
     store
-        .sweep_mark_sweep(Duration::from_secs(3600), cap)
+        .sweep_mark_sweep_with_budget(Duration::from_secs(0), cap, None)
+        .unwrap()
+}
+
+/// Sweep helper with max bytes.
+fn sweep_budget(store: &mut DiskStore, cap: usize, max_bytes: Option<u64>) -> MarkSwept {
+    store
+        .sweep_mark_sweep_with_budget(Duration::from_secs(0), cap, max_bytes)
         .unwrap()
 }
 
@@ -108,7 +116,7 @@ fn cap_evicts_least_recently_used_and_keeps_most_recent() {
     let base = tempfile::tempdir().unwrap();
     let mut store = DiskStore::open(base.path().join("store")).unwrap();
 
-    // Five young unreferenced snapshots, last uses 100..500.
+    // Five unreferenced snapshots, last uses 100..500.
     let hashes: Vec<ContentId> = ["a", "b", "c", "d", "e"]
         .iter()
         .map(|t| publish_snapshot(&mut store, t.as_bytes()))
@@ -120,7 +128,7 @@ fn cap_evicts_least_recently_used_and_keeps_most_recent() {
         .collect();
     stamp_lru(store.root(), &stamps);
 
-    let swept = sweep(&mut store, 2);
+    let swept = sweep_now(&mut store, 2);
     assert_eq!(
         swept.snapshot_dirs_removed, 3,
         "cap evictions count toward dirs removed"
@@ -135,6 +143,90 @@ fn cap_evicts_least_recently_used_and_keeps_most_recent() {
 
     // The sidecar itself must never become sweep debris.
     assert!(store.root().join("snapshots").join("lru.tsv").is_file());
+}
+
+#[test]
+fn anti_thrashing_protects_young_snapshots_even_when_budget_is_zero() {
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+
+    let _hashes: Vec<ContentId> = ["a", "b", "c"]
+        .iter()
+        .map(|t| publish_snapshot(&mut store, t.as_bytes()))
+        .collect();
+
+    // Snapshots were just published (young within 1h grace). Even with cap 0 and max_bytes 0,
+    // the anti-thrashing grace window protects them from eviction.
+    let swept = store
+        .sweep_mark_sweep_with_budget(Duration::from_secs(3600), 0, Some(0))
+        .unwrap();
+    assert_eq!(swept.snapshot_cap_evicted, 0);
+    assert_eq!(surviving_snapshots(store.root()).len(), 3);
+}
+
+#[test]
+fn byte_budget_evicts_oldest_unreferenced_snapshots_using_manifest_sizes() {
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+
+    // 4 snapshots with sizes 100, 200, 300, 400 bytes
+    let hashes: Vec<ContentId> = (1..=4)
+        .map(|i| {
+            let data = vec![b'x'; i * 100];
+            publish_snapshot(&mut store, &data)
+        })
+        .collect();
+
+    // Verify manifest recorded the total size accurately
+    for (i, h) in hashes.iter().enumerate() {
+        let manifest = store.find_snapshot(h).unwrap();
+        assert_eq!(manifest.total_size, ((i + 1) * 100) as u64);
+    }
+
+    // Stamps: hashes[3] (400B) is newest (400), hashes[2] (300B) is 300, etc.
+    let stamps: Vec<(ContentId, u64)> = hashes
+        .iter()
+        .enumerate()
+        .map(|(i, h)| (*h, 100 * (i as u64 + 1)))
+        .collect();
+    stamp_lru(store.root(), &stamps);
+
+    // Max bytes 700: MRU hash[3] (400B) + hash[2] (300B) = 700B <= 700B.
+    // Older hash[1] (200B) and hash[0] (100B) are evicted.
+    let swept = sweep_budget(&mut store, 10, Some(700));
+    assert_eq!(swept.snapshot_cap_evicted, 2);
+    assert_eq!(surviving_snapshots(store.root()).len(), 2);
+
+    let mut expected: Vec<String> = vec![hashes[2].to_string(), hashes[3].to_string()];
+    expected.sort();
+    assert_eq!(surviving_snapshots(store.root()), expected);
+}
+
+#[test]
+fn dual_budget_enforces_both_count_cap_and_byte_limit() {
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+
+    // 4 snapshots of 200 bytes each
+    let hashes: Vec<ContentId> = (0..4)
+        .map(|i| {
+            let mut data = vec![b'y'; 200];
+            data[0] = i as u8;
+            publish_snapshot(&mut store, &data)
+        })
+        .collect();
+
+    let stamps: Vec<(ContentId, u64)> = hashes
+        .iter()
+        .enumerate()
+        .map(|(i, h)| (*h, 100 * (i as u64 + 1)))
+        .collect();
+    stamp_lru(store.root(), &stamps);
+
+    // Cap allows 3, but byte budget allows 500 bytes (2 snapshots max: 400B <= 500B).
+    let swept = sweep_budget(&mut store, 3, Some(500));
+    assert_eq!(swept.snapshot_cap_evicted, 2);
+    assert_eq!(surviving_snapshots(store.root()).len(), 2);
 }
 
 #[test]
@@ -161,20 +253,17 @@ fn referenced_snapshots_survive_any_cap() {
     );
     age_all_snapshots(store.root());
 
-    // Cap zero: every aged-out unreferenced snapshot goes (via the
-    // grace rule, not the cap), yet the referenced pair survives
-    // untouched despite being older still.
-    let swept = sweep(&mut store, 0);
-    // 2 grace removals + the aged tmp staging root (debris).
-    assert_eq!(swept.snapshot_dirs_removed, 3);
-    assert_eq!(swept.snapshot_cap_evicted, 0);
+    // Cap zero: unreferenced aged-out snapshots go, yet the referenced pair survives untouched.
+    let swept = sweep_now(&mut store, 0);
+    assert_eq!(swept.snapshot_dirs_removed, 2);
+    assert_eq!(swept.snapshot_cap_evicted, 2);
     let mut expected: Vec<String> = hashes[..2].iter().map(|h| h.to_string()).collect();
     expected.sort();
     assert_eq!(surviving_snapshots(store.root()), expected);
 }
 
 #[test]
-fn young_unreferenced_surplus_is_capped_but_referenced_young_survive() {
+fn unreferenced_surplus_is_capped_but_referenced_survive() {
     let base = tempfile::tempdir().unwrap();
     let mut store = DiskStore::open(base.path().join("store")).unwrap();
 
@@ -195,9 +284,8 @@ fn young_unreferenced_surplus_is_capped_but_referenced_young_survive() {
     );
 
     // Cap zero cannot touch the referenced snapshot even though it is
-    // the least recently used; the two young unreferenced ones are
-    // capped away inside the grace window.
-    let swept = sweep(&mut store, 0);
+    // the least recently used; the two unreferenced ones are capped away.
+    let swept = sweep_now(&mut store, 0);
     assert_eq!(swept.snapshot_dirs_removed, 2);
     assert_eq!(swept.snapshot_cap_evicted, 2);
     assert!(store.snapshot_path(&hashes[0]).is_dir());
@@ -220,7 +308,7 @@ fn missing_lru_stamps_fall_back_to_publish_mtime_order() {
     // victim.
     stamp_lru(store.root(), &[(hashes[1], u64::MAX)]);
 
-    let swept = sweep(&mut store, 1);
+    let swept = sweep_now(&mut store, 1);
     assert_eq!(swept.snapshot_dirs_removed, 1);
     assert_eq!(swept.snapshot_cap_evicted, 1);
     assert!(!store.snapshot_path(&hashes[0]).exists());

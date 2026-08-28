@@ -240,13 +240,13 @@ fn publish_builds_tree_with_modes_links_and_empty_dirs() {
     let outcome = store.publish_snapshot(entries.clone(), false).unwrap();
     assert_eq!(outcome, PublishOutcome::Published);
 
-    let m = Manifest::new(entries).unwrap();
+    let m = Manifest::new_with_lockfile_and_size(entries, None, 23).unwrap();
     let snap_dir = snapshot_path(base.path().join("store").as_path(), &m.hash);
+    let loaded =
+        Manifest::parse(&fs::read_to_string(snap_dir.join("manifest.tsv")).unwrap()).unwrap();
+    assert_eq!(loaded.hash, m.hash);
+    assert_eq!(loaded.entries, m.entries);
     let tree = snap_dir.join("tree");
-    assert_eq!(
-        fs::read_to_string(snap_dir.join("manifest.tsv")).unwrap(),
-        m.serialize()
-    );
     assert_eq!(
         fs::read_to_string(snap_dir.join(".complete")).unwrap(),
         format!("v1\t{}\n", m.hash)
@@ -281,7 +281,7 @@ fn publish_builds_tree_with_modes_links_and_empty_dirs() {
         std::path::Path::new("../pkg/run.sh")
     );
     // find_snapshot agrees it is valid.
-    assert_eq!(store.find_snapshot(&m.hash).unwrap(), m);
+    assert_eq!(store.find_snapshot(&m.hash).unwrap(), loaded);
 
     store.flush().unwrap();
 }
@@ -1182,5 +1182,41 @@ fn manifest_header_lockfile_hash_round_trips_and_validates() {
 
     let loaded = store.find_snapshot(&manifest.hash).unwrap();
     assert_eq!(loaded.lockfile_hash, Some(lock_hash));
+}
+
+#[test]
+fn manifest_header_total_bytes_round_trips_and_records_publish_size() {
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+
+    let b1 = store.put(b"content 1 (13b)").unwrap();
+    let b2 = store.put(b"content 2 is longer (21 bytes)").unwrap();
+    let entries = vec![
+        SnapshotEntry::file("f1.txt", b1, 0o644),
+        SnapshotEntry::file("f2.txt", b2, 0o644),
+        SnapshotEntry::file("f1_dup.txt", b1, 0o644), // duplicate blob must not double-count
+        SnapshotEntry::dir("sub"),
+    ];
+
+    let expected_unique_size = 15 + 30; // length of b1 (15 bytes) and b2 (30 bytes)
+    let manifest = Manifest::new_with_lockfile_and_size(entries.clone(), None, expected_unique_size).unwrap();
+    assert_eq!(manifest.total_size, expected_unique_size);
+
+    let serialized = manifest.serialize();
+    assert!(serialized.contains(&format!("\ttotal-bytes\t{expected_unique_size}")));
+
+    let parsed = Manifest::parse(&serialized).unwrap();
+    assert_eq!(parsed.hash, manifest.hash);
+    assert_eq!(parsed.total_size, expected_unique_size);
+    assert_eq!(parsed.entries, manifest.entries);
+
+    // Publishing computes unique uncompressed blob size totals automatically
+    let receipt = store
+        .publish_snapshot(entries, false)
+        .unwrap();
+    assert_eq!(receipt, PublishOutcome::Published);
+
+    let loaded = store.find_snapshot(&manifest.hash).unwrap();
+    assert_eq!(loaded.total_size, expected_unique_size);
 }
 

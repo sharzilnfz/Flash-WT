@@ -159,6 +159,8 @@ pub struct Manifest {
     pub hash: ContentId,
     /// SHA-256 of the associated project lockfile, if any.
     pub lockfile_hash: Option<ContentId>,
+    /// Precomputed sum of unique uncompressed blob sizes in bytes.
+    pub total_size: u64,
 }
 
 impl Manifest {
@@ -166,13 +168,22 @@ impl Manifest {
     /// relpath, normalize modes, sort by raw path bytes then kind,
     /// and hash the canonical serialization.
     pub fn new(entries: Vec<SnapshotEntry>) -> Result<Manifest, String> {
-        Self::new_with_lockfile(entries, None)
+        Self::new_with_lockfile_and_size(entries, None, 0)
     }
 
     /// Build a manifest with an associated lockfile hash.
     pub fn new_with_lockfile(
+        entries: Vec<SnapshotEntry>,
+        lockfile_hash: Option<ContentId>,
+    ) -> Result<Manifest, String> {
+        Self::new_with_lockfile_and_size(entries, lockfile_hash, 0)
+    }
+
+    /// Build a manifest with an associated lockfile hash and precomputed unique blob size total.
+    pub fn new_with_lockfile_and_size(
         mut entries: Vec<SnapshotEntry>,
         lockfile_hash: Option<ContentId>,
+        total_size: u64,
     ) -> Result<Manifest, String> {
         for e in &entries {
             validate_rel(&e.rel)?;
@@ -213,10 +224,11 @@ impl Manifest {
             entries,
             hash: ContentId(hasher.finalize().into()),
             lockfile_hash,
+            total_size,
         })
     }
 
-    /// Header + entry lines. The header embeds this manifest's hash and optional lockfile hash.
+    /// Header + entry lines. The header embeds this manifest's hash, optional lockfile hash, and total bytes.
     #[must_use]
     pub fn serialize(&self) -> String {
         let mut out = String::new();
@@ -225,6 +237,10 @@ impl Manifest {
         if let Some(lh) = &self.lockfile_hash {
             out.push_str("\tlockfile-sha256\t");
             out.push_str(&lh.to_string());
+        }
+        if self.total_size > 0 {
+            out.push_str("\ttotal-bytes\t");
+            out.push_str(&self.total_size.to_string());
         }
         out.push('\n');
         out.push_str(&serialize_entries(&self.entries));
@@ -253,14 +269,37 @@ impl Manifest {
         }
         let claimed = ContentId::from_hex(fields[2])
             .ok_or_else(|| format!("malformed manifest hash {:?}", fields[2]))?;
-        let lockfile_hash = if fields.len() >= 5 && fields[3] == "lockfile-sha256" {
-            Some(
-                ContentId::from_hex(fields[4])
-                    .ok_or_else(|| format!("malformed lockfile hash {:?}", fields[4]))?,
-            )
-        } else {
-            None
-        };
+        let mut lockfile_hash = None;
+        let mut total_size = 0u64;
+        let mut i = 3;
+        while i < fields.len() {
+            match fields[i] {
+                "lockfile-sha256" => {
+                    if i + 1 < fields.len() {
+                        lockfile_hash = Some(
+                            ContentId::from_hex(fields[i + 1])
+                                .ok_or_else(|| format!("malformed lockfile hash {:?}", fields[i + 1]))?,
+                        );
+                        i += 2;
+                    } else {
+                        return Err(format!("missing value for lockfile-sha256 in header {header:?}"));
+                    }
+                }
+                "total-bytes" | "size-bytes" => {
+                    if i + 1 < fields.len() {
+                        total_size = fields[i + 1]
+                            .parse::<u64>()
+                            .map_err(|_| format!("malformed total size {:?}", fields[i + 1]))?;
+                        i += 2;
+                    } else {
+                        return Err(format!("missing value for total-bytes in header {header:?}"));
+                    }
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
         let mut hasher = Sha256::new();
         hasher.update(body.as_bytes());
         let actual = ContentId(hasher.finalize().into());
@@ -336,6 +375,7 @@ impl Manifest {
             entries,
             hash: claimed,
             lockfile_hash,
+            total_size,
         })
     }
 }
