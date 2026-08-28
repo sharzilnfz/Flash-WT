@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Architecture Review: Deepening Opportunities for wt</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      themeVariables: {
+        darkMode: true,
+        background: '#0f172a',
+        primaryColor: '#3b82f6',
+        primaryTextColor: '#f8fafc',
+        primaryBorderColor: '#60a5fa',
+        lineColor: '#94a3b8',
+        secondaryColor: '#1e293b',
+        tertiaryColor: '#334155'
+      }
+    });
+  </script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0fdf4',
+              500: '#22c55e',
+              600: '#16a34a',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen antialiased">
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
+
+    <!-- Header -->
+    <header class="border-b border-slate-800 pb-8 mb-10">
+      <div class="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-semibold uppercase tracking-wider mb-3">
+            Architecture Review
+          </div>
+          <h1 class="text-3xl sm:text-4xl font-extrabold tracking-tight text-white">
+            Deepening Opportunities for <span class="text-emerald-400">wt</span>
+          </h1>
+          <p class="mt-2 text-slate-400 max-w-3xl">
+            Surfacing architectural friction, eliminating shallow orchestration, and designing deep modules for maximum testability, locality, and AI-navigability.
+          </p>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 text-xs text-slate-400 font-mono">
+          <div><span class="text-slate-500">Project:</span> wt (Instant Worktrees)</div>
+          <div><span class="text-slate-500">Vocabulary:</span> codebase-design + CONTEXT.md</div>
+          <div><span class="text-slate-500">Crates:</span> wt-cli, wt-store, wt-copy</div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Executive Summary & Top Recommendation Banner -->
+    <section class="mb-12 bg-gradient-to-r from-emerald-950/50 via-slate-900 to-slate-900 border border-emerald-500/30 rounded-2xl p-6 sm:p-8 shadow-xl relative overflow-hidden">
+      <div class="absolute top-0 right-0 w-96 h-96 bg-emerald-500/5 rounded-full blur-3xl pointer-events-none"></div>
+      <div class="flex items-center gap-3 mb-4">
+        <span class="p-2 rounded-lg bg-emerald-500/20 text-emerald-400">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+        </span>
+        <h2 class="text-xl font-bold text-white">Top Recommendation: Candidate 1 &mdash; Unified <code class="text-emerald-300 font-mono text-lg">HydrationEngine</code></h2>
+      </div>
+      <p class="text-slate-300 leading-relaxed text-sm sm:text-base mb-4">
+        Hydration is the primary hot path of <code class="text-emerald-400 font-mono">wt</code>. Currently, <code class="text-slate-200 font-mono text-xs bg-slate-800 px-1.5 py-0.5 rounded">wt-cli/src/hydrate.rs</code> and <code class="text-slate-200 font-mono text-xs bg-slate-800 px-1.5 py-0.5 rounded">commands/create.rs</code> expose six fragmented procedural helpers (ingest, strategy selection, materialize, claim refs, snapshot refs, mirror publishing) that callers must manually choreograph. Consolidating this behind a deep <strong class="text-white">HydrationEngine</strong> concentrates multi-threading, verification, atomic mirror persistence, and fallback ladders behind one cohesive seam.
+      </p>
+      <div class="flex flex-wrap gap-2 text-xs font-medium">
+        <span class="px-2.5 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700">Interface reduction: 6 functions &rarr; 1 method</span>
+        <span class="px-2.5 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700">Deletion test: Complexity concentrates inside engine</span>
+        <span class="px-2.5 py-1 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">Highest Leverage & Locality</span>
+      </div>
+    </section>
+
+    <!-- Candidate Grid -->
+    <div class="space-y-12">
+
+      <!-- Candidate 1 -->
+      <article class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-lg transition-all hover:border-slate-700">
+        <div class="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-slate-800/80">
+          <div>
+            <div class="flex items-center gap-3">
+              <span class="text-emerald-400 font-bold text-sm tracking-wider font-mono">CANDIDATE 01</span>
+              <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">Strong</span>
+            </div>
+            <h3 class="text-2xl font-bold text-white mt-1">Unified Hydration Engine</h3>
+          </div>
+          <div class="text-xs text-slate-400 font-mono bg-slate-950 px-3 py-2 rounded-lg border border-slate-800">
+            crates/wt-cli/src/hydrate.rs<br>
+            crates/wt-cli/src/commands/create.rs<br>
+            crates/wt-cli/src/commands/scratch.rs
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 my-6">
+          <div>
+            <h4 class="text-xs font-bold uppercase tracking-wider text-rose-400 mb-2 flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+              Architectural Friction (Shallow Module)
+            </h4>
+            <p class="text-slate-300 text-sm leading-relaxed mb-4">
+              <code class="text-slate-200 font-mono text-xs">hydrate.rs</code> (800+ lines) presents a wide, shallow interface. Callers in <code class="text-slate-200 font-mono text-xs">create.rs</code> and <code class="text-slate-200 font-mono text-xs">scratch.rs</code> must manually manage a multi-step sequence:
+            </p>
+            <ul class="list-disc list-inside text-xs text-slate-400 space-y-1 mb-4 font-mono bg-slate-950/60 p-3 rounded-lg border border-slate-800/60">
+              <li>ingest_dir() -> Ingested</li>
+              <li>select_strategy() & materialize()</li>
+              <li>claim_references() vs claim_snapshot_references()</li>
+              <li>publish_mirror()</li>
+              <li>store.flush() ledger update</li>
+            </ul>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              <strong>Locality hazard:</strong> If a caller omits <code class="text-slate-300 font-mono">publish_mirror()</code> or misplaces sidecar records, garbage collection mark-and-sweep correctness silently breaks.
+            </p>
+          </div>
+
+          <div>
+            <h4 class="text-xs font-bold uppercase tracking-wider text-emerald-400 mb-2 flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              Deepening Solution: <code class="normal-case">HydrationEngine</code>
+            </h4>
+            <p class="text-slate-300 text-sm leading-relaxed mb-4">
+              Encapsulate all hydration lifecycle concerns behind a single deep interface:
+            </p>
+            <div class="bg-slate-950 p-3 rounded-lg border border-slate-800 text-xs font-mono text-emerald-300 mb-4 overflow-x-auto">
+<pre><code>pub struct HydrationEngine&lt;'a&gt; {
+    store: &amp;'a mut DiskStore,
+    config: &amp;'a RunConfig,
+}
+
+impl&lt;'a&gt; HydrationEngine&lt;'a&gt; {
+    pub fn hydrate(&amp;mut self, req: HydrationRequest) -&gt; Result&lt;HydrationReport&gt;;
+}</code></pre>
+            </div>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              <strong>Leverage & Locality:</strong> Callers provide the target paths and patterns. The engine handles directory scanning, snapshot vs per-file fallback, worker threading, blob verification, atomic mirror publishing, and ledger flushing.
+            </p>
+          </div>
+        </div>
+
+        <!-- Before / After Visual -->
+        <div class="mt-6 pt-6 border-t border-slate-800">
+          <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-4">Before / After Seam Visualization</h4>
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div class="bg-slate-950/80 p-4 rounded-xl border border-rose-950/40">
+              <span class="text-xs font-bold text-rose-400 block mb-2 font-mono">BEFORE: Shallow & Fragmented</span>
+              <div class="mermaid">
+flowchart TD
+    CLI["wt create / scratch"]
+    CLI -->|"1. ingest"| ING["ingest_dir()"]
+    CLI -->|"2. select"| STR["select_strategy()"]
+    CLI -->|"3. place"| MAT["materialize()"]
+    CLI -->|"4. refs"| REF["claim_references()"]
+    CLI -->|"5. mirror"| MIR["publish_mirror()"]
+    CLI -->|"6. flush"| FLU["store.flush()"]
+              </div>
+            </div>
+            <div class="bg-slate-950/80 p-4 rounded-xl border border-emerald-950/40">
+              <span class="text-xs font-bold text-emerald-400 block mb-2 font-mono">AFTER: Deep Module (High Leverage)</span>
+              <div class="mermaid">
+flowchart TD
+    CLI["wt create / scratch"]
+    CLI -->|"hydrate(request)"| HE["HydrationEngine (Deep Seam)"]
+    subgraph Inside HydrationEngine
+      HE --> INGEST["Ingest & Cache"]
+      HE --> PLACE["Multi-threaded CoW / Reflink"]
+      HE --> MIRROR["Atomic Mirror & Ledger"]
+      HE --> VERIFY["Verified Blob Proof"]
+    end
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- Candidate 2 -->
+      <article class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-lg transition-all hover:border-slate-700">
+        <div class="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-slate-800/80">
+          <div>
+            <div class="flex items-center gap-3">
+              <span class="text-emerald-400 font-bold text-sm tracking-wider font-mono">CANDIDATE 02</span>
+              <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">Strong</span>
+            </div>
+            <h3 class="text-2xl font-bold text-white mt-1">Autonomous Store & Lease Reclamation Engine</h3>
+          </div>
+          <div class="text-xs text-slate-400 font-mono bg-slate-950 px-3 py-2 rounded-lg border border-slate-800">
+            crates/wt-cli/src/gc.rs<br>
+            crates/wt-cli/src/commands/sweep.rs<br>
+            crates/wt-store/src/gc.rs<br>
+            crates/wt-store/src/lease.rs
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 my-6">
+          <div>
+            <h4 class="text-xs font-bold uppercase tracking-wider text-rose-400 mb-2 flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+              Architectural Friction (Leaked Seam)
+            </h4>
+            <p class="text-slate-300 text-sm leading-relaxed mb-4">
+              <code class="text-slate-200 font-mono text-xs">wt-cli/src/gc.rs::sweep_leases</code> contains low-level store GC logic: directory size calculations, lease file parsing, process PID liveness probing, ledger parsing, refcount decrementing, and mirror removal, alongside shell git commands (<code class="text-slate-300 font-mono">git worktree remove --force</code>, <code class="text-slate-300 font-mono">git branch -D</code>).
+            </p>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              Meanwhile, <code class="text-slate-200 font-mono text-xs">wt-store/src/gc.rs</code> contains an independent mark-and-sweep for objects and snapshots. Storage durability invariants are scattered across CLI and store crates.
+            </p>
+          </div>
+
+          <div>
+            <h4 class="text-xs font-bold uppercase tracking-wider text-emerald-400 mb-2 flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              Deepening Solution: <code class="normal-case">StoreReclaimer</code>
+            </h4>
+            <p class="text-slate-300 text-sm leading-relaxed mb-4">
+              Move lease lifecycle and store reclamation into a unified deep <strong class="text-white">`StoreReclaimer`</strong> in <code class="text-slate-200 font-mono text-xs">wt-store</code>, accepting an adapter for workspace cleanup:
+            </p>
+            <div class="bg-slate-950 p-3 rounded-lg border border-slate-800 text-xs font-mono text-emerald-300 mb-4 overflow-x-auto">
+<pre><code>pub struct StoreReclaimer&lt;'a, W: WorkspaceCleaner&gt; {
+    store: &amp;'a mut DiskStore,
+    cleaner: W,
+}
+
+impl&lt;'a, W: WorkspaceCleaner&gt; StoreReclaimer&lt;'a, W&gt; {
+    pub fn sweep(&amp;mut self, policy: SweepPolicy) -&gt; Result&lt;SweepSummary&gt;;
+}</code></pre>
+            </div>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              <strong>Testability:</strong> The reclaimer can be tested with synthetic clocks, simulated dead processes, and mock workspace cleaners without spawning external git processes.
+            </p>
+          </div>
+        </div>
+
+        <!-- Before / After Visual -->
+        <div class="mt-6 pt-6 border-t border-slate-800">
+          <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-4">Before / After Seam Visualization</h4>
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div class="bg-slate-950/80 p-4 rounded-xl border border-rose-950/40">
+              <span class="text-xs font-bold text-rose-400 block mb-2 font-mono">BEFORE: Leaked Responsibilities</span>
+              <div class="mermaid">
+flowchart TD
+    CLI["wt sweep CLI"]
+    CLI -->|"manual loop"| LEASE["Parse Leases (CLI)"]
+    CLI -->|"manual probe"| PID["Check /proc PIDs (CLI)"]
+    CLI -->|"manual exec"| GIT["git worktree / branch (CLI)"]
+    CLI -->|"manual sweep"| STORE_SWEEP["store.sweep_mark_sweep()"]
+              </div>
+            </div>
+            <div class="bg-slate-950/80 p-4 rounded-xl border border-emerald-950/40">
+              <span class="text-xs font-bold text-emerald-400 block mb-2 font-mono">AFTER: Autonomous Reclaimer</span>
+              <div class="mermaid">
+flowchart TD
+    CLI["wt sweep / Daemon"]
+    CLI -->|"reclaimer.sweep(policy)"| REC["StoreReclaimer (Deep)"]
+    REC --> LEASE_INT["Lease Expiry & Grace"]
+    REC --> OBJ_SWEEP["Mark-and-Sweep Objects"]
+    REC --> SNAP_SWEEP["Snapshot LRU & Budgets"]
+    REC -->|"via adapter"| CLEAN["WorkspaceCleaner Adapter"]
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- Candidate 3 -->
+      <article class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-lg transition-all hover:border-slate-700">
+        <div class="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-slate-800/80">
+          <div>
+            <div class="flex items-center gap-3">
+              <span class="text-emerald-400 font-bold text-sm tracking-wider font-mono">CANDIDATE 03</span>
+              <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/30">Worth exploring</span>
+            </div>
+            <h3 class="text-2xl font-bold text-white mt-1">Deep Snapshot Projection Module</h3>
+          </div>
+          <div class="text-xs text-slate-400 font-mono bg-slate-950 px-3 py-2 rounded-lg border border-slate-800">
+            crates/wt-cli/src/snapshots.rs<br>
+            crates/wt-store/src/snapshot/mod.rs<br>
+            crates/wt-store/src/snapindex.rs
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 my-6">
+          <div>
+            <h4 class="text-xs font-bold uppercase tracking-wider text-rose-400 mb-2 flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+              Architectural Friction (Misplaced Logic)
+            </h4>
+            <p class="text-slate-300 text-sm leading-relaxed mb-4">
+              <code class="text-slate-200 font-mono text-xs">wt-cli/src/snapshots.rs</code> (717 lines) implements snapshot cache routing, v2 delta rebuild heuristics, selection ring rotation, sweep-race retry loops, and self-healing blob rebuilds (<code class="text-slate-300 font-mono">heal_blob</code>).
+            </p>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              These are foundational projection algorithms belonging to the storage layer, but they reside inside the CLI binary, making headless reuse impossible.
+            </p>
+          </div>
+
+          <div>
+            <h4 class="text-xs font-bold uppercase tracking-wider text-emerald-400 mb-2 flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              Deepening Solution: <code class="normal-case">SnapshotProjectionEngine</code>
+            </h4>
+            <p class="text-slate-300 text-sm leading-relaxed mb-4">
+              Move projection planning, delta threshold heuristics, and healing retries into <code class="text-slate-200 font-mono text-xs">wt-store::SnapshotProjectionEngine</code>.
+            </p>
+            <div class="bg-slate-950 p-3 rounded-lg border border-slate-800 text-xs font-mono text-emerald-300 mb-4 overflow-x-auto">
+<pre><code>pub struct SnapshotProjectionEngine&lt;'a&gt; {
+    store: &amp;'a mut DiskStore,
+}
+
+impl&lt;'a&gt; SnapshotProjectionEngine&lt;'a&gt; {
+    pub fn materialize_snapshot(&amp;mut self, target: &amp;Path, spec: SnapshotSpec) -&gt; Result&lt;ProjectionReceipt&gt;;
+}</code></pre>
+            </div>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              <strong>Locality:</strong> Snapshot selection and delta diffing live directly next to snapshot metadata and WAL journals.
+            </p>
+          </div>
+        </div>
+      </article>
+
+      <!-- Candidate 4 -->
+      <article class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-lg transition-all hover:border-slate-700">
+        <div class="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-slate-800/80">
+          <div>
+            <div class="flex items-center gap-3">
+              <span class="text-emerald-400 font-bold text-sm tracking-wider font-mono">CANDIDATE 04</span>
+              <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/30">Worth exploring</span>
+            </div>
+            <h3 class="text-2xl font-bold text-white mt-1">Encapsulated Materialization & Capability Matrix</h3>
+          </div>
+          <div class="text-xs text-slate-400 font-mono bg-slate-950 px-3 py-2 rounded-lg border border-slate-800">
+            crates/wt-copy/src/materialize.rs<br>
+            crates/wt-copy/src/selection.rs<br>
+            crates/wt-cli/src/hydrate.rs
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 my-6">
+          <div>
+            <h4 class="text-xs font-bold uppercase tracking-wider text-rose-400 mb-2 flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+              Architectural Friction (Leaked Physical Details)
+            </h4>
+            <p class="text-slate-300 text-sm leading-relaxed mb-4">
+              Strategy negotiation (CoW clone vs Linux reflink vs copy_file_range vs byte-copy) is handled inside <code class="text-slate-200 font-mono text-xs">wt-cli/src/hydrate.rs::select_strategy</code>.
+            </p>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              Additionally, <code class="text-slate-200 font-mono text-xs">finalize_mode</code> in <code class="text-slate-200 font-mono text-xs">wt-cli</code> checks <code class="text-slate-300 font-mono">shares_inode_with_source</code> and manually executes file removals and copies to avoid leaking chmod mutations to shared hardlinked blobs.
+            </p>
+          </div>
+
+          <div>
+            <h4 class="text-xs font-bold uppercase tracking-wider text-emerald-400 mb-2 flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              Deepening Solution: <code class="normal-case">Deep Materializer</code>
+            </h4>
+            <p class="text-slate-300 text-sm leading-relaxed mb-4">
+              Consolidate filesystem capability detection, strategy selection, fallback chains, and mode normalization inside <code class="text-slate-200 font-mono text-xs">wt-copy::Materializer</code>:
+            </p>
+            <div class="bg-slate-950 p-3 rounded-lg border border-slate-800 text-xs font-mono text-emerald-300 mb-4 overflow-x-auto">
+<pre><code>pub struct Materializer {
+    policy: StrategyPolicy,
+}
+
+impl Materializer {
+    pub fn place_file(&amp;self, src: &amp;Path, dest: &amp;Path, mode: u32) -&gt; Result&lt;PlacementReceipt&gt;;
+}</code></pre>
+            </div>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              <strong>Locality:</strong> Callers request placement with a requested permission mode; <code class="text-slate-200 font-mono text-xs">wt-copy</code> encapsulates all OS and filesystem edge cases.
+            </p>
+          </div>
+        </div>
+      </article>
+
+    </div>
+
+    <!-- Comparison Table -->
+    <section class="mt-16 bg-slate-900/60 border border-slate-800 rounded-2xl p-6 sm:p-8">
+      <h3 class="text-xl font-bold text-white mb-6 flex items-center gap-2">
+        <svg class="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+        Candidate Comparison Matrix
+      </h3>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-sm">
+          <thead class="text-xs uppercase text-slate-400 bg-slate-950/60 border-b border-slate-800">
+            <tr>
+              <th class="px-4 py-3 font-semibold">Candidate</th>
+              <th class="px-4 py-3 font-semibold">Seam Location</th>
+              <th class="px-4 py-3 font-semibold">Interface Surface</th>
+              <th class="px-4 py-3 font-semibold">Implementation Depth</th>
+              <th class="px-4 py-3 font-semibold">Leverage Gain</th>
+              <th class="px-4 py-3 font-semibold">Locality Gain</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-800/60 text-slate-300">
+            <tr class="hover:bg-slate-800/30">
+              <td class="px-4 py-3.5 font-medium text-emerald-300">1. HydrationEngine</td>
+              <td class="px-4 py-3.5 font-mono text-xs text-slate-400">wt-cli / wt-store</td>
+              <td class="px-4 py-3.5 text-xs">1 method (<code class="text-emerald-400">hydrate</code>)</td>
+              <td class="px-4 py-3.5 text-xs">Scans, verifies, CoW clones, mirrors, sidecars</td>
+              <td class="px-4 py-3.5"><span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-xs font-semibold">Very High</span></td>
+              <td class="px-4 py-3.5"><span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-xs font-semibold">Very High</span></td>
+            </tr>
+            <tr class="hover:bg-slate-800/30">
+              <td class="px-4 py-3.5 font-medium text-emerald-300">2. StoreReclaimer</td>
+              <td class="px-4 py-3.5 font-mono text-xs text-slate-400">wt-store</td>
+              <td class="px-4 py-3.5 text-xs">1 method (<code class="text-emerald-400">sweep</code>)</td>
+              <td class="px-4 py-3.5 text-xs">Lease inspection, PID checks, GC, mark-and-sweep</td>
+              <td class="px-4 py-3.5"><span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-xs font-semibold">High</span></td>
+              <td class="px-4 py-3.5"><span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-xs font-semibold">High</span></td>
+            </tr>
+            <tr class="hover:bg-slate-800/30">
+              <td class="px-4 py-3.5 font-medium text-blue-300">3. SnapshotProjection</td>
+              <td class="px-4 py-3.5 font-mono text-xs text-slate-400">wt-store</td>
+              <td class="px-4 py-3.5 text-xs">2 methods (<code class="text-blue-400">project</code>, <code class="text-blue-400">invalidate</code>)</td>
+              <td class="px-4 py-3.5 text-xs">Lockfile check, v2 delta diff, self-healing</td>
+              <td class="px-4 py-3.5"><span class="px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 text-xs font-semibold">High</span></td>
+              <td class="px-4 py-3.5"><span class="px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 text-xs font-semibold">Medium</span></td>
+            </tr>
+            <tr class="hover:bg-slate-800/30">
+              <td class="px-4 py-3.5 font-medium text-blue-300">4. Deep Materializer</td>
+              <td class="px-4 py-3.5 font-mono text-xs text-slate-400">wt-copy</td>
+              <td class="px-4 py-3.5 text-xs">2 methods (<code class="text-blue-400">place_file</code>, <code class="text-blue-400">copy_dir</code>)</td>
+              <td class="px-4 py-3.5 text-xs">Probing, clone/reflink, fallback, chmod repair</td>
+              <td class="px-4 py-3.5"><span class="px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 text-xs font-semibold">Medium</span></td>
+              <td class="px-4 py-3.5"><span class="px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 text-xs font-semibold">High</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="mt-16 border-t border-slate-800 pt-8 text-center text-xs text-slate-500 font-mono">
+      Generated for wt &bull; Shared codebase-design vocabulary &bull; 2026
+    </footer>
+
+  </div>
+</body>
+</html>
