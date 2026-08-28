@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] Worker threads in the macOS bulk walker reuse a `thread_local!` 32KB scratch buffer.
-- [ ] Traversal loop parses returned entry count and byte length strictly, reading only valid records.
-- [ ] Buffer capacity doubles dynamically upon receiving `libc::ERANGE` up to a maximum 1MB ceiling.
-- [ ] Allocation overhead during repeated directory traversals drops to near zero.
-- [ ] Bulk walk unit tests verify entry fidelity, length boundary safety, and absence of ghost entries.
+- [x] Worker threads in the macOS bulk walker reuse a `thread_local!` 32KB scratch buffer.
+- [x] Traversal loop parses returned entry count and byte length strictly, reading only valid records.
+- [x] Buffer capacity doubles dynamically upon receiving `libc::ERANGE` up to a maximum 1MB ceiling.
+- [x] Allocation overhead during repeated directory traversals drops to near zero.
+- [x] Bulk walk unit tests verify entry fidelity, length boundary safety, and absence of ghost entries.

@@ -1,6 +1,7 @@
 // Tests assert with unwrap/expect by design: a panic IS the failure
 // signal under test, so the workspace restriction lints stay off here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
 
 //! Differential test for the macOS bulk walker (Step 0 follow-up).
 //!
@@ -11,8 +12,6 @@
 //! size, mtime, and mode. Any parse bug in the attrbuffer layout shows
 //! up as a mismatch here.
 
-#![cfg(target_os = "macos")]
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -21,6 +20,42 @@ use std::time::UNIX_EPOCH;
 
 use tempfile::TempDir;
 use wt_store::bulkwalk;
+
+#[test]
+fn thread_local_scratch_buffer_reused_without_allocation() {
+    let mut initial_ptr: *const u8 = std::ptr::null();
+    bulkwalk::with_scratch_buffer(|buf| {
+        assert_eq!(buf.len(), bulkwalk::INITIAL_BUFFER_CAPACITY);
+        assert_eq!(buf.len(), 32 * 1024);
+        initial_ptr = buf.as_ptr();
+    });
+
+    for _ in 0..500 {
+        bulkwalk::with_scratch_buffer(|buf| {
+            assert_eq!(buf.len(), bulkwalk::INITIAL_BUFFER_CAPACITY);
+            assert_eq!(buf.as_ptr(), initial_ptr, "scratch buffer pointer must remain stable");
+        });
+    }
+}
+
+#[test]
+fn scratch_buffer_doubles_on_erange_up_to_1mb() {
+    bulkwalk::with_scratch_buffer(|buf| {
+        assert_eq!(buf.len(), 32 * 1024);
+        let mut cap = buf.len();
+        while cap < bulkwalk::MAX_BUFFER_CAPACITY {
+            let new_cap = (cap * 2).min(bulkwalk::MAX_BUFFER_CAPACITY);
+            buf.resize(new_cap, 0);
+            cap = buf.len();
+        }
+        assert_eq!(buf.len(), 1024 * 1024);
+        assert_eq!(buf.len(), bulkwalk::MAX_BUFFER_CAPACITY);
+    });
+
+    bulkwalk::with_scratch_buffer(|buf| {
+        assert_eq!(buf.len(), bulkwalk::MAX_BUFFER_CAPACITY);
+    });
+}
 
 /// What one entry looks like from the portable side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +149,7 @@ fn build_tree(root: &Path) {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn bulk_walk_agrees_with_read_dir_reference_walk() {
     let dir = TempDir::new().expect("tempdir");
     build_tree(dir.path());
