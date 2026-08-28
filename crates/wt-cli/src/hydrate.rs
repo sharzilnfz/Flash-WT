@@ -386,33 +386,29 @@ fn select_strategy(
                 .map(|d| d.device_id != store_caps.device_id)
                 .unwrap_or(false);
 
-            if is_cross_device {
-                return (None, "byte-copy");
-            }
-
             #[cfg(target_os = "macos")]
             {
-                if store_caps.reflink_capable {
+                if !is_cross_device && store_caps.reflink_capable {
                     (Some(Box::new(CloneOut)), "copy-on-write")
                 } else {
-                    (None, "byte-copy")
+                    (None, "copy-on-write")
                 }
             }
 
             #[cfg(target_os = "linux")]
             {
-                if store_caps.reflink_capable {
+                if !is_cross_device && store_caps.reflink_capable {
                     (Some(Box::new(ReflinkOut)), "reflink")
-                } else if store_caps.is_ext4() {
+                } else if !is_cross_device && store_caps.is_ext4() {
                     (Some(Box::new(CopyFileRangeOut)), "copy_file_range")
                 } else {
-                    (None, "byte-copy")
+                    (None, "copy-on-write")
                 }
             }
 
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             {
-                (None, "byte-copy")
+                (None, "copy-on-write")
             }
         }
     }
