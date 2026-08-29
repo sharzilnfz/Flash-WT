@@ -16,36 +16,7 @@ use crate::error::{Error, Result};
 /// - Next.js build cache (`.next/cache/`)
 /// - Vite dependency cache (`node_modules/.vite/`)
 pub fn is_volatile_cache(rel_path: &str) -> bool {
-    let normalized = rel_path.trim_start_matches('/').trim_end_matches('/');
-    let segs: Vec<&str> = normalized.split('/').collect();
-
-    for (i, &seg) in segs.iter().enumerate() {
-        if seg == "target" {
-            if segs.get(i + 1) == Some(&"incremental") {
-                return true;
-            }
-            if segs.get(i + 2) == Some(&"incremental") {
-                return true;
-            }
-        }
-        if seg == "incremental" && i > 0 && segs[..i].contains(&"target") {
-            return true;
-        }
-        if seg == ".next" && segs.get(i + 1) == Some(&"cache") {
-            return true;
-        }
-        if seg == "cache" && i > 0 && segs[..i].ends_with(&[".next"]) {
-            return true;
-        }
-        if seg == "node_modules" && segs.get(i + 1) == Some(&".vite") {
-            return true;
-        }
-        if seg == ".vite" && i > 0 && segs[..i].ends_with(&["node_modules"]) {
-            return true;
-        }
-    }
-
-    false
+    crate::hydration_filter::is_volatile_cache(rel_path)
 }
 
 /// Recursively find all virtual environment root directories under `dir`.
