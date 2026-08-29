@@ -26,7 +26,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use wt_store::{ContentId, GcMode, Store, StoreReclaimer, SweepPolicy, WorkspaceCleaner};
@@ -34,8 +34,8 @@ use wt_store::{ContentId, GcMode, Store, StoreReclaimer, SweepPolicy, WorkspaceC
 use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, MigrateData, RemoveData, SweepData};
 use crate::error::{Error, Result};
-use crate::gitops;
 use crate::hydrate::open_store;
+use crate::workspace::{git_dir, repo_root_from_gitdir, WorkspaceEngine};
 
 /// Default grace period when `WT_GC_GRACE` is unset or unreadable.
 const DEFAULT_GRACE: Duration = Duration::from_secs(15 * 60);
@@ -176,11 +176,12 @@ pub fn remove(
     dir: Option<&Path>,
     cfg: &RunConfig,
 ) -> Result<(RemoveData, Vec<Diagnostic>)> {
-    let root = gitops::repo_root()?;
+    let engine = WorkspaceEngine::discover()?;
+    let root = engine.root().to_path_buf();
 
     let dest = match dir {
         Some(d) => d.to_path_buf(),
-        None => gitops::default_worktree_dest(&root, name)?,
+        None => engine.default_dest(name)?,
     };
     if !dest.join(".git").exists() {
         return Err(Error::Usage(format!(
@@ -192,8 +193,7 @@ pub fn remove(
     // The linked git dir holds the ledger. Resolve it while the
     // worktree still exists; for linked worktrees this lands inside
     // the main repo's .git/worktrees/<name>.
-    let git_dir_text = gitops::run(&dest, &["rev-parse", "--absolute-git-dir"])?;
-    let git_dir = PathBuf::from(&git_dir_text);
+    let git_dir = git_dir(&dest)?;
     let (ledger_blobs, ledger_snapshots) = if git_dir.join("wt-hydrated.tsv").exists() {
         read_ledger(&git_dir)?
     } else {
@@ -262,7 +262,7 @@ pub fn remove(
         store.remove_worktree_mirror(&dest, &git_dir)?;
     }
 
-    gitops::run(&root, &["worktree", "remove", &dest.to_string_lossy()]).map_err(|e| {
+    engine.remove_worktree(&dest).map_err(|e| {
         Error::Git(format!(
             "git worktree remove failed (references already released): {e}"
         ))
@@ -302,39 +302,6 @@ fn dir_size(path: &Path) -> u64 {
     total
 }
 
-fn find_repo_root_from_gitdir(gitdir: &Path) -> Option<PathBuf> {
-    if gitdir.exists() {
-        let commondir = gitdir.join("commondir");
-        if let Ok(rel) = fs::read_to_string(&commondir) {
-            let mgd = gitdir.join(rel.trim());
-            if let Ok(canon) = mgd.canonicalize() {
-                if canon.file_name() == Some(std::ffi::OsStr::new(".git")) {
-                    if let Some(parent) = canon.parent() {
-                        return Some(parent.to_path_buf());
-                    }
-                }
-                return Some(canon);
-            }
-        }
-    }
-
-    if let Some(parent) = gitdir.parent() {
-        if parent.file_name() == Some(std::ffi::OsStr::new("worktrees")) {
-            if let Some(git_parent) = parent.parent() {
-                if git_parent.file_name() == Some(std::ffi::OsStr::new(".git")) {
-                    if let Some(repo) = git_parent.parent() {
-                        if repo.is_dir() {
-                            return Some(repo.to_path_buf());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
 /// Git-based workspace cleaner adapter for `wt-store::StoreReclaimer`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GitWorkspaceCleaner;
@@ -350,22 +317,14 @@ impl WorkspaceCleaner for GitWorkspaceCleaner {
         gitdir: &Path,
         branch_name: &str,
     ) -> std::io::Result<()> {
-        let repo_root = find_repo_root_from_gitdir(gitdir);
+        let repo_root = repo_root_from_gitdir(gitdir);
         if let Some(ref r_root) = repo_root {
+            let engine = WorkspaceEngine::from_root(r_root.clone());
             if worktree.exists() {
-                let _ = std::process::Command::new("git")
-                    .args(["worktree", "remove", "--force", &worktree.to_string_lossy()])
-                    .current_dir(r_root)
-                    .output();
+                let _ = engine.git(&["worktree", "remove", "--force", &worktree.to_string_lossy()]);
             }
-            let _ = std::process::Command::new("git")
-                .args(["worktree", "prune"])
-                .current_dir(r_root)
-                .output();
-            let _ = std::process::Command::new("git")
-                .args(["branch", "-D", branch_name])
-                .current_dir(r_root)
-                .output();
+            let _ = engine.git(&["worktree", "prune"]);
+            let _ = engine.delete_branch(branch_name);
         }
 
         if worktree.exists() {

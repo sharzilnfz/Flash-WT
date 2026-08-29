@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use wt_store::{
@@ -13,141 +12,8 @@ use wt_store::{
 use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, LeaseEntry, ListData, WorktreeEntry};
 use crate::error::Result;
-use crate::gitops;
 use crate::hydrate::open_store;
-
-/// Raw git worktree information parsed from `git worktree list --porcelain`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RawGitWorktree {
-    pub path: PathBuf,
-    pub head: Option<String>,
-    pub branch: Option<String>,
-    pub is_detached: bool,
-    pub is_bare: bool,
-    pub is_locked: bool,
-    pub is_prunable: bool,
-}
-
-/// Parse the output of `git worktree list --porcelain`.
-pub fn parse_git_worktrees(porcelain_output: &str) -> Vec<RawGitWorktree> {
-    let mut worktrees = Vec::new();
-    let mut current_path: Option<PathBuf> = None;
-    let mut current_head: Option<String> = None;
-    let mut current_branch: Option<String> = None;
-    let mut is_detached = false;
-    let mut is_bare = false;
-    let mut is_locked = false;
-    let mut is_prunable = false;
-
-    let flush = |worktrees: &mut Vec<RawGitWorktree>,
-                 path: &mut Option<PathBuf>,
-                 head: &mut Option<String>,
-                 branch: &mut Option<String>,
-                 detached: &mut bool,
-                 bare: &mut bool,
-                 locked: &mut bool,
-                 prunable: &mut bool| {
-        if let Some(p) = path.take() {
-            worktrees.push(RawGitWorktree {
-                path: p,
-                head: head.take(),
-                branch: branch.take(),
-                is_detached: *detached,
-                is_bare: *bare,
-                is_locked: *locked,
-                is_prunable: *prunable,
-            });
-            *detached = false;
-            *bare = false;
-            *locked = false;
-            *prunable = false;
-        }
-    };
-
-    for line in porcelain_output.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            flush(
-                &mut worktrees,
-                &mut current_path,
-                &mut current_head,
-                &mut current_branch,
-                &mut is_detached,
-                &mut is_bare,
-                &mut is_locked,
-                &mut is_prunable,
-            );
-            continue;
-        }
-        if let Some(path_str) = trimmed.strip_prefix("worktree ") {
-            flush(
-                &mut worktrees,
-                &mut current_path,
-                &mut current_head,
-                &mut current_branch,
-                &mut is_detached,
-                &mut is_bare,
-                &mut is_locked,
-                &mut is_prunable,
-            );
-            current_path = Some(PathBuf::from(path_str.trim()));
-        } else if let Some(h) = trimmed.strip_prefix("HEAD ") {
-            current_head = Some(h.trim().to_string());
-        } else if let Some(b) = trimmed.strip_prefix("branch ") {
-            let branch_ref = b.trim();
-            let branch_name = branch_ref
-                .strip_prefix("refs/heads/")
-                .unwrap_or(branch_ref);
-            current_branch = Some(branch_name.to_string());
-        } else if trimmed == "detached" {
-            is_detached = true;
-        } else if trimmed == "bare" {
-            is_bare = true;
-        } else if trimmed.starts_with("locked") {
-            is_locked = true;
-        } else if trimmed.starts_with("prunable") {
-            is_prunable = true;
-        }
-    }
-    flush(
-        &mut worktrees,
-        &mut current_path,
-        &mut current_head,
-        &mut current_branch,
-        &mut is_detached,
-        &mut is_bare,
-        &mut is_locked,
-        &mut is_prunable,
-    );
-
-    worktrees
-}
-
-/// Resolve the git directory (`git_dir`) for a worktree path.
-fn resolve_git_dir(worktree_path: &Path) -> PathBuf {
-    let dot_git = worktree_path.join(".git");
-    if dot_git.is_dir() {
-        return dot_git;
-    }
-    if dot_git.is_file() {
-        if let Ok(content) = fs::read_to_string(&dot_git) {
-            for line in content.lines() {
-                if let Some(rest) = line.trim().strip_prefix("gitdir:") {
-                    let gitdir_path = PathBuf::from(rest.trim());
-                    if gitdir_path.is_absolute() {
-                        return gitdir_path;
-                    } else {
-                        return worktree_path.join(gitdir_path);
-                    }
-                }
-            }
-        }
-    }
-    if let Ok(dir_str) = gitops::run(worktree_path, &["rev-parse", "--absolute-git-dir"]) {
-        return PathBuf::from(dir_str);
-    }
-    dot_git
-}
+use crate::workspace::WorkspaceEngine;
 
 /// Format bytes into a human-readable string.
 fn format_bytes(bytes: u64) -> String {
@@ -198,15 +64,9 @@ fn get_blob_size(
 }
 
 pub fn run(cfg: &RunConfig) -> Result<(ListData, Vec<Diagnostic>)> {
-    let repo_root = gitops::repo_root()?;
-    let canon_repo_root = repo_root
-        .canonicalize()
-        .unwrap_or_else(|_| repo_root.clone());
-    let current_dir = std::env::current_dir().ok();
-    let canon_cwd = current_dir.as_ref().and_then(|d| d.canonicalize().ok());
+    let engine = WorkspaceEngine::discover()?;
 
-    let raw_out = gitops::run(&repo_root, &["worktree", "list", "--porcelain"])?;
-    let raw_worktrees = parse_git_worktrees(&raw_out);
+    let raw_worktrees = engine.worktrees()?;
 
     let store = open_store()?;
     let store_root = store.root().to_path_buf();
@@ -222,32 +82,21 @@ pub fn run(cfg: &RunConfig) -> Result<(ListData, Vec<Diagnostic>)> {
     let mut total_files_hydrated = 0usize;
 
     for raw in raw_worktrees {
-        let worktree_path = raw.path.clone();
+        let md = engine.metadata(raw);
+        let worktree_path = md.raw.path.clone();
         let canon_worktree = worktree_path
             .canonicalize()
             .unwrap_or_else(|_| worktree_path.clone());
-        let git_dir = resolve_git_dir(&worktree_path);
+        let git_dir = md.git_dir.clone();
         let canon_gitdir = git_dir.canonicalize().unwrap_or_else(|_| git_dir.clone());
 
-        let branch_display = if let Some(ref b) = raw.branch {
-            b.clone()
-        } else if raw.is_detached {
-            "(detached)".to_string()
-        } else if raw.is_bare {
-            "(bare)".to_string()
-        } else {
-            "(unknown)".to_string()
-        };
+        let branch_display = md.branch_display.clone();
 
         // Determine if active
-        let is_active = if let Some(ref cwd) = canon_cwd {
-            cwd == &canon_worktree || cwd.starts_with(&canon_worktree)
-        } else {
-            false
-        };
+        let is_active = engine.is_active(&worktree_path);
 
         // Determine if main worktree
-        let is_main = canon_worktree == canon_repo_root || worktree_path.join(".git").is_dir();
+        let is_main = md.is_main;
 
         // 1. Read wt-hydrated.tsv sidecar if present
         let mut sidecar_files: Vec<(String, ContentId)> = Vec::new();
@@ -411,7 +260,7 @@ pub fn run(cfg: &RunConfig) -> Result<(ListData, Vec<Diagnostic>)> {
         entries.push(WorktreeEntry {
             path: worktree_path.display().to_string(),
             branch: branch_display,
-            head: raw.head,
+            head: md.raw.head.clone(),
             is_active,
             is_main,
             is_ephemeral,
@@ -528,47 +377,6 @@ fn print_human_table(entries: &[WorktreeEntry], total_disk_saved: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_porcelain_worktrees_multiple_entries() {
-        let output = "\
-worktree /path/to/main
-HEAD 94a106886e0fe0d3810d7ceb10c9502844281315
-branch refs/heads/main
-
-worktree /path/to/feature-1
-HEAD 1234567890abcdef1234567890abcdef12345678
-branch refs/heads/feature-1
-
-worktree /path/to/detached-wt
-HEAD fedcba0987654321fedcba0987654321fedcba09
-detached
-
-worktree /path/to/bare-wt
-bare
-";
-        let parsed = parse_git_worktrees(output);
-        assert_eq!(parsed.len(), 4);
-
-        assert_eq!(parsed[0].path, PathBuf::from("/path/to/main"));
-        assert_eq!(
-            parsed[0].head.as_deref(),
-            Some("94a106886e0fe0d3810d7ceb10c9502844281315")
-        );
-        assert_eq!(parsed[0].branch.as_deref(), Some("main"));
-        assert!(!parsed[0].is_detached);
-        assert!(!parsed[0].is_bare);
-
-        assert_eq!(parsed[1].path, PathBuf::from("/path/to/feature-1"));
-        assert_eq!(parsed[1].branch.as_deref(), Some("feature-1"));
-
-        assert_eq!(parsed[2].path, PathBuf::from("/path/to/detached-wt"));
-        assert!(parsed[2].is_detached);
-        assert_eq!(parsed[2].branch, None);
-
-        assert_eq!(parsed[3].path, PathBuf::from("/path/to/bare-wt"));
-        assert!(parsed[3].is_bare);
-    }
 
     #[test]
     fn format_bytes_examples() {
