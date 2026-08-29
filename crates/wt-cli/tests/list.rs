@@ -183,3 +183,41 @@ fn list_active_marker_from_sub_worktree() {
     assert_eq!(main_wt["is_active"], false);
     assert_eq!(sub_wt["is_active"], true);
 }
+
+#[test]
+fn list_maps_porcelain_metadata_for_detached_worktree() {
+    let fx = Fixture::heavy_repo(HEAVY_FILES);
+    let store_dir = tempfile::tempdir().unwrap();
+
+    // A linked worktree created with raw git, in detached HEAD state:
+    // the porcelain record carries no `branch` line, so the workspace
+    // metadata mapping must render it as "(detached)".
+    let detached_path = fx.repo.parent().unwrap().join("origin-detached-peek");
+    let status = Command::new("git")
+        .args(["worktree", "add", "--quiet", "--detach"])
+        .arg(&detached_path)
+        .arg("HEAD")
+        .current_dir(&fx.repo)
+        .status()
+        .expect("git worktree add --detach");
+    assert!(status.success());
+
+    let out = fx.wt_with_store(&["list", "--json"], store_dir.path());
+    assert!(out.status.success());
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let worktrees = json["data"]["worktrees"].as_array().unwrap();
+    assert_eq!(worktrees.len(), 2);
+
+    let detached = worktrees
+        .iter()
+        .find(|w| w["path"].as_str().unwrap().ends_with("origin-detached-peek"))
+        .expect("detached worktree listed");
+    assert_eq!(detached["branch"], "(detached)");
+    assert_eq!(detached["is_main"], false);
+    assert_eq!(detached["is_active"], false);
+
+    let main = worktrees.iter().find(|w| w["is_main"] == true).unwrap();
+    assert_eq!(main["is_main"], true);
+    assert_eq!(main["is_active"], true);
+}

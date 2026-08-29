@@ -8,10 +8,10 @@ use std::time::Instant;
 use crate::config::RunConfig;
 use crate::envelope::{CreateData, Diagnostic};
 use crate::error::{Error, Result};
-use crate::gitops;
 use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
 use crate::manifest::{self, LoadedPatterns, load_patterns};
 use crate::timing::StageTimings;
+use crate::workspace::WorkspaceEngine;
 
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -62,10 +62,11 @@ fn create(
     dir: Option<&Path>,
     cfg: &RunConfig,
 ) -> Result<(CreateData, Vec<Diagnostic>)> {
-    let root = gitops::repo_root()?;
+    let engine = WorkspaceEngine::discover()?;
+    let root = engine.root().to_path_buf();
     let dest = match dir {
         Some(d) => d.to_path_buf(),
-        None => gitops::default_worktree_dest(&root, name)?,
+        None => engine.default_dest(name)?,
     };
     if dest.exists() {
         return Err(Error::Usage(format!("{} already exists", dest.display())));
@@ -76,19 +77,12 @@ fn create(
     let started = Instant::now();
     let start_point = base.unwrap_or("HEAD");
     let base_commit = if let Some(base_ref) = base {
-        Some(gitops::resolve_commit(&root, base_ref)?)
+        Some(engine.resolve_commit(base_ref)?)
     } else {
         None
     };
 
-    // Prefer creating the branch from start_point; an existing branch falls
-    // back to checking it out directly.
-    let dest_text = dest.to_string_lossy().into_owned();
-    gitops::run(
-        &root,
-        &["worktree", "add", "-b", name, &dest_text, start_point],
-    )
-    .or_else(|_| gitops::run(&root, &["worktree", "add", &dest_text, name]))?;
+    engine.create_worktree(name, &dest, start_point)?;
     timings.git_worktree_ms = started.elapsed().as_millis();
 
     if !cfg.json {

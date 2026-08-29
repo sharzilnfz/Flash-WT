@@ -10,7 +10,7 @@ use crate::config::RunConfig;
 use crate::envelope::{CleanData, Diagnostic};
 use crate::error::{Error, Result};
 use crate::gc;
-use crate::gitops;
+use crate::workspace::WorkspaceEngine;
 
 /// Format bytes into human-readable unit (e.g. `1.2 MB`, `450 KB`).
 fn format_bytes(bytes: u64) -> String {
@@ -46,19 +46,19 @@ pub fn run(
     age: Option<Duration>,
     cfg: &RunConfig,
 ) -> Result<(CleanData, Vec<Diagnostic>)> {
-    let root = gitops::repo_root()?;
+    let engine = WorkspaceEngine::discover()?;
 
     // Single worktree targeted cleanup
     if let Some(branch_name) = name {
-        return clean_single_worktree(&root, branch_name, dir, age, cfg);
+        return clean_single_worktree(&engine, branch_name, dir, age, cfg);
     }
 
     // Interactive or batch cleanup
-    clean_batch_worktrees(&root, all, force, age, cfg)
+    clean_batch_worktrees(&engine, all, force, age, cfg)
 }
 
 fn clean_single_worktree(
-    root: &Path,
+    engine: &WorkspaceEngine,
     name: &str,
     dir: Option<&Path>,
     age: Option<Duration>,
@@ -66,7 +66,7 @@ fn clean_single_worktree(
 ) -> Result<(CleanData, Vec<Diagnostic>)> {
     let dest = match dir {
         Some(d) => d.to_path_buf(),
-        None => gitops::default_worktree_dest(root, name)?,
+        None => engine.default_dest(name)?,
     };
 
     let mut diagnostics = Vec::new();
@@ -77,11 +77,7 @@ fn clean_single_worktree(
     diagnostics.append(&mut rm_diags);
 
     // If directory still exists on disk, remove git worktree tracking
-    let dest_text = dest.to_string_lossy().into_owned();
-    if dest.exists() {
-        let _ = gitops::run(root, &["worktree", "remove", "--force", &dest_text])
-            .or_else(|_| gitops::run(root, &["worktree", "remove", &dest_text]));
-    }
+    engine.remove_worktree_lenient(&dest);
 
     // Automatically invoke GC sweep to reclaim unreferenced blobs/snapshots
     let (sweep_data, mut sw_diags) = gc::sweep(age, &silent_cfg)?;
@@ -118,23 +114,16 @@ fn clean_single_worktree(
     Ok((data, diagnostics))
 }
 
-fn discover_candidates(root: &Path) -> Result<Vec<CleanCandidate>> {
-    let porcelain = gitops::run(root, &["worktree", "list", "--porcelain"])?;
-    let raw_worktrees = crate::commands::list::parse_git_worktrees(&porcelain);
-
+fn discover_candidates(engine: &WorkspaceEngine) -> Result<Vec<CleanCandidate>> {
     let mut candidates = Vec::new();
     let mut is_first = true;
 
-    for wt in raw_worktrees {
-        let branch = wt.branch.clone().unwrap_or_default();
-        let is_merged = if !branch.is_empty() {
-            gitops::run(root, &["merge-base", "--is-ancestor", &branch, "HEAD"]).is_ok()
-        } else {
-            false
-        };
+    for md in engine.worktree_metadata()? {
+        let branch = md.raw.branch.clone().unwrap_or_default();
+        let is_merged = engine.is_branch_merged(&branch);
 
         candidates.push(CleanCandidate {
-            path: wt.path,
+            path: md.raw.path,
             branch,
             is_merged,
             is_main: is_first,
@@ -146,13 +135,14 @@ fn discover_candidates(root: &Path) -> Result<Vec<CleanCandidate>> {
 }
 
 fn clean_batch_worktrees(
-    root: &Path,
+    engine: &WorkspaceEngine,
     all: bool,
     force: bool,
     age: Option<Duration>,
     cfg: &RunConfig,
 ) -> Result<(CleanData, Vec<Diagnostic>)> {
-    let all_candidates = discover_candidates(root)?;
+    let root = engine.root();
+    let all_candidates = discover_candidates(engine)?;
     let candidates: Vec<CleanCandidate> = all_candidates
         .into_iter()
         .filter(|c| !c.is_main)
@@ -294,9 +284,7 @@ fn clean_batch_worktrees(
             }
         }
 
-        let path_text = candidate.path.to_string_lossy().into_owned();
-        let _ = gitops::run(root, &["worktree", "remove", "--force", &path_text])
-            .or_else(|_| gitops::run(root, &["worktree", "remove", &path_text]));
+        engine.remove_worktree_lenient(&candidate.path);
 
         removed_worktrees.push(candidate.path.display().to_string());
         branches_removed.push(candidate.branch.clone());
