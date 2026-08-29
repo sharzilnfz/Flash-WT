@@ -482,7 +482,9 @@ mod tests {
         assert!(is_volatile_cache("crates/sub/target/debug/incremental/o"));
         assert!(is_volatile_cache("node_modules/.vite"));
         assert!(is_volatile_cache("node_modules/.vite/deps/react.js"));
-        assert!(is_volatile_cache("frontend/node_modules/.vite/deps/chunk.js"));
+        assert!(is_volatile_cache(
+            "frontend/node_modules/.vite/deps/chunk.js"
+        ));
         assert!(is_volatile_cache(".next/cache"));
         assert!(is_volatile_cache(".next/cache/webpack/client.pack"));
         assert!(is_volatile_cache("web/.next/cache/turbopack/module.pack"));

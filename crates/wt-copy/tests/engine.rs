@@ -107,7 +107,11 @@ fn copy_engine_materialize_file_preserves_content_and_normalizes_mode() {
         .materialize_file(&src, &dest_plain, Some(0o644))
         .expect("materialize_file");
 
-    let mode_plain = fs::metadata(&dest_plain).expect("meta").permissions().mode() & 0o7777;
+    let mode_plain = fs::metadata(&dest_plain)
+        .expect("meta")
+        .permissions()
+        .mode()
+        & 0o7777;
     assert_eq!(mode_plain & 0o111, 0, "executable bit must not be set");
 }
 
@@ -124,7 +128,10 @@ fn copy_engine_materialize_file_creates_parent_directories() {
         .materialize_file(&src, &dest, None)
         .expect("materialize_file");
 
-    assert_eq!(fs::read_to_string(&dest).expect("read dest"), "nested content");
+    assert_eq!(
+        fs::read_to_string(&dest).expect("read dest"),
+        "nested content"
+    );
 }
 
 #[test]
@@ -144,9 +151,8 @@ fn copy_engine_materialize_files_batch_accounting() {
     }
 
     let engine = CopyEngine::default();
-    let receipt: BatchPlacementReceipt = engine
-        .materialize_files(&items)
-        .expect("materialize_files");
+    let receipt: BatchPlacementReceipt =
+        engine.materialize_files(&items).expect("materialize_files");
 
     assert_eq!(receipt.total_placed, 5);
 
@@ -176,5 +182,8 @@ fn materializer_for_paths_and_for_directories() {
     assert_eq!(m1.strategy(), m2.strategy());
 
     m1.materialize_file(&src, &dest, None).expect("materialize");
-    assert_eq!(fs::read_to_string(&dest).expect("read"), "materializer test");
+    assert_eq!(
+        fs::read_to_string(&dest).expect("read"),
+        "materializer test"
+    );
 }

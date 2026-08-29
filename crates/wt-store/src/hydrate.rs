@@ -173,11 +173,8 @@ impl DiskStore {
             fs::create_dir_all(&dir_path)?;
         }
 
-        let materializer = wt_copy::Materializer::for_paths(
-            req.strategy_policy,
-            self.root(),
-            req.worktree_root,
-        );
+        let materializer =
+            wt_copy::Materializer::for_paths(req.strategy_policy, self.root(), req.worktree_root);
         let files: Vec<(&String, &ContentId)> = req.files.iter().collect();
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -335,9 +332,7 @@ impl DiskStore {
 }
 
 fn resolve_dest_path(worktree_root: &Path, heavy_rel: &str, rel: &str) -> PathBuf {
-    if heavy_rel.is_empty() {
-        worktree_root.join(rel)
-    } else if rel == heavy_rel || rel.starts_with(&format!("{heavy_rel}/")) {
+    if heavy_rel.is_empty() || rel == heavy_rel || rel.starts_with(&format!("{heavy_rel}/")) {
         worktree_root.join(rel)
     } else {
         worktree_root.join(heavy_rel).join(rel)

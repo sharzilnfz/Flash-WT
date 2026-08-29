@@ -111,7 +111,10 @@ fn create(
                 println!("  Next: cd {}", rel.display());
             } else if let Some(parent) = dest.parent() {
                 if parent == curr.parent().unwrap_or(&curr) {
-                    println!("  Next: cd ../{}", dest.file_name().unwrap_or_default().to_string_lossy());
+                    println!(
+                        "  Next: cd ../{}",
+                        dest.file_name().unwrap_or_default().to_string_lossy()
+                    );
                 } else {
                     println!("  Next: cd {}", dest.display());
                 }

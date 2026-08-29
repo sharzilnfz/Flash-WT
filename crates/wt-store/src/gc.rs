@@ -937,7 +937,10 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
         }
 
         if (!blob_ids.is_empty() || !snapshot_ids.is_empty())
-            && self.store.mirror_is_missing(worktree_path, gitdir).unwrap_or(false)
+            && self
+                .store
+                .mirror_is_missing(worktree_path, gitdir)
+                .unwrap_or(false)
         {
             let _ = self.store.publish_worktree_mirror(
                 worktree_path,
@@ -966,8 +969,11 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
             let _ = fs::remove_file(&ledger_path);
         }
 
-        let mirror_removed =
-            self.store.unlink_worktree_mirror(worktree_path, gitdir).unwrap_or(false) || had_ledger;
+        let mirror_removed = self
+            .store
+            .unlink_worktree_mirror(worktree_path, gitdir)
+            .unwrap_or(false)
+            || had_ledger;
 
         if worktree_path.exists() {
             let _ = self.cleaner.remove_worktree(worktree_path);
@@ -1040,12 +1046,21 @@ mod tests {
         let mut blobs = BTreeSet::new();
         blobs.insert(blob_id);
         store
-            .publish_worktree_mirror(&worktree, &gitdir, blobs.iter(), std::iter::empty(), None, None)
+            .publish_worktree_mirror(
+                &worktree,
+                &gitdir,
+                blobs.iter(),
+                std::iter::empty(),
+                None,
+                None,
+            )
             .expect("publish mirror");
 
         let cleaner = NoopWorkspaceCleaner;
         let mut reclaimer = StoreReclaimer::new(&mut store, &cleaner);
-        let receipt = reclaimer.retire_worktree(&worktree, &gitdir).expect("retire worktree");
+        let receipt = reclaimer
+            .retire_worktree(&worktree, &gitdir)
+            .expect("retire worktree");
 
         assert_eq!(receipt.references_released, 1);
         assert!(receipt.mirror_removed);

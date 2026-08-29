@@ -14,7 +14,6 @@ use crate::manifest::{collect_matches, pattern_matches};
 use crate::timing::StageTimings;
 use crate::workspace;
 
-
 /// Where the per-machine store lives. `$WT_STORE` wins (tests use it
 /// for isolation); otherwise XDG cache conventions.
 fn store_dir() -> Result<PathBuf> {
@@ -173,18 +172,35 @@ impl<'a> HydrationEngine<'a> {
                                 .create(true)
                                 .append(true)
                                 .open(git_dir.join("wt-hydrated.tsv"))
-                                .map_err(|e| Error::io_unanchored("open ledger", git_dir.join("wt-hydrated.tsv"), e))?;
+                                .map_err(|e| {
+                                    Error::io_unanchored(
+                                        "open ledger",
+                                        git_dir.join("wt-hydrated.tsv"),
+                                        e,
+                                    )
+                                })?;
                             let mut sidecar = std::io::BufWriter::new(sidecar_file);
-                            std::io::Write::write_all(&mut sidecar, format!("-\tsnapshot\t{}\n", info.hash).as_bytes())
-                                .map_err(|e| Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e))?;
-                            self.store.publish_worktree_mirror(
-                                req.dest,
-                                &git_dir,
-                                BTreeSet::new(),
-                                std::iter::once(&info.hash),
-                                req.base_branch,
-                                req.base_commit,
-                            ).map_err(|e| Error::Store(format!("cannot publish mirror: {e}")))?;
+                            std::io::Write::write_all(
+                                &mut sidecar,
+                                format!("-\tsnapshot\t{}\n", info.hash).as_bytes(),
+                            )
+                            .map_err(|e| {
+                                Error::io_unanchored(
+                                    "write ledger",
+                                    git_dir.join("wt-hydrated.tsv"),
+                                    e,
+                                )
+                            })?;
+                            self.store
+                                .publish_worktree_mirror(
+                                    req.dest,
+                                    &git_dir,
+                                    BTreeSet::new(),
+                                    std::iter::once(&info.hash),
+                                    req.base_branch,
+                                    req.base_commit,
+                                )
+                                .map_err(|e| Error::Store(format!("cannot publish mirror: {e}")))?;
 
                             total_files += info.files;
                             snapshot_hits_count += 1;
@@ -203,12 +219,16 @@ impl<'a> HydrationEngine<'a> {
                         }
                         wt_store::SnapshotOutcome::FellBack(Some(reason)) => {
                             if !req.cfg.json {
-                                eprintln!("wt-snapshots: {heavy}: lockfile fast path fell back ({reason})");
+                                eprintln!(
+                                    "wt-snapshots: {heavy}: lockfile fast path fell back ({reason})"
+                                );
                             }
                         }
                         wt_store::SnapshotOutcome::FellBack(None) => {}
                         wt_store::SnapshotOutcome::Failed(msg) => {
-                            return Err(Error::Store(format!("hydration of {heavy} failed: {msg}")));
+                            return Err(Error::Store(format!(
+                                "hydration of {heavy} failed: {msg}"
+                            )));
                         }
                     }
                 }
@@ -306,7 +326,9 @@ impl<'a> HydrationEngine<'a> {
                 }
                 if !req.cfg.json {
                     for diag in &receipt.diagnostics {
-                        eprintln!("wt-snapshots: {heavy}: falling back to per-file placement ({diag})");
+                        eprintln!(
+                            "wt-snapshots: {heavy}: falling back to per-file placement ({diag})"
+                        );
                     }
                 }
             }
@@ -354,10 +376,7 @@ impl<'a> HydrationEngine<'a> {
             crate::base::check_base_movement(self.store, req.root, req.base_branch);
         diagnostics.extend(report_diagnostics);
 
-        if total_copied > 0
-            && req.cfg.strategy_policy != StrategyPolicy::ForceByteCopy
-            && req.cfg.strategy_policy != StrategyPolicy::Hardlink
-        {
+        if total_copied > 0 && req.cfg.strategy_policy != StrategyPolicy::Hardlink {
             diagnostics.push(Diagnostic::warning(
                 "CROSS_DEVICE_COPY_DEGRADATION",
                 format!(

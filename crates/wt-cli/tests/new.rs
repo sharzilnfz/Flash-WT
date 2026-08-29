@@ -63,16 +63,32 @@ fn git(dir: &Path, args: &[&str]) {
 fn wt_new_creates_worktree_with_structured_receipt() {
     let fx = TestFixture::new();
     let out = fx.wt(&["new", "feat-alpha"]);
-    assert!(out.status.success(), "wt new failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "wt new failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("✓ Created worktree"), "expected ✓ Created worktree in {stdout}");
-    assert!(stdout.contains("feat-alpha"), "expected branch name in {stdout}");
-    assert!(stdout.contains("Next: cd"), "expected actionable next step hint in {stdout}");
+    assert!(
+        stdout.contains("✓ Created worktree"),
+        "expected ✓ Created worktree in {stdout}"
+    );
+    assert!(
+        stdout.contains("feat-alpha"),
+        "expected branch name in {stdout}"
+    );
+    assert!(
+        stdout.contains("Next: cd"),
+        "expected actionable next step hint in {stdout}"
+    );
 
     let wt_path = fx.repo.parent().unwrap().join("origin-feat-alpha");
     assert!(wt_path.exists(), "worktree directory must exist");
-    assert!(wt_path.join("node_modules/pkg/index.js").exists(), "hydrated file must exist");
+    assert!(
+        wt_path.join("node_modules/pkg/index.js").exists(),
+        "hydrated file must exist"
+    );
 }
 
 #[test]

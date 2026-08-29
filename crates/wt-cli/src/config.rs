@@ -58,7 +58,9 @@ fn probe_apfs_default() -> bool {
             }
         }
 
-        wt_store::probe_fs(cur).map(|c| c.reflink_capable).unwrap_or(false)
+        wt_store::probe_fs(cur)
+            .map(|c| c.reflink_capable)
+            .unwrap_or(false)
     }
     #[cfg(not(target_os = "macos"))]
     {

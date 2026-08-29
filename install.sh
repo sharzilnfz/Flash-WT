@@ -132,6 +132,7 @@ install_completions() {
   for dir in "$@"; do
     try_completion "$shell" "$dir" && return 0
   done
+  return 0
 }
 
 if [ "${WT_COMPLETIONS:-auto}" != no ]; then

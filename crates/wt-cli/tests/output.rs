@@ -26,7 +26,10 @@ fn human_bytes_zero_rendering_via_list() {
     assert!(out.status.success());
 
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("0 B"), "expected zero-byte rendering in list output:\n{stdout}");
+    assert!(
+        stdout.contains("0 B"),
+        "expected zero-byte rendering in list output:\n{stdout}"
+    );
     assert!(stdout.contains("Total disk saved: 0 B"));
 }
 
@@ -60,7 +63,10 @@ fn human_duration_and_table_rendering_via_list_ttl() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("BRANCH"));
     assert!(stdout.contains("DISK SAVED"));
-    assert!(stdout.contains("ttl:"), "expected a lease ttl in table:\n{stdout}");
+    assert!(
+        stdout.contains("ttl:"),
+        "expected a lease ttl in table:\n{stdout}"
+    );
     assert!(stdout.contains("preso-ttl"));
 
     let header = stdout
