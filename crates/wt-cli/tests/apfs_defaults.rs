@@ -1,9 +1,10 @@
 // Tests assert with unwrap/expect by design: a panic IS the failure
 // signal under test, so the workspace restriction lints stay off here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-#![cfg(target_os = "macos")]
 
 //! Tests for APFS snapshot defaults and opt-out mechanics (ticket 04).
+
+#![cfg(target_os = "macos")]
 
 use std::fs;
 use std::path::{Path, PathBuf};
