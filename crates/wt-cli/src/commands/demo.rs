@@ -12,39 +12,7 @@ use crate::envelope::{DemoData, Diagnostic};
 use crate::error::{Error, Result};
 use crate::gitops;
 use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
-
-/// Format bytes into a human-readable string.
-fn format_bytes(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-
-    let b = bytes as f64;
-    if bytes == 0 {
-        "0 B".to_string()
-    } else if b < KB {
-        format!("{bytes} B")
-    } else if b < MB {
-        format!("{:.1} KB", b / KB)
-    } else if b < GB {
-        format!("{:.1} MB", b / MB)
-    } else {
-        format!("{:.1} GB", b / GB)
-    }
-}
-
-/// Format numbers with thousands separators.
-fn format_number(n: usize) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out.chars().rev().collect()
-}
+use crate::output::{HumanBytes, HumanCount};
 
 /// Standard recursive filesystem copy for baseline performance measurement.
 fn recursive_copy(src: &Path, dest: &Path) -> Result<u64> {
@@ -376,15 +344,15 @@ fn print_terminal_scorecard(
     println!("Summary:");
     println!(
         "  • Total Fixture Files    : {} files (100 packages, {})",
-        format_number(files_count),
-        format_bytes(total_bytes)
+        HumanCount(files_count),
+        HumanBytes(total_bytes)
     );
     println!(
         "  • Hydration Mechanism    : Copy-on-Write ({hydration_method})"
     );
     println!(
         "  • Disk Space Saved       : {} (0 B duplicated, 100% CoW shared)",
-        format_bytes(bytes_shared_cow.max(total_bytes))
+        HumanBytes(bytes_shared_cow.max(total_bytes))
     );
     println!("  • Speedup Ratio          : {:.1}x faster", speedup_ratio);
     println!("  • Mutation Isolation     : VERIFIED (zero cross-worktree bleed)");
@@ -414,8 +382,8 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
     if !cfg.json {
         println!(
             "  ✓ Generated {} files across 100 packages ({})",
-            format_number(files_count),
-            format_bytes(total_bytes)
+            HumanCount(files_count),
+            HumanBytes(total_bytes)
         );
     }
 
@@ -430,7 +398,7 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
         println!(
             "  ✓ Standard copy completed in {} ms ({} duplicated)",
             baseline_copy_duration_ms,
-            format_bytes(baseline_copy_bytes)
+            HumanBytes(baseline_copy_bytes)
         );
     }
 
@@ -463,8 +431,8 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
         println!(
             "  ✓ wt hydration completed in {} ms ({} duplicated, {} CoW shared)",
             wt_hydration_duration_ms,
-            format_bytes(report.bytes_copied),
-            format_bytes(report.bytes_shared_cow.max(total_bytes))
+            HumanBytes(report.bytes_copied),
+            HumanBytes(report.bytes_shared_cow.max(total_bytes))
         );
     }
 
