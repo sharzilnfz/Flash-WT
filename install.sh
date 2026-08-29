@@ -10,6 +10,8 @@
 #   WT_DIST_DIR   install from this local directory instead of downloading;
 #                 must contain the same wt-v<version>-<target>.tar.gz files
 #                 the release carries (used by scripts/smoke-install.sh)
+#   WT_COMPLETIONS  auto (default) installs shell completions when a
+#                 completion directory can be located; no skips them
 set -eu
 
 REPO=${WT_REPO:-sharzilnfz/wt}
@@ -92,4 +94,56 @@ case ":$PATH:" in
     echo "  export PATH=\"$BIN_DIR:\$PATH\"" >&2
     ;;
 esac
+
+# Best-effort shell completion installation: generate scripts with the
+# freshly installed binary and drop them into the first completion
+# directory that applies. Per-user directories are only created for the
+# active login shell; pre-existing system-wide directories are used
+# whenever present. Skip entirely with WT_COMPLETIONS=no.
+install_completion() {
+  shell=$1
+  dir=$2
+  if mkdir -p "$dir" 2>/dev/null &&
+    "$BIN_DIR/wt" completions "$shell" >"$dir/wt" 2>/dev/null; then
+    echo "installed $shell completions at $dir/wt"
+    case "$shell" in
+      zsh)
+        echo "note: for zsh, add the directory to fpath and run compinit, e.g.:" >&2
+        echo "  fpath=($dir \$fpath)" >&2
+        echo "  autoload -Uz compinit && compinit" >&2
+        ;;
+    esac
+  else
+    rm -f "$dir/wt"
+  fi
+}
+
+if [ "${WT_COMPLETIONS:-auto}" != no ]; then
+  case ":${SHELL:-}:" in
+    *:*/zsh:*)
+      install_completion zsh "$HOME/.zsh/completion"
+      ;;
+  esac
+  case ":${SHELL:-}:" in
+    *:*/bash:*)
+      install_completion bash "${BASH_COMPLETION_USER_DIR:-$HOME/.local/share/bash-completion}/completions"
+      ;;
+  esac
+  case ":${SHELL:-}:" in
+    *:*/fish:*)
+      install_completion fish "$HOME/.config/fish/completions"
+      ;;
+  esac
+  for dir in /usr/local/share/zsh/site-functions \
+    /usr/share/zsh/site-functions \
+    /etc/bash_completion.d; do
+    [ -d "$dir" ] || continue
+    [ -w "$dir" ] || continue
+    case "$dir" in
+      *zsh*) install_completion zsh "$dir" ;;
+      *bash*) install_completion bash "$dir" ;;
+    esac
+  done
+fi
+
 echo "installed wt at $BIN_DIR/wt"

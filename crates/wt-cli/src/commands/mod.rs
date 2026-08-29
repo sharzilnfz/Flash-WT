@@ -2,6 +2,7 @@
 //! subcommand, wired here.
 
 pub mod clean;
+pub mod completions;
 pub mod create;
 pub mod demo;
 pub mod list;
@@ -171,6 +172,10 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
                     serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
                 );
             }
+            Ok(None)
+        }
+        WtCommand::Completions { shell } => {
+            completions::run(shell)?;
             Ok(None)
         }
     }
