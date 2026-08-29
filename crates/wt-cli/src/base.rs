@@ -53,7 +53,9 @@ pub fn check_base_movement(
                     if let (Some(parent_base), Some(parent_commit)) =
                         (&m.base_branch, &m.base_commit)
                     {
-                        if let Ok(current_commit) = workspace::resolve_commit(repo_root, parent_base) {
+                        if let Ok(current_commit) =
+                            workspace::resolve_commit(repo_root, parent_base)
+                        {
                             if current_commit != *parent_commit {
                                 let diag = Diagnostic::warning(
                                     "BASE_BRANCH_MOVED",

@@ -127,10 +127,8 @@ fn clean_batch_worktrees(
 ) -> Result<(CleanData, Vec<Diagnostic>)> {
     let root = engine.root();
     let all_candidates = discover_candidates(engine)?;
-    let candidates: Vec<CleanCandidate> = all_candidates
-        .into_iter()
-        .filter(|c| !c.is_main)
-        .collect();
+    let candidates: Vec<CleanCandidate> =
+        all_candidates.into_iter().filter(|c| !c.is_main).collect();
 
     if candidates.is_empty() {
         if !cfg.json {
@@ -162,14 +160,28 @@ fn clean_batch_worktrees(
                 "[unmerged changes/commits]"
             };
             let check = if c.is_merged { "[x]" } else { "[ ]" };
-            println!("  {} {}. {} ({}) {}", check, i + 1, c.path.display(), c.branch, status);
+            println!(
+                "  {} {}. {} ({}) {}",
+                check,
+                i + 1,
+                c.path.display(),
+                c.branch,
+                status
+            );
         }
-        print!("\nEnter worktree numbers to delete (e.g. '1,2', 'all', Enter for pre-selected [x], 'q' to cancel): ");
-        io::stdout().flush().map_err(|e| Error::io("flush stdout", root, e))?;
+        print!(
+            "\nEnter worktree numbers to delete (e.g. '1,2', 'all', Enter for pre-selected [x], 'q' to cancel): "
+        );
+        io::stdout()
+            .flush()
+            .map_err(|e| Error::io("flush stdout", root, e))?;
 
         let mut input = String::new();
         let stdin = io::stdin();
-        stdin.lock().read_line(&mut input).map_err(|e| Error::io("read stdin", root, e))?;
+        stdin
+            .lock()
+            .read_line(&mut input)
+            .map_err(|e| Error::io("read stdin", root, e))?;
         let trimmed = input.trim().to_lowercase();
 
         if trimmed == "q" || trimmed == "quit" || trimmed == "n" || trimmed == "no" {
@@ -214,7 +226,9 @@ fn clean_batch_worktrees(
         let merged: Vec<_> = candidates.into_iter().filter(|c| c.is_merged).collect();
         if merged.is_empty() && !force {
             if !cfg.json {
-                println!("No merged worktrees found to clean. Use 'wt clean <name>' or 'wt clean --all'.");
+                println!(
+                    "No merged worktrees found to clean. Use 'wt clean <name>' or 'wt clean --all'."
+                );
             }
             return Ok((
                 CleanData {
@@ -260,7 +274,9 @@ fn clean_batch_worktrees(
     silent_cfg.json = true;
 
     for candidate in &selected_candidates {
-        if let Ok((rm_data, mut rm_diags)) = gc::remove(&candidate.branch, Some(&candidate.path), &silent_cfg) {
+        if let Ok((rm_data, mut rm_diags)) =
+            gc::remove(&candidate.branch, Some(&candidate.path), &silent_cfg)
+        {
             diagnostics.append(&mut rm_diags);
             references_released += rm_data.references_released;
             if rm_data.mirror_removed {
@@ -274,7 +290,11 @@ fn clean_batch_worktrees(
         branches_removed.push(candidate.branch.clone());
 
         if !cfg.json {
-            println!("✓ Removed worktree {} ({})", candidate.path.display(), candidate.branch);
+            println!(
+                "✓ Removed worktree {} ({})",
+                candidate.path.display(),
+                candidate.branch
+            );
         }
     }
 

@@ -17,11 +17,7 @@ use crate::output::{HumanBytes, HumanDuration, format_table};
 use crate::workspace::WorkspaceEngine;
 
 /// Lookup blob size in store, using an in-memory cache to avoid repeated stats.
-fn get_blob_size(
-    id: &ContentId,
-    store: &DiskStore,
-    cache: &mut BTreeMap<ContentId, u64>,
-) -> u64 {
+fn get_blob_size(id: &ContentId, store: &DiskStore, cache: &mut BTreeMap<ContentId, u64>) -> u64 {
     if let Some(&size) = cache.get(id) {
         return size;
     }
@@ -192,7 +188,8 @@ pub fn run(cfg: &RunConfig) -> Result<(ListData, Vec<Diagnostic>)> {
         let mut is_ephemeral = false;
         for read_lease in &read_leases_list {
             if let Ok(ref lease) = read_lease.lease {
-                let match_by_path = lease.worktree == canon_worktree || lease.gitdir == canon_gitdir;
+                let match_by_path =
+                    lease.worktree == canon_worktree || lease.gitdir == canon_gitdir;
                 let match_by_name = lease.id == branch_display
                     || format!("scratch-{}", lease.id) == branch_display
                     || branch_display.strip_prefix("scratch-") == Some(&lease.id);
@@ -282,9 +279,17 @@ fn print_human_table(entries: &[WorktreeEntry], total_disk_saved: u64) {
             if l.is_expired {
                 format!("expired (pid: {})", l.pid)
             } else if l.pid_alive {
-                format!("ttl: {} (pid: {})", HumanDuration(l.ttl_remaining_secs), l.pid)
+                format!(
+                    "ttl: {} (pid: {})",
+                    HumanDuration(l.ttl_remaining_secs),
+                    l.pid
+                )
             } else {
-                format!("ttl: {} (pid: {} [dead])", HumanDuration(l.ttl_remaining_secs), l.pid)
+                format!(
+                    "ttl: {} (pid: {} [dead])",
+                    HumanDuration(l.ttl_remaining_secs),
+                    l.pid
+                )
             }
         } else if let Some(age) = entry.age_secs {
             format!("{} ago", HumanDuration(age))
@@ -305,7 +310,14 @@ fn print_human_table(entries: &[WorktreeEntry], total_disk_saved: u64) {
     println!(
         "{}",
         format_table(
-            &["", "BRANCH", "PATH", "HYDRATED", "DISK SAVED", "AGE / STATUS"],
+            &[
+                "",
+                "BRANCH",
+                "PATH",
+                "HYDRATED",
+                "DISK SAVED",
+                "AGE / STATUS"
+            ],
             &rows
         )
     );

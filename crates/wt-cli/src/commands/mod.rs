@@ -64,14 +64,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
             force,
             age,
         } => {
-            let (data, diags) = clean::run(
-                name.as_deref(),
-                dir.as_deref(),
-                all,
-                force,
-                age,
-                cfg,
-            )?;
+            let (data, diags) = clean::run(name.as_deref(), dir.as_deref(), all, force, age, cfg)?;
             if cfg.json {
                 let env = Envelope::ok(command_name, data, diags);
                 println!(

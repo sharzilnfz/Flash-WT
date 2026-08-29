@@ -14,8 +14,8 @@ use crate::commands::create;
 use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, ScratchData};
 use crate::error::{Error, Result};
-use crate::workspace;
 use crate::hydrate::open_store;
+use crate::workspace;
 
 /// Generate a unique 8-character hex id for scratch worktrees.
 fn generate_scratch_id() -> String {

@@ -154,10 +154,7 @@ impl SnapshotProjectionEngine {
     /// `repo_root` and `pattern` key the v2 selection index. `verify`
     /// bypasses hits; v2 incremental rebuilds require `snapshots_enabled`
     /// and `v2_enabled`.
-    pub fn hydrate(
-        store: &mut DiskStore,
-        req: &SnapshotProjectionRequest<'_>,
-    ) -> SnapshotOutcome {
+    pub fn hydrate(store: &mut DiskStore, req: &SnapshotProjectionRequest<'_>) -> SnapshotOutcome {
         #[cfg(target_os = "macos")]
         {
             hydrate_impl(store, req)
@@ -269,10 +266,7 @@ fn try_lockfile_hit_impl(
 }
 
 #[cfg(target_os = "macos")]
-fn hydrate_impl(
-    store: &mut DiskStore,
-    req: &SnapshotProjectionRequest<'_>,
-) -> SnapshotOutcome {
+fn hydrate_impl(store: &mut DiskStore, req: &SnapshotProjectionRequest<'_>) -> SnapshotOutcome {
     if !req.snapshots_enabled {
         return SnapshotOutcome::FellBack(None);
     }
@@ -286,10 +280,11 @@ fn hydrate_impl(
     let v2 = req.snapshots_enabled && req.v2_enabled;
     let repo_key = req.repo_root.to_string_lossy().into_owned();
 
-    let entries = match manifest_entries(req.dirs, req.files, req.symlinks, req.modes, req.heavy_rel) {
-        Ok(entries) => entries,
-        Err(msg) => return SnapshotOutcome::Failed(msg),
-    };
+    let entries =
+        match manifest_entries(req.dirs, req.files, req.symlinks, req.modes, req.heavy_rel) {
+            Ok(entries) => entries,
+            Err(msg) => return SnapshotOutcome::Failed(msg),
+        };
     let mut unique_blobs = std::collections::BTreeMap::new();
     for (rel, id) in req.files {
         if let Some(&size) = req.file_sizes.get(rel) {
@@ -298,7 +293,8 @@ fn hydrate_impl(
     }
     let total_size: u64 = unique_blobs.values().sum();
     let manifest =
-        match Manifest::new_with_lockfile_and_size(entries, req.lockfile_hash.copied(), total_size) {
+        match Manifest::new_with_lockfile_and_size(entries, req.lockfile_hash.copied(), total_size)
+        {
             Ok(m) => m,
             Err(msg) => {
                 return SnapshotOutcome::Failed(format!("cannot build snapshot manifest: {msg}"));
@@ -366,14 +362,27 @@ fn hydrate_impl(
         let mut incremental: Option<(usize, usize)> = None;
         if v2 {
             incremental = try_incremental(
-                store, &manifest, &repo_key, req.pattern, req.heavy_rel, paranoid, &mut build,
+                store,
+                &manifest,
+                &repo_key,
+                req.pattern,
+                req.heavy_rel,
+                paranoid,
+                &mut build,
             );
         }
 
         if incremental.is_none() {
             // FULL BUILD + publish, healing at most one swept-away
             // blob per plan's link(2)-ENOENT backstop.
-            match ensure_published(store, req.files, req.src_root, &manifest, paranoid, &mut build) {
+            match ensure_published(
+                store,
+                req.files,
+                req.src_root,
+                &manifest,
+                paranoid,
+                &mut build,
+            ) {
                 Ok(PublishOutcome::Published | PublishOutcome::WinnerValid) => {}
                 Ok(PublishOutcome::WinnerInvalid) => {
                     // Debris sits on our final name; never overwrite what
@@ -491,7 +500,10 @@ fn finish_clone(
 ) -> Result<(), CloneFailure> {
     if let Some(parent) = dest_heavy.parent() {
         fs::create_dir_all(parent).map_err(|e| {
-            CloneFailure::Fatal(format!("cannot create parent dirs for {}: {e}", dest_heavy.display()))
+            CloneFailure::Fatal(format!(
+                "cannot create parent dirs for {}: {e}",
+                dest_heavy.display()
+            ))
         })?;
     }
 

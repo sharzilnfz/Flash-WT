@@ -30,7 +30,11 @@ fn list_and_ls_alias_parity_on_single_repo() {
     assert!(stdout_list.contains("PATH"));
     assert!(stdout_list.contains("HYDRATED"));
     assert!(stdout_list.contains("DISK SAVED"));
-    assert!(stdout_list.contains("* main") || stdout_list.contains("*  main") || stdout_list.contains("*"));
+    assert!(
+        stdout_list.contains("* main")
+            || stdout_list.contains("*  main")
+            || stdout_list.contains("*")
+    );
 }
 
 #[test]
@@ -53,7 +57,10 @@ fn list_accurately_reports_hydrated_worktrees_and_disk_savings() {
     // Verify header and branches
     assert!(stdout.contains("feat-alpha"));
     assert!(stdout.contains("feat-beta"));
-    assert!(stdout.contains(&format!("{} files", 2 * HEAVY_FILES)) || stdout.contains(&format!("{HEAVY_FILES} files")));
+    assert!(
+        stdout.contains(&format!("{} files", 2 * HEAVY_FILES))
+            || stdout.contains(&format!("{HEAVY_FILES} files"))
+    );
     assert!(stdout.contains("Total disk saved:"));
     assert!(stdout.contains("across 3 worktrees"));
 }
@@ -72,7 +79,11 @@ fn list_json_output_envelope_schema() {
 
     let stdout = String::from_utf8_lossy(&list_out.stdout);
     let lines: Vec<&str> = stdout.trim().lines().collect();
-    assert_eq!(lines.len(), 1, "stdout must be single line NDJSON: {stdout}");
+    assert_eq!(
+        lines.len(),
+        1,
+        "stdout must be single line NDJSON: {stdout}"
+    );
 
     let json: serde_json::Value = serde_json::from_str(lines[0]).expect("parse list json");
     assert_eq!(json["wt_version"], env!("CARGO_PKG_VERSION"));
@@ -211,7 +222,12 @@ fn list_maps_porcelain_metadata_for_detached_worktree() {
 
     let detached = worktrees
         .iter()
-        .find(|w| w["path"].as_str().unwrap().ends_with("origin-detached-peek"))
+        .find(|w| {
+            w["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("origin-detached-peek")
+        })
         .expect("detached worktree listed");
     assert_eq!(detached["branch"], "(detached)");
     assert_eq!(detached["is_main"], false);

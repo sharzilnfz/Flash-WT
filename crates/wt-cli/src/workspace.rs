@@ -209,9 +209,7 @@ pub fn parse_git_worktrees(porcelain_output: &str) -> Vec<RawGitWorktree> {
             current_head = Some(h.trim().to_string());
         } else if let Some(b) = trimmed.strip_prefix("branch ") {
             let branch_ref = b.trim();
-            let branch_name = branch_ref
-                .strip_prefix("refs/heads/")
-                .unwrap_or(branch_ref);
+            let branch_name = branch_ref.strip_prefix("refs/heads/").unwrap_or(branch_ref);
             current_branch = Some(branch_name.to_string());
         } else if trimmed == "detached" {
             is_detached = true;
@@ -259,9 +257,7 @@ pub struct WorkspaceEngine {
 impl WorkspaceEngine {
     /// Discover the enclosing repository of the current working directory.
     pub fn discover() -> Result<Self> {
-        Ok(Self {
-            root: repo_root()?,
-        })
+        Ok(Self { root: repo_root()? })
     }
 
     /// Anchor the engine at an explicit repository root.

@@ -34,7 +34,7 @@ use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, MigrateData, RemoveData, SweepData};
 use crate::error::{Error, Result};
 use crate::hydrate::open_store;
-use crate::workspace::{git_dir, repo_root_from_gitdir, WorkspaceEngine};
+use crate::workspace::{WorkspaceEngine, git_dir, repo_root_from_gitdir};
 
 /// Default grace period when `WT_GC_GRACE` is unset or unreadable.
 const DEFAULT_GRACE: Duration = Duration::from_secs(15 * 60);
@@ -122,7 +122,6 @@ pub fn max_snapshot_bytes_from_env() -> Result<Option<u64>> {
     }
 }
 
-
 pub fn remove(
     name: &str,
     dir: Option<&Path>,
@@ -166,7 +165,11 @@ pub fn remove(
             "removed worktree {}; released {} reference{}",
             dest.display(),
             receipt.references_released,
-            if receipt.references_released == 1 { "" } else { "s" }
+            if receipt.references_released == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
     }
 

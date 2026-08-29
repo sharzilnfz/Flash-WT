@@ -66,10 +66,17 @@ fn apfs_defaults_enable_snapshots_without_explicit_env() {
     let fx = TestFixture::new();
     // Run wt create without WT_SNAPSHOTS set
     let out = fx.wt(&["create", "snap-auto"], &[]);
-    assert!(out.status.success(), "wt create failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "wt create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("via snapshot"), "macOS APFS must default snapshots to enabled: {stdout}");
+    assert!(
+        stdout.contains("via snapshot"),
+        "macOS APFS must default snapshots to enabled: {stdout}"
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -77,9 +84,15 @@ fn apfs_defaults_enable_snapshots_without_explicit_env() {
 fn apfs_opt_out_disables_snapshots_via_env() {
     let fx = TestFixture::new();
     // Run wt create with WT_SNAPSHOTS=0 and WT_SNAPSHOTS_V2=0
-    let out = fx.wt(&["create", "ladder-forced"], &[("WT_SNAPSHOTS", "0"), ("WT_SNAPSHOTS_V2", "0")]);
+    let out = fx.wt(
+        &["create", "ladder-forced"],
+        &[("WT_SNAPSHOTS", "0"), ("WT_SNAPSHOTS_V2", "0")],
+    );
     assert!(out.status.success());
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.contains("via snapshot"), "explicit WT_SNAPSHOTS=0 must opt out: {stdout}");
+    assert!(
+        !stdout.contains("via snapshot"),
+        "explicit WT_SNAPSHOTS=0 must opt out: {stdout}"
+    );
 }
