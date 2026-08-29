@@ -8,8 +8,8 @@ and mtime slips past the verified-blob ledger.
 
 - `scrub-detect` finds blobs that no longer match their address.
 - `scrub-dry-run` reports corruption without deleting anything.
-- `scrub-repair` deletes corrupt blobs so the next create re-ingests good bytes.
-
+- `scrub-repair` deletes corrupt blobs and repairs broken snapshot directories.
+- `scrub-snapshots` audits published snapshot directories and complete markers.
 ## How to get to it (user POV)
 
 - Run `wt scrub --dry-run` to audit the store read-only.
@@ -32,22 +32,24 @@ Preconditions:
   ```
 
 - **Dry run.** `wt --json scrub --dry-run`. Envelope `status` is `ok`;
-  `data.dry_run` is `true`; `data.corrupt` lists the blob's full content
-  address (dir prefix + filename, e.g. `ee5f87…`); `data.deleted` is `0`.
+  `data.dry_run` is `true`; `data.scanned` reports total blobs inspected;
+  `data.corrupt` lists the blob full content address; `data.deleted` is `0`.
+  When corrupted items are found, `diagnostics` contains warnings with codes
+  `CORRUPT_BLOB` or `CORRUPT_SNAPSHOT`.
 - **Repair.** `wt --json scrub`. Same `corrupt` list; `data.deleted` is `1`.
-- **Verify re-ingestion heals.** `wt --json create demo2 --dir "$WT_FIXTURE/demo2"`
-  returns `ok` and
-  `cat "$WT_FIXTURE/demo2/heavy/pkg00/nested/file-0.txt"` matches the fixture
-  content — the corrupt blob was gone, so create re-ingested from source.
+  Any corrupted snapshot directories report in `data.snapshot_dirs_deleted`.
+- **Verify re-ingestion heals.** `wt --json new demo2 --dir "$WT_FIXTURE/demo2"`
+  returns `ok` and `cat "$WT_FIXTURE/demo2/heavy/pkg00/nested/file-0.txt"`
+  matches fixture content. The corrupt blob was removed, so re-ingestion restored clean bytes.
 - **Proof.** Save both scrub envelopes and the healed file read to
   `artifacts/verify-wt/<run-id>/`.
 
 ## Gotchas
 
-- `data.corrupt` holds full 64-char addresses while the objects live in
-  two-char-sharded directories (`objects/ee/5f87…`); join prefix + filename
-  when matching. `find -type f` handles it either way.
-- Dry run deletes nothing and does not touch the verified-blob ledger — do not
-  use it as repair evidence.
+- `data.corrupt` holds full 64-character addresses while objects live in
+  two-character sharded directories like `objects/ee/5f87...`. Join prefix and
+  filename when matching. A `find -type f` command handles both.
+- Dry run deletes nothing and does not touch the verified-blob ledger. Do not
+  use dry run output as repair evidence.
 - Only corrupt blobs in the fixture store. Corrupting the machine store is
   irreversible data loss.

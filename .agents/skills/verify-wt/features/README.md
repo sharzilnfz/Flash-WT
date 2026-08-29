@@ -7,8 +7,8 @@ the recipe.
 ## Baseline preconditions
 
 - Binary at `$WT_BIN` (release build, `wt --version` answers).
-- Fixture loaded: `eval "$(helpers/mkfixture.sh "$WT")"` — sets `WT_BIN`,
-  `WT_FIXTURE`, `WT_ORIGIN`, `WT_STORE`, defines `wt()`, and `cd`s are yours.
+- Fixture loaded with `eval "$(helpers/mkfixture.sh "$WT")"`.
+  This sets `WT_BIN`, `WT_FIXTURE`, `WT_ORIGIN`, and `WT_STORE`, defines `wt()`, and yields cd control.
 - `WT_STORE` exported and pointing at the fixture store on every invocation.
 - Working directory for all `wt` calls is `$WT_ORIGIN` (or the worktree).
 - Never run any `wt` command without the fixture `WT_STORE` set.
@@ -30,8 +30,8 @@ the recipe.
   into `artifacts/verify-wt/<run-id>/`.
 - Pair every envelope with the resulting disk state (worktree listing,
   hydrated file contents, store listing).
-- An envelope alone is not proof. `create` claims hydration — show the files;
-  `remove` claims release — show the directory gone.
+- An envelope alone is not proof. When `create` claims hydration, show the files.
+  When `remove` claims release, show the directory gone.
 - Report an unreachable path with the attempted command and the unmet
   precondition. Do not report a skipped entry point as verified through a
   different path.
@@ -53,8 +53,8 @@ handles, required state, commands, and observable proof.
 
 ## Features
 
-- [Create a worktree](./create.md) covers branch+worktree creation and heavy-directory hydration.
-- [Remove a worktree](./remove.md) covers teardown and store reference release.
+- [Create a worktree](./create.md) covers worktree creation, `wt new`, and heavy-directory hydration.
+- [Remove a worktree](./remove.md) covers teardown, `wt clean`, and store reference release.
 - [Sweep the store](./sweep.md) covers garbage collection of unreferenced entries and leases.
 - [Scrub the store](./scrub.md) covers corruption detection, dry-run reporting, and repair.
 - [Scratch / isolate](./scratch-isolate.md) covers ephemeral leased sandboxes with optional command execution.
