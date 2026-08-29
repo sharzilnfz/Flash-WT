@@ -486,6 +486,210 @@ fn save_is_atomic_enough_to_round_trip() {
     );
 }
 
+// --- deep ingestion: tree ingestion through the store interface ---
+
+use wt_store::IngestOptions;
+
+fn no_excludes() -> IngestOptions<'static> {
+    IngestOptions {
+        snapshots: false,
+        exclude: &|_| false,
+    }
+}
+
+/// Build `heavy/` under `root` with two files, a nested directory,
+/// and a relative symlink.
+fn write_ingest_tree(root: &std::path::Path) {
+    fs::create_dir_all(root.join("heavy/pkg")).expect("mkdir heavy/pkg");
+    fs::write(root.join("heavy/a.txt"), "alpha\n").expect("write a");
+    fs::write(root.join("heavy/pkg/b.txt"), "beta\n").expect("write b");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("a.txt", root.join("heavy/link.txt")).expect("symlink");
+}
+
+#[test]
+fn ingest_tree_walks_stores_and_summarizes_a_tree() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    write_ingest_tree(src.path());
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let ingested = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("ingest");
+
+    assert_eq!(
+        ingested.files.keys().collect::<Vec<_>>(),
+        ["heavy/a.txt", "heavy/pkg/b.txt"]
+    );
+    assert!(ingested.dirs.contains(&"heavy".to_string()));
+    assert!(ingested.dirs.contains(&"heavy/pkg".to_string()));
+    assert_eq!(ingested.file_sizes["heavy/a.txt"], 6);
+    assert_eq!(
+        ingested.symlinks.get("heavy/link.txt").map(String::as_str),
+        Some("a.txt"),
+        "symlink targets are recorded raw, never followed"
+    );
+
+    // Every recorded address really holds the file's bytes.
+    for (rel, id) in &ingested.files {
+        let expected = match rel.as_str() {
+            "heavy/a.txt" => "alpha\n",
+            "heavy/pkg/b.txt" => "beta\n",
+            other => panic!("unexpected ingested path {other}"),
+        };
+        assert_eq!(store.get(id).expect("get"), expected.as_bytes());
+    }
+}
+
+#[test]
+fn ingest_tree_records_directory_permission_bits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    write_ingest_tree(src.path());
+    fs::set_permissions(
+        src.path().join("heavy/pkg"),
+        fs::Permissions::from_mode(0o750),
+    )
+    .expect("chmod");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let ingested = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("ingest");
+
+    assert_eq!(ingested.dir_modes["heavy/pkg"] & 0o7777, 0o750);
+    assert_eq!(ingested.modes["heavy/a.txt"] & 0o7777, 0o644);
+}
+
+#[test]
+fn ingest_tree_rehashes_changed_content_and_feeds_the_cache() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    write_ingest_tree(src.path());
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let first = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("first ingest");
+
+    // The warm re-ingest of an unchanged tree returns the same ids.
+    let warm = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("warm ingest");
+    assert_eq!(warm.files, first.files);
+
+    // Edit one file: the next ingest must pick up new content.
+    fs::write(src.path().join("heavy/a.txt"), "alpha, edited\n").expect("edit");
+    let second = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("re-ingest after edit");
+    assert_ne!(second.files["heavy/a.txt"], first.files["heavy/a.txt"]);
+    assert_eq!(
+        store.get(&second.files["heavy/a.txt"]).expect("get edited"),
+        b"alpha, edited\n"
+    );
+    assert_eq!(
+        second.files["heavy/pkg/b.txt"],
+        first.files["heavy/pkg/b.txt"]
+    );
+
+    // The validation cache beside the store now carries both paths.
+    let cache = ValidationCache::open(store_dir.path());
+    assert!(
+        cache.len() >= 2,
+        "ingest must populate the validation cache"
+    );
+}
+
+#[test]
+fn ingest_tree_reputs_a_swept_blob_on_a_cache_hit() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    write_ingest_tree(src.path());
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let first = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("first ingest");
+
+    // Simulate a sweep reclaiming the blob behind a warm cache entry:
+    // size and mtime still match, but the blob is gone from the store.
+    let id = first.files["heavy/a.txt"];
+    let hex = id.to_string();
+    let blob = store_dir
+        .path()
+        .join("objects")
+        .join(&hex[..2])
+        .join(&hex[2..]);
+    fs::remove_file(&blob).expect("sweep blob");
+    assert!(!store.contains(&id));
+
+    let second = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("re-ingest after sweep");
+    assert_eq!(second.files["heavy/a.txt"], id, "same bytes, same address");
+    assert!(store.contains(&id));
+    assert_eq!(store.get(&id).expect("get"), b"alpha\n");
+}
+
+#[test]
+fn ingest_tree_skips_excluded_paths_and_subtrees() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    write_ingest_tree(src.path());
+    fs::create_dir_all(src.path().join("heavy/skip")).expect("mkdir skip");
+    fs::write(src.path().join("heavy/skip/x.txt"), "skip me\n").expect("write x");
+    fs::write(src.path().join("heavy/skipme.txt"), "skip me too\n").expect("write skipme");
+
+    let options = IngestOptions {
+        snapshots: false,
+        exclude: &|rel: &str| rel == "heavy/skip" || rel.ends_with("skipme.txt"),
+    };
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let ingested = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &options)
+        .expect("ingest");
+
+    assert!(!ingested.files.contains_key("heavy/skipme.txt"));
+    assert!(!ingested.files.contains_key("heavy/skip/x.txt"));
+    assert!(!ingested.dirs.contains(&"heavy/skip".to_string()));
+    assert!(ingested.files.contains_key("heavy/a.txt"));
+}
+
+#[test]
+fn ingest_tree_fails_loudly_on_fifos_only_when_snapshots_enabled() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    write_ingest_tree(src.path());
+    let fifo = src.path().join("heavy/pipe");
+    let c_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("cstr");
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0, "mkfifo");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    assert!(
+        store
+            .ingest_tree(
+                src.path(),
+                &src.path().join("heavy"),
+                &IngestOptions {
+                    snapshots: true,
+                    exclude: &|_| false
+                }
+            )
+            .is_err(),
+        "snapshot mode must refuse content a manifest cannot represent"
+    );
+
+    // Without snapshots the same tree degrades to a quiet skip.
+    let ingested = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("ingest without snapshots");
+    assert!(!ingested.files.contains_key("heavy/pipe"));
+}
+
 // --- fast-hydration ticket 05: the verified-blob ledger ---
 
 use sha2::Digest;
