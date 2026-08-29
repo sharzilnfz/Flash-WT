@@ -371,6 +371,9 @@ impl Materializer {
     }
 
     fn place_once(&self, src: &Path, dest: &Path) -> io::Result<bool> {
+        if dest.exists() || dest.is_symlink() {
+            let _ = fs::remove_file(dest);
+        }
         if let Some(backend) = &self.backend {
             match backend.materialize_file(src, dest) {
                 Ok(()) => return Ok(true),
