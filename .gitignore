@@ -5,9 +5,9 @@
 # internal agent-workflow notes; not part of the public repo
 .agents/
 skills-lock.json
-AGENT_HANDOFF_PLAN_REVISED.md
-step0-instrumentation-ticket.md
-v2-diff-rebuild-design-note-revised.md
+docs/archive/AGENT_HANDOFF_PLAN_REVISED.md
+docs/archive/step0-instrumentation-ticket.md
+docs/archive/v2-diff-rebuild-design-note-revised.md
 
 # verification skill proof artifacts (survive cleanup, never committed)
 /artifacts/
