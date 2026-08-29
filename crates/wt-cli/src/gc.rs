@@ -25,7 +25,7 @@
 //! simply be rerun.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use wt_store::{GcMode, StoreReclaimer, SweepPolicy, WorkspaceCleaner};
@@ -233,9 +233,30 @@ impl WorkspaceCleaner for GitWorkspaceCleaner {
     }
 
     fn remove_worktree(&self, worktree: &Path) -> std::io::Result<()> {
-        let root = worktree.parent().unwrap_or(worktree);
-        let engine = WorkspaceEngine::from_root(root.to_path_buf());
-        let _ = engine.remove_worktree(worktree);
+        let dot_git = worktree.join(".git");
+        let gitdir = if dot_git.is_file() {
+            if let Ok(content) = fs::read_to_string(&dot_git) {
+                content
+                    .strip_prefix("gitdir: ")
+                    .map(|s| PathBuf::from(s.trim()))
+            } else {
+                None
+            }
+        } else if dot_git.is_dir() {
+            Some(dot_git)
+        } else {
+            None
+        };
+
+        if let Some(gitdir) = gitdir {
+            if let Some(root) = repo_root_from_gitdir(&gitdir) {
+                let engine = WorkspaceEngine::from_root(root);
+                let _ = engine.remove_worktree(worktree);
+            }
+        } else if let Some(parent) = worktree.parent() {
+            let engine = WorkspaceEngine::from_root(parent.to_path_buf());
+            let _ = engine.remove_worktree(worktree);
+        }
         if worktree.exists() {
             let _ = fs::remove_dir_all(worktree);
         }

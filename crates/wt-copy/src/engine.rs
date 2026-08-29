@@ -154,8 +154,18 @@ impl CopyEngine {
         let mut shared_cow_count = 0;
         let mut repaired_modes_count = 0;
 
+        let materializer = if let Some((first_src, first_dest, _)) = items.first() {
+            Some(Materializer::for_paths(self.policy, first_src, first_dest))
+        } else {
+            None
+        };
+
         for (src, dest, mode) in items {
-            let outcome = self.materialize_file(src, dest, *mode)?;
+            let outcome = if let Some(m) = &materializer {
+                m.materialize_file(src, dest, *mode)?
+            } else {
+                self.materialize_file(src, dest, *mode)?
+            };
             total_placed += 1;
             if outcome.is_shared_cow {
                 shared_cow_count += 1;

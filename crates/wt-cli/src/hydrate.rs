@@ -154,7 +154,65 @@ impl<'a> HydrationEngine<'a> {
                 Some((wt_store::DependencySafety::Pinned, hash)) => Some(hash),
                 _ => None,
             };
+            if req.cfg.snapshots {
+                if let Some(lock_hash) = pinned_lockfile_hash.as_ref() {
+                    let stage = Instant::now();
+                    match wt_store::SnapshotProjectionEngine::try_lockfile_hit(
+                        self.store,
+                        req.root,
+                        pattern,
+                        &src,
+                        &heavy,
+                        req.dest,
+                        lock_hash,
+                        req.cfg.verify,
+                    ) {
+                        wt_store::SnapshotOutcome::Hydrated(info) => {
+                            let hydration_ms = stage.elapsed().as_millis();
+                            let sidecar_file = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(git_dir.join("wt-hydrated.tsv"))
+                                .map_err(|e| Error::io_unanchored("open ledger", git_dir.join("wt-hydrated.tsv"), e))?;
+                            let mut sidecar = std::io::BufWriter::new(sidecar_file);
+                            std::io::Write::write_all(&mut sidecar, format!("-\tsnapshot\t{}\n", info.hash).as_bytes())
+                                .map_err(|e| Error::io_unanchored("write ledger", git_dir.join("wt-hydrated.tsv"), e))?;
+                            self.store.publish_worktree_mirror(
+                                req.dest,
+                                &git_dir,
+                                BTreeSet::new(),
+                                std::iter::once(&info.hash),
+                                req.base_branch,
+                                req.base_commit,
+                            ).map_err(|e| Error::Store(format!("cannot publish mirror: {e}")))?;
 
+                            total_files += info.files;
+                            snapshot_hits_count += 1;
+                            timings.snapshot_engaged = true;
+                            timings.snapshot_ms += hydration_ms;
+                            timings.snapshot_mode = "hit";
+                            if !req.cfg.json {
+                                println!(
+                                    "hydrated {heavy} from {} via snapshot (one clone, {} file{})",
+                                    src.display(),
+                                    info.files,
+                                    if info.files == 1 { "" } else { "s" }
+                                );
+                            }
+                            continue;
+                        }
+                        wt_store::SnapshotOutcome::FellBack(Some(reason)) => {
+                            if !req.cfg.json {
+                                eprintln!("wt-snapshots: {heavy}: lockfile fast path fell back ({reason})");
+                            }
+                        }
+                        wt_store::SnapshotOutcome::FellBack(None) => {}
+                        wt_store::SnapshotOutcome::Failed(msg) => {
+                            return Err(Error::Store(format!("hydration of {heavy} failed: {msg}")));
+                        }
+                    }
+                }
+            }
             let stage = Instant::now();
             let ingested = self
                 .store

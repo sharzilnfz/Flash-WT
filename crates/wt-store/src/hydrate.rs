@@ -173,7 +173,11 @@ impl DiskStore {
             fs::create_dir_all(&dir_path)?;
         }
 
-        let engine = wt_copy::CopyEngine::new(req.strategy_policy);
+        let materializer = wt_copy::Materializer::for_paths(
+            req.strategy_policy,
+            self.root(),
+            req.worktree_root,
+        );
         let files: Vec<(&String, &ContentId)> = req.files.iter().collect();
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -229,7 +233,7 @@ impl DiskStore {
                         }
                         let mode = req.modes.get(rel).copied();
 
-                        let outcome = match engine.materialize_file(&src, &dest, mode) {
+                        let outcome = match materializer.materialize_file(&src, &dest, mode) {
                             Ok(outcome) => outcome,
                             Err(e) => {
                                 let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());

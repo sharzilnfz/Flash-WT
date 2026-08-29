@@ -130,15 +130,22 @@ impl DiskStore {
         let worktree =
             fs::canonicalize(worktree).map_err(|e| Error::Io(path_error("worktree", e)))?;
         let gitdir = fs::canonicalize(gitdir).map_err(|e| Error::Io(path_error("gitdir", e)))?;
-        let mut m = mirror::StoreMirror::new(worktree, gitdir);
+        let mut m = match self.read_worktree_mirror(&worktree, &gitdir)? {
+            Some(existing) => existing,
+            None => mirror::StoreMirror::new(worktree, gitdir),
+        };
         for id in file_blobs {
             m.files.insert(*id);
         }
         for id in snapshots {
             m.snapshots.insert(*id);
         }
-        m.base_branch = base_branch.map(ToString::to_string);
-        m.base_commit = base_commit.map(ToString::to_string);
+        if base_branch.is_some() {
+            m.base_branch = base_branch.map(ToString::to_string);
+        }
+        if base_commit.is_some() {
+            m.base_commit = base_commit.map(ToString::to_string);
+        }
         mirror::publish(self.root(), &m).map_err(Error::Io)
     }
 
