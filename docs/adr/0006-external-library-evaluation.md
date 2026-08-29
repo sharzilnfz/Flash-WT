@@ -60,6 +60,9 @@ mirrors remain the correct root set for wt.
 
 - No new runtime dependencies; the snapshot/GC/diff subsystem remains
   in-house (~600 lines, 158 tests).
+- Note (2026-08-29): `clap_complete` was later added for shell
+  completions. It is outside this ADR's scope — the no-new-dependencies
+  rule above governs the snapshot/GC/diff subsystem only.
 - v2 incremental rebuilds proceed per the revised design note, with the
   unit-clone mechanism later simplified to whole-tree clone plus delta
   after benchmarks showed per-unit call overhead dominating (see

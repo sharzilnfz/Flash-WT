@@ -10,7 +10,6 @@ mod config;
 mod envelope;
 mod error;
 mod gc;
-mod gitops;
 mod hydrate;
 mod manifest;
 mod output;

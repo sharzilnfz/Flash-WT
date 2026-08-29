@@ -52,3 +52,12 @@ rather than chmod-ing the shared blob). Snapshot parity and ladder parity
 are now identical; the benchmark suite's gap tolerance exists only as a
 regression tripwire. Unreferenced snapshots are additionally bounded by
 an LRU retention cap (`WT_SNAPSHOT_CAP`, default 64).
+
+## Amendment (2026-08-29)
+
+Snapshots are no longer opt-in. The original gate kept the default off
+until parity and benchmark gates passed; those gates passed, so `wt` now
+probes the host at startup and enables snapshot hydration by default on
+macOS APFS. `WT_SNAPSHOTS=0` opts out and forces the per-file ladder;
+`WT_VERIFY=1` still bypasses hits entirely. The parity tripwire and the
+LRU/disk caps above carry over unchanged.

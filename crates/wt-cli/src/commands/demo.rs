@@ -10,7 +10,7 @@ use wt_store::{ContentId, DiskStore, Store};
 use crate::config::RunConfig;
 use crate::envelope::{DemoData, Diagnostic};
 use crate::error::{Error, Result};
-use crate::gitops;
+use crate::workspace;
 use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
 use crate::output::{HumanBytes, HumanCount};
 
@@ -90,9 +90,9 @@ fn generate_synthetic_fixture(repo_path: &Path) -> Result<(usize, u64)> {
     fs::create_dir_all(repo_path)
         .map_err(|e| Error::io("create demo repo dir", repo_path, e))?;
 
-    gitops::run(repo_path, &["init", "--quiet"])?;
-    gitops::run(repo_path, &["config", "user.email", "demo@example.com"])?;
-    gitops::run(repo_path, &["config", "user.name", "Demo User"])?;
+    workspace::run(repo_path, &["init", "--quiet"])?;
+    workspace::run(repo_path, &["config", "user.email", "demo@example.com"])?;
+    workspace::run(repo_path, &["config", "user.name", "Demo User"])?;
 
     let pkg_json_path = repo_path.join("package.json");
     fs::write(
@@ -115,8 +115,8 @@ fn generate_synthetic_fixture(repo_path: &Path) -> Result<(usize, u64)> {
     fs::write(&index_ts, b"console.log(\"wt synthetic demo project\");\n")
         .map_err(|e| Error::io("write index.ts", &index_ts, e))?;
 
-    gitops::run(repo_path, &["add", "."])?;
-    gitops::run(repo_path, &["commit", "--quiet", "-m", "Initial commit"])?;
+    workspace::run(repo_path, &["add", "."])?;
+    workspace::run(repo_path, &["commit", "--quiet", "-m", "Initial commit"])?;
 
     let node_modules = repo_path.join("node_modules");
     fs::create_dir_all(&node_modules)
@@ -408,7 +408,7 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
     }
     let wt_start = Instant::now();
     let worktree_dest_str = worktree_dest.to_string_lossy().into_owned();
-    gitops::run(
+    workspace::run(
         &donor_repo,
         &["worktree", "add", "-b", "demo-branch", &worktree_dest_str, "HEAD"],
     )?;
@@ -449,8 +449,8 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
     if !cfg.json {
         println!("Step 5/5: Cleaning up benchmark artifacts...");
     }
-    let _ = gitops::run(&donor_repo, &["worktree", "remove", "--force", &worktree_dest_str]);
-    let _ = gitops::run(&donor_repo, &["branch", "-D", "demo-branch"]);
+    let _ = workspace::run(&donor_repo, &["worktree", "remove", "--force", &worktree_dest_str]);
+    let _ = workspace::run(&donor_repo, &["branch", "-D", "demo-branch"]);
     let _ = crate::gc::remove("demo-branch", Some(&worktree_dest), cfg);
 
     if worktree_dest.exists() {

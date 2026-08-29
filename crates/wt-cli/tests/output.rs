@@ -62,4 +62,29 @@ fn human_duration_and_table_rendering_via_list_ttl() {
     assert!(stdout.contains("DISK SAVED"));
     assert!(stdout.contains("ttl:"), "expected a lease ttl in table:\n{stdout}");
     assert!(stdout.contains("preso-ttl"));
+
+    let header = stdout
+        .lines()
+        .find(|l| l.contains("BRANCH"))
+        .expect("list table header line");
+    let branch_col = header
+        .find("BRANCH")
+        .expect("BRANCH header column position");
+
+    let row = stdout
+        .lines()
+        .find(|l| l.contains("preso-ttl"))
+        .expect("worktree row carrying the branch cell");
+    assert_eq!(
+        row.find("preso-ttl"),
+        Some(branch_col),
+        "branch cell must share the BRANCH header's character position:\nheader: {header}\nrow: {row}"
+    );
+
+    let path_col = header.find("PATH").expect("PATH header column position");
+    assert_eq!(
+        row[path_col..].chars().next(),
+        Some('/'),
+        "path cell must start under the PATH header:\nheader: {header}\nrow: {row}"
+    );
 }

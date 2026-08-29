@@ -97,53 +97,54 @@ esac
 
 # Best-effort shell completion installation: generate scripts with the
 # freshly installed binary and drop them into the first completion
-# directory that applies. Per-user directories are only created for the
-# active login shell; pre-existing system-wide directories are used
-# whenever present. Skip entirely with WT_COMPLETIONS=no.
-install_completion() {
+# directory that applies. Per-user directories (under $HOME) are only
+# created for the active login shell; pre-existing system-wide
+# directories are used whenever present. Skip entirely with
+# WT_COMPLETIONS=no.
+try_completion() {
   shell=$1
   dir=$2
-  if mkdir -p "$dir" 2>/dev/null &&
-    "$BIN_DIR/wt" completions "$shell" >"$dir/wt" 2>/dev/null; then
-    echo "installed $shell completions at $dir/wt"
-    case "$shell" in
-      zsh)
-        echo "note: for zsh, add the directory to fpath and run compinit, e.g.:" >&2
-        echo "  fpath=($dir \$fpath)" >&2
-        echo "  autoload -Uz compinit && compinit" >&2
-        ;;
-    esac
-  else
+  case "$dir" in
+    "$HOME"/*) mkdir -p "$dir" 2>/dev/null ;;
+  esac
+  [ -d "$dir" ] && [ -w "$dir" ] || return 1
+  "$BIN_DIR/wt" completions "$shell" >"$dir/wt" 2>/dev/null || {
     rm -f "$dir/wt"
+    return 1
+  }
+  echo "installed $shell completions at $dir/wt"
+  case "$shell" in
+    zsh)
+      echo "note: for zsh, add the directory to fpath and run compinit, e.g.:" >&2
+      echo "  fpath=($dir \$fpath)" >&2
+      echo "  autoload -Uz compinit && compinit" >&2
+      ;;
+  esac
+}
+
+install_completions() {
+  shell=$1
+  user_dir=$2
+  shift 2
+  if [ "$(basename "${SHELL:-}")" = "$shell" ]; then
+    try_completion "$shell" "$user_dir" && return 0
   fi
+  for dir in "$@"; do
+    try_completion "$shell" "$dir" && return 0
+  done
 }
 
 if [ "${WT_COMPLETIONS:-auto}" != no ]; then
-  case ":${SHELL:-}:" in
-    *:*/zsh:*)
-      install_completion zsh "$HOME/.zsh/completion"
-      ;;
-  esac
-  case ":${SHELL:-}:" in
-    *:*/bash:*)
-      install_completion bash "${BASH_COMPLETION_USER_DIR:-$HOME/.local/share/bash-completion}/completions"
-      ;;
-  esac
-  case ":${SHELL:-}:" in
-    *:*/fish:*)
-      install_completion fish "$HOME/.config/fish/completions"
-      ;;
-  esac
-  for dir in /usr/local/share/zsh/site-functions \
-    /usr/share/zsh/site-functions \
-    /etc/bash_completion.d; do
-    [ -d "$dir" ] || continue
-    [ -w "$dir" ] || continue
-    case "$dir" in
-      *zsh*) install_completion zsh "$dir" ;;
-      *bash*) install_completion bash "$dir" ;;
-    esac
-  done
+  install_completions zsh \
+    "$HOME/.zsh/completion" \
+    /usr/local/share/zsh/site-functions \
+    /usr/share/zsh/site-functions
+  install_completions bash \
+    "$HOME/.bash_completion.d" \
+    "${BASH_COMPLETION_USER_DIR:-$HOME/.local/share/bash-completion}/completions" \
+    /etc/bash_completion.d
+  install_completions fish \
+    "$HOME/.config/fish/completions"
 fi
 
 echo "installed wt at $BIN_DIR/wt"

@@ -43,7 +43,7 @@ use wt_store::{ContentId, DiskStore, GcMode, IngestOptions, Store};
 use crate::config::{RunConfig, StrategyPolicy};
 use crate::envelope::Diagnostic;
 use crate::error::{Error, Result};
-use crate::gitops;
+use crate::workspace;
 use crate::manifest::{collect_matches, pattern_matches};
 use crate::snapshots;
 use crate::snapshots::Outcome as SnapshotOutcome;
@@ -119,7 +119,7 @@ impl<'a> HydrationEngine<'a> {
         let dirs = collect_matches(req.root, req.patterns)?;
 
         if dirs.is_empty() {
-            let git_dir = gitops::git_dir(req.dest)?;
+            let git_dir = workspace::git_dir(req.dest)?;
             let combined = Ingested {
                 dirs: Vec::new(),
                 dir_modes: BTreeMap::new(),
@@ -699,7 +699,7 @@ pub fn materialize(
 
 /// Resolve the (absolute) git dir of a freshly created worktree.
 fn worktree_git_dir(worktree: &Path) -> Result<PathBuf> {
-    gitops::git_dir(worktree)
+    workspace::git_dir(worktree)
 }
 
 /// Give this worktree one reference on every distinct blob it uses,

@@ -73,6 +73,9 @@ jobs:
           mkdir "$DIR"
           cp "target/${{ matrix.target }}/release/wt" "$DIR/"
           cp README.md "$DIR/"
+          for shell in bash zsh fish; do
+            "target/${{ matrix.target }}/release/wt" completions "$shell" >"$DIR/wt.$shell"
+          done
           tar czf "${DIR}.tar.gz" "$DIR"
           shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
       - uses: actions/upload-artifact@v4

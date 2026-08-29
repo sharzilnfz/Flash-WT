@@ -32,30 +32,18 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
 
 /// The enclosing repository root of the current working directory.
 pub fn repo_root() -> Result<PathBuf> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .map_err(|e| Error::Git(e.to_string()))?;
-    if !out.status.success() {
-        return Err(Error::Git("not inside a git repository".into()));
-    }
-    Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+    let cwd = std::env::current_dir().map_err(|e| Error::Git(e.to_string()))?;
+    run(&cwd, &["rev-parse", "--show-toplevel"])
+        .map_err(|_| Error::Git("not inside a git repository".into()))
+        .map(PathBuf::from)
 }
 
 /// Resolve the (absolute) git dir of a worktree. For linked worktrees
 /// this lands inside the main repo's `.git/worktrees/<name>`.
 pub fn git_dir(worktree: &Path) -> Result<PathBuf> {
-    let out = Command::new("git")
-        .current_dir(worktree)
-        .args(["rev-parse", "--absolute-git-dir"])
-        .output()
-        .map_err(|e| Error::Git(format!("cannot query git dir: {e}")))?;
-    if !out.status.success() {
-        return Err(Error::Git(
-            "newly created worktree is not a git worktree".into(),
-        ));
-    }
-    Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+    run(worktree, &["rev-parse", "--absolute-git-dir"])
+        .map_err(|_| Error::Git("newly created worktree is not a git worktree".into()))
+        .map(PathBuf::from)
 }
 
 /// The default destination for a new worktree: a sibling of the
