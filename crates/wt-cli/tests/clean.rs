@@ -85,6 +85,7 @@ fn wt_clean_unregisters_raw_git_worktree_and_spares_sibling() {
     git(&fx.repo, &["branch", "raw-b"]);
     git(&fx.repo, &["worktree", "add", "--quiet", first.to_str().unwrap(), "raw-a"]);
     git(&fx.repo, &["worktree", "add", "--quiet", second.to_str().unwrap(), "raw-b"]);
+    let canonical_first = std::fs::canonicalize(&first).unwrap();
     assert!(first.exists() && second.exists());
 
     let out = fx.wt(&["clean", "raw-a", "--json"]);
@@ -92,7 +93,7 @@ fn wt_clean_unregisters_raw_git_worktree_and_spares_sibling() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let val: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON envelope");
-    assert_eq!(val["data"]["removed_worktrees"][0], first.to_string_lossy().as_ref());
+    assert_eq!(val["data"]["removed_worktrees"][0], canonical_first.to_string_lossy().as_ref());
     assert!(!first.exists(), "cleaned worktree directory must be removed");
 
     let registered = git_out(&fx.repo, &["worktree", "list", "--porcelain"]);

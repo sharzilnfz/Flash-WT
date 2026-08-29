@@ -1257,24 +1257,24 @@ fn projection_engine_api_sanity() {
     let symlinks = BTreeMap::new();
     let modes = BTreeMap::new();
 
-    let outcome = SnapshotProjectionEngine::hydrate(
-        &mut store,
-        &dirs,
-        &dir_modes,
-        &files,
-        &file_sizes,
-        &symlinks,
-        &modes,
-        &repo_root,
-        "heavy/**",
-        &src_root,
-        "heavy",
-        &dest_root,
-        Some(&lockfile_hash),
-        false,
-        false,
-        false,
-    );
+    let req = SnapshotProjectionRequest {
+        dirs: &dirs,
+        dir_modes: &dir_modes,
+        files: &files,
+        file_sizes: &file_sizes,
+        symlinks: &symlinks,
+        modes: &modes,
+        repo_root: &repo_root,
+        pattern: "heavy/**",
+        src_root: &src_root,
+        heavy_rel: "heavy",
+        dest_root: &dest_root,
+        lockfile_hash: Some(&lockfile_hash),
+        verify: false,
+        snapshots_enabled: false,
+        v2_enabled: false,
+    };
+    let outcome = SnapshotProjectionEngine::hydrate(&mut store, &req);
     match outcome {
         SnapshotOutcome::FellBack(None) => {}
         SnapshotOutcome::Hydrated(_)

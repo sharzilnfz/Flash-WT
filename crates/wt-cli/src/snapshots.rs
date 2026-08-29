@@ -7,7 +7,9 @@ use std::path::Path;
 
 use wt_store::{ContentId, DiskStore};
 #[allow(unused_imports)]
-pub use wt_store::{SnapshotHydration, SnapshotOutcome, SnapshotProjectionEngine};
+pub use wt_store::{
+    SnapshotHydration, SnapshotOutcome, SnapshotProjectionEngine, SnapshotProjectionRequest,
+};
 
 use crate::config::RunConfig;
 use crate::hydrate::Ingested;
@@ -60,22 +62,22 @@ pub fn hydrate(
     lockfile_hash: Option<&ContentId>,
     cfg: &RunConfig,
 ) -> SnapshotOutcome {
-    SnapshotProjectionEngine::hydrate(
-        store,
-        &ingested.dirs,
-        &ingested.dir_modes,
-        &ingested.files,
-        &ingested.file_sizes,
-        &ingested.symlinks,
-        &ingested.modes,
+    let req = SnapshotProjectionRequest {
+        dirs: &ingested.dirs,
+        dir_modes: &ingested.dir_modes,
+        files: &ingested.files,
+        file_sizes: &ingested.file_sizes,
+        symlinks: &ingested.symlinks,
+        modes: &ingested.modes,
         repo_root,
         pattern,
         src_root,
         heavy_rel,
         dest_root,
         lockfile_hash,
-        cfg.verify,
-        cfg.snapshots,
-        cfg.v2,
-    )
+        verify: cfg.verify,
+        snapshots_enabled: cfg.snapshots,
+        v2_enabled: cfg.v2,
+    };
+    SnapshotProjectionEngine::hydrate(store, &req)
 }

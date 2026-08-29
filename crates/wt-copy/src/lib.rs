@@ -25,6 +25,7 @@ mod clonefile;
 #[cfg(target_os = "linux")]
 mod copy_file_range;
 mod copy_tree;
+mod engine;
 mod deep_copy;
 mod hardlink;
 mod materialize;
@@ -37,6 +38,7 @@ mod sys;
 pub use clonefile::ClonefileBackend;
 #[cfg(target_os = "linux")]
 pub use copy_file_range::{CopyFileRangeBackend, copy_file_range_file};
+pub use engine::{BatchPlacementReceipt, CopyEngine, CopyReceipt};
 pub use deep_copy::DeepCopyBackend;
 pub use hardlink::HardlinkBackend;
 #[cfg(target_os = "macos")]

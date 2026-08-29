@@ -237,6 +237,19 @@ impl Materializer {
         Self::select(policy, is_cross_device, reflink_capable, is_ext4)
     }
 
+    /// Create a materializer for the given source and destination paths, automatically
+    /// inspecting device IDs and filesystem capabilities.
+    pub fn for_paths(policy: StrategyPolicy, src_root: &Path, dest_root: &Path) -> Self {
+        let is_cross = crate::sys::is_cross_device(src_root, dest_root);
+        let (reflink_capable, is_ext4) = crate::sys::probe_fs_capabilities(dest_root);
+        Self::select(policy, is_cross, reflink_capable, is_ext4)
+    }
+
+    /// Alias for [`Materializer::for_paths`] for backwards compatibility.
+    pub fn for_directories(policy: StrategyPolicy, src_root: &Path, dest_root: &Path) -> Self {
+        Self::for_paths(policy, src_root, dest_root)
+    }
+
     /// Select a materializer based on strategy policy and filesystem capabilities.
     pub fn select(
         policy: StrategyPolicy,

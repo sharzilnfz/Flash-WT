@@ -48,7 +48,8 @@ pub use snapindex::{
 pub use snapshot::{
     BuildError, EntryKind, Manifest, PublishOutcome, PublishReceipt, SnapshotBuildTiming,
     SnapshotEntry, SnapshotHydration, SnapshotOutcome, SnapshotProjectionEngine,
-    read_published as read_published_snapshot, snapshot_path, snapshot_tree_path,
+    SnapshotProjectionRequest, read_published as read_published_snapshot, snapshot_path,
+    snapshot_tree_path,
 };
 pub use validation::{Entry, ValidationCache};
 pub use verified::{Fingerprint, VerifiedLedger};
