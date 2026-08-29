@@ -5,6 +5,11 @@
 #
 # <version> is the release tag without the leading v (e.g. 0.1.0);
 # <dist-dir> holds the wt-v<version>-<target>.tar.gz.sha256 files.
+#
+# The generated formula installs shell completions by invoking
+# `wt completions <shell>` on the binary it installs, so the release
+# archives carry no completion artifacts and this script fills no
+# completion placeholders.
 set -eu
 
 VERSION=${1:?usage: gen-formula.sh <version> <dist-dir>}
