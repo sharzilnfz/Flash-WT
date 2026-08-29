@@ -14,6 +14,7 @@ pub struct TreeFixture {
     /// Root of the tree to copy.
     pub src: PathBuf,
     /// Sibling of `src`, outside it; the symlink target lives here.
+    #[allow(dead_code)]
     pub outside: PathBuf,
     _base: tempfile::TempDir,
 }

@@ -10,6 +10,8 @@
 #   WT_DIST_DIR   install from this local directory instead of downloading;
 #                 must contain the same wt-v<version>-<target>.tar.gz files
 #                 the release carries (used by scripts/smoke-install.sh)
+#   WT_COMPLETIONS  auto (default) installs shell completions when a
+#                 completion directory can be located; no skips them
 set -eu
 
 REPO=${WT_REPO:-sharzilnfz/wt}
@@ -92,4 +94,58 @@ case ":$PATH:" in
     echo "  export PATH=\"$BIN_DIR:\$PATH\"" >&2
     ;;
 esac
+
+# Best-effort shell completion installation: generate scripts with the
+# freshly installed binary and drop them into the first completion
+# directory that applies. Per-user directories (under $HOME) are only
+# created for the active login shell; pre-existing system-wide
+# directories are used whenever present. Skip entirely with
+# WT_COMPLETIONS=no.
+try_completion() {
+  shell=$1
+  dir=$2
+  case "$dir" in
+    "$HOME"/*) mkdir -p "$dir" 2>/dev/null ;;
+  esac
+  [ -d "$dir" ] && [ -w "$dir" ] || return 1
+  "$BIN_DIR/wt" completions "$shell" >"$dir/wt" 2>/dev/null || {
+    rm -f "$dir/wt"
+    return 1
+  }
+  echo "installed $shell completions at $dir/wt"
+  case "$shell" in
+    zsh)
+      echo "note: for zsh, add the directory to fpath and run compinit, e.g.:" >&2
+      echo "  fpath=($dir \$fpath)" >&2
+      echo "  autoload -Uz compinit && compinit" >&2
+      ;;
+  esac
+}
+
+install_completions() {
+  shell=$1
+  user_dir=$2
+  shift 2
+  if [ "$(basename "${SHELL:-}")" = "$shell" ]; then
+    try_completion "$shell" "$user_dir" && return 0
+  fi
+  for dir in "$@"; do
+    try_completion "$shell" "$dir" && return 0
+  done
+  return 0
+}
+
+if [ "${WT_COMPLETIONS:-auto}" != no ]; then
+  install_completions zsh \
+    "$HOME/.zsh/completion" \
+    /usr/local/share/zsh/site-functions \
+    /usr/share/zsh/site-functions
+  install_completions bash \
+    "$HOME/.bash_completion.d" \
+    "${BASH_COMPLETION_USER_DIR:-$HOME/.local/share/bash-completion}/completions" \
+    /etc/bash_completion.d
+  install_completions fish \
+    "$HOME/.config/fish/completions"
+fi
+
 echo "installed wt at $BIN_DIR/wt"

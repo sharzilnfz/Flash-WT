@@ -48,7 +48,9 @@ mod tree;
 mod tests;
 
 pub use manifest::{EntryKind, Manifest, SnapshotEntry};
-pub use projection::{SnapshotHydration, SnapshotOutcome, SnapshotProjectionEngine};
+pub use projection::{
+    SnapshotHydration, SnapshotOutcome, SnapshotProjectionEngine, SnapshotProjectionRequest,
+};
 pub use publish::{BuildError, PublishOutcome, PublishReceipt, SnapshotBuildTiming};
 
 use std::fs;

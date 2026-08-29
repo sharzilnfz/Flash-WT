@@ -10,41 +10,9 @@ use wt_store::{ContentId, DiskStore, Store};
 use crate::config::RunConfig;
 use crate::envelope::{DemoData, Diagnostic};
 use crate::error::{Error, Result};
-use crate::gitops;
 use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
-
-/// Format bytes into a human-readable string.
-fn format_bytes(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-
-    let b = bytes as f64;
-    if bytes == 0 {
-        "0 B".to_string()
-    } else if b < KB {
-        format!("{bytes} B")
-    } else if b < MB {
-        format!("{:.1} KB", b / KB)
-    } else if b < GB {
-        format!("{:.1} MB", b / MB)
-    } else {
-        format!("{:.1} GB", b / GB)
-    }
-}
-
-/// Format numbers with thousands separators.
-fn format_number(n: usize) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out.chars().rev().collect()
-}
+use crate::output::{HumanBytes, HumanCount};
+use crate::workspace;
 
 /// Standard recursive filesystem copy for baseline performance measurement.
 fn recursive_copy(src: &Path, dest: &Path) -> Result<u64> {
@@ -55,7 +23,9 @@ fn recursive_copy(src: &Path, dest: &Path) -> Result<u64> {
         .filter_map(|e| e.ok())
         .collect();
 
-    let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8);
     let chunk_size = entries.len().div_ceil(num_threads);
     let chunks: Vec<_> = entries.chunks(chunk_size.max(1)).collect();
 
@@ -95,8 +65,7 @@ fn copy_subtree(src: &Path, dest: &Path, bytes_copied: &mut u64) -> Result<()> {
     fs::create_dir_all(dest).map_err(|e| Error::io("create sub dir", dest, e))?;
     let mut stack = vec![(src.to_path_buf(), dest.to_path_buf())];
     while let Some((s_dir, d_dir)) = stack.pop() {
-        let entries = fs::read_dir(&s_dir)
-            .map_err(|e| Error::io("read sub dir", &s_dir, e))?;
+        let entries = fs::read_dir(&s_dir).map_err(|e| Error::io("read sub dir", &s_dir, e))?;
         for entry in entries.flatten() {
             let s_path = entry.path();
             let d_path = d_dir.join(entry.file_name());
@@ -104,12 +73,11 @@ fn copy_subtree(src: &Path, dest: &Path, bytes_copied: &mut u64) -> Result<()> {
                 .file_type()
                 .map_err(|e| Error::io("stat entry", &s_path, e))?;
             if file_type.is_dir() {
-                fs::create_dir_all(&d_path)
-                    .map_err(|e| Error::io("create sub dir", &d_path, e))?;
+                fs::create_dir_all(&d_path).map_err(|e| Error::io("create sub dir", &d_path, e))?;
                 stack.push((s_path, d_path));
             } else if file_type.is_file() {
-                let bytes = fs::copy(&s_path, &d_path)
-                    .map_err(|e| Error::io("copy file", &s_path, e))?;
+                let bytes =
+                    fs::copy(&s_path, &d_path).map_err(|e| Error::io("copy file", &s_path, e))?;
                 *bytes_copied += bytes;
             }
         }
@@ -119,12 +87,11 @@ fn copy_subtree(src: &Path, dest: &Path, bytes_copied: &mut u64) -> Result<()> {
 
 /// Synthesize a realistic 10,000-file project fixture across nested packages.
 fn generate_synthetic_fixture(repo_path: &Path) -> Result<(usize, u64)> {
-    fs::create_dir_all(repo_path)
-        .map_err(|e| Error::io("create demo repo dir", repo_path, e))?;
+    fs::create_dir_all(repo_path).map_err(|e| Error::io("create demo repo dir", repo_path, e))?;
 
-    gitops::run(repo_path, &["init", "--quiet"])?;
-    gitops::run(repo_path, &["config", "user.email", "demo@example.com"])?;
-    gitops::run(repo_path, &["config", "user.name", "Demo User"])?;
+    workspace::run(repo_path, &["init", "--quiet"])?;
+    workspace::run(repo_path, &["config", "user.email", "demo@example.com"])?;
+    workspace::run(repo_path, &["config", "user.name", "Demo User"])?;
 
     let pkg_json_path = repo_path.join("package.json");
     fs::write(
@@ -141,20 +108,21 @@ fn generate_synthetic_fixture(repo_path: &Path) -> Result<(usize, u64)> {
         .map_err(|e| Error::io("write .wtinclude", &wtinclude_path, e))?;
 
     let src_dir = repo_path.join("src");
-    fs::create_dir_all(&src_dir)
-        .map_err(|e| Error::io("create src dir", &src_dir, e))?;
+    fs::create_dir_all(&src_dir).map_err(|e| Error::io("create src dir", &src_dir, e))?;
     let index_ts = src_dir.join("index.ts");
     fs::write(&index_ts, b"console.log(\"wt synthetic demo project\");\n")
         .map_err(|e| Error::io("write index.ts", &index_ts, e))?;
 
-    gitops::run(repo_path, &["add", "."])?;
-    gitops::run(repo_path, &["commit", "--quiet", "-m", "Initial commit"])?;
+    workspace::run(repo_path, &["add", "."])?;
+    workspace::run(repo_path, &["commit", "--quiet", "-m", "Initial commit"])?;
 
     let node_modules = repo_path.join("node_modules");
     fs::create_dir_all(&node_modules)
         .map_err(|e| Error::io("create node_modules", &node_modules, e))?;
 
-    let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8);
     let packages: Vec<usize> = (0..100).collect();
     let chunk_size = packages.len().div_ceil(num_threads);
     let chunks: Vec<_> = packages.chunks(chunk_size.max(1)).collect();
@@ -307,7 +275,9 @@ fn verify_mutation_isolation(
     let mutated_worktree_bytes = fs::read(&worktree_file)
         .map_err(|e| Error::io("read mutated worktree file", &worktree_file, e))?;
     if mutated_worktree_bytes != mutation_content {
-        return Err(Error::Store("worktree file mutation was not written".into()));
+        return Err(Error::Store(
+            "worktree file mutation was not written".into(),
+        ));
     }
 
     // Verify donor repository file is unchanged
@@ -376,15 +346,13 @@ fn print_terminal_scorecard(
     println!("Summary:");
     println!(
         "  • Total Fixture Files    : {} files (100 packages, {})",
-        format_number(files_count),
-        format_bytes(total_bytes)
+        HumanCount(files_count),
+        HumanBytes(total_bytes)
     );
-    println!(
-        "  • Hydration Mechanism    : Copy-on-Write ({hydration_method})"
-    );
+    println!("  • Hydration Mechanism    : Copy-on-Write ({hydration_method})");
     println!(
         "  • Disk Space Saved       : {} (0 B duplicated, 100% CoW shared)",
-        format_bytes(bytes_shared_cow.max(total_bytes))
+        HumanBytes(bytes_shared_cow.max(total_bytes))
     );
     println!("  • Speedup Ratio          : {:.1}x faster", speedup_ratio);
     println!("  • Mutation Isolation     : VERIFIED (zero cross-worktree bleed)");
@@ -400,7 +368,8 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
     }
 
     // 1. Create sandbox tempdir
-    let base_temp = tempfile::tempdir().map_err(|e| Error::io("create tempdir for demo", "temp", e))?;
+    let base_temp =
+        tempfile::tempdir().map_err(|e| Error::io("create tempdir for demo", "temp", e))?;
     let donor_repo = base_temp.path().join("demo-repo");
     let worktree_dest = base_temp.path().join("demo-worktree");
     let baseline_dest = base_temp.path().join("demo-baseline");
@@ -414,8 +383,8 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
     if !cfg.json {
         println!(
             "  ✓ Generated {} files across 100 packages ({})",
-            format_number(files_count),
-            format_bytes(total_bytes)
+            HumanCount(files_count),
+            HumanBytes(total_bytes)
         );
     }
 
@@ -424,13 +393,16 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
         println!("Step 2/5: Benchmarking standard filesystem recursive copy...");
     }
     let baseline_start = Instant::now();
-    let baseline_copy_bytes = recursive_copy(&donor_repo.join("node_modules"), &baseline_dest.join("node_modules"))?;
+    let baseline_copy_bytes = recursive_copy(
+        &donor_repo.join("node_modules"),
+        &baseline_dest.join("node_modules"),
+    )?;
     let baseline_copy_duration_ms = baseline_start.elapsed().as_millis() as u64;
     if !cfg.json {
         println!(
             "  ✓ Standard copy completed in {} ms ({} duplicated)",
             baseline_copy_duration_ms,
-            format_bytes(baseline_copy_bytes)
+            HumanBytes(baseline_copy_bytes)
         );
     }
 
@@ -440,9 +412,16 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
     }
     let wt_start = Instant::now();
     let worktree_dest_str = worktree_dest.to_string_lossy().into_owned();
-    gitops::run(
+    workspace::run(
         &donor_repo,
-        &["worktree", "add", "-b", "demo-branch", &worktree_dest_str, "HEAD"],
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "demo-branch",
+            &worktree_dest_str,
+            "HEAD",
+        ],
     )?;
 
     let patterns = vec!["node_modules/".to_string()];
@@ -463,8 +442,8 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
         println!(
             "  ✓ wt hydration completed in {} ms ({} duplicated, {} CoW shared)",
             wt_hydration_duration_ms,
-            format_bytes(report.bytes_copied),
-            format_bytes(report.bytes_shared_cow.max(total_bytes))
+            HumanBytes(report.bytes_copied),
+            HumanBytes(report.bytes_shared_cow.max(total_bytes))
         );
     }
 
@@ -481,8 +460,11 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
     if !cfg.json {
         println!("Step 5/5: Cleaning up benchmark artifacts...");
     }
-    let _ = gitops::run(&donor_repo, &["worktree", "remove", "--force", &worktree_dest_str]);
-    let _ = gitops::run(&donor_repo, &["branch", "-D", "demo-branch"]);
+    let _ = workspace::run(
+        &donor_repo,
+        &["worktree", "remove", "--force", &worktree_dest_str],
+    );
+    let _ = workspace::run(&donor_repo, &["branch", "-D", "demo-branch"]);
     let _ = crate::gc::remove("demo-branch", Some(&worktree_dest), cfg);
 
     if worktree_dest.exists() {

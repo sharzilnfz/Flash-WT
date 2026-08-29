@@ -14,8 +14,8 @@ use crate::commands::create;
 use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, ScratchData};
 use crate::error::{Error, Result};
-use crate::gitops;
 use crate::hydrate::open_store;
+use crate::workspace;
 
 /// Generate a unique 8-character hex id for scratch worktrees.
 fn generate_scratch_id() -> String {
@@ -57,7 +57,7 @@ impl ScratchGuard {
         let _ = crate::gc::remove(&self.name, Some(&self.worktree_path), cfg);
 
         // 3. Delete the temporary git branch if it still exists
-        let _ = gitops::run(&self.repo_root, &["branch", "-D", &self.name]);
+        let _ = workspace::run(&self.repo_root, &["branch", "-D", &self.name]);
 
         // 4. Clean up any leftover directory on disk
         if self.worktree_path.exists() {
@@ -89,7 +89,7 @@ pub fn run(
     ttl: Option<Duration>,
     cfg: &RunConfig,
 ) -> Result<(ScratchData, Vec<Diagnostic>, Option<i32>)> {
-    let root = gitops::repo_root()?;
+    let root = workspace::repo_root()?;
     let started = Instant::now();
 
     // Determine branch name and lease id
@@ -106,14 +106,14 @@ pub fn run(
 
     let dest = match dir {
         Some(d) => d.to_path_buf(),
-        None => gitops::default_worktree_dest(&root, &branch_name)?,
+        None => workspace::default_worktree_dest(&root, &branch_name)?,
     };
 
     // 1. Create the worktree and hydrate
     let (create_data, diags) = create::run(&branch_name, None, manifest, Some(&dest), cfg)?;
 
     // 2. Resolve git dir and open store
-    let git_dir = gitops::git_dir(&dest)?;
+    let git_dir = workspace::git_dir(&dest)?;
     let store = open_store()?;
     let store_root = store.root().to_path_buf();
 

@@ -59,6 +59,83 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn wt_clean_unregisters_raw_git_worktree_and_spares_sibling() {
+    let fx = TestFixture::new();
+
+    // Synthetic multi-worktree fixture: linked worktrees created with
+    // raw git rather than `wt new`, so nothing exists in the store yet.
+    let first = fx.repo.parent().unwrap().join("origin-raw-a");
+    let second = fx.repo.parent().unwrap().join("origin-raw-b");
+    git(&fx.repo, &["branch", "raw-a"]);
+    git(&fx.repo, &["branch", "raw-b"]);
+    git(
+        &fx.repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            first.to_str().unwrap(),
+            "raw-a",
+        ],
+    );
+    git(
+        &fx.repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            second.to_str().unwrap(),
+            "raw-b",
+        ],
+    );
+    let canonical_first = std::fs::canonicalize(&first).unwrap();
+    assert!(first.exists() && second.exists());
+
+    let out = fx.wt(&["clean", "raw-a", "--json"]);
+    assert!(
+        out.status.success(),
+        "wt clean failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let val: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON envelope");
+    assert_eq!(
+        val["data"]["removed_worktrees"][0],
+        canonical_first.to_string_lossy().as_ref()
+    );
+    assert!(
+        !first.exists(),
+        "cleaned worktree directory must be removed"
+    );
+
+    let registered = git_out(&fx.repo, &["worktree", "list", "--porcelain"]);
+    assert!(
+        !registered.contains("origin-raw-a"),
+        "git must forget the removed worktree: {registered}"
+    );
+    assert!(
+        registered.contains("origin-raw-b"),
+        "untouched sibling must stay registered: {registered}"
+    );
+    assert!(second.exists(), "untouched sibling directory must survive");
+}
+
 #[test]
 fn wt_clean_single_worktree_removes_and_sweeps_with_receipt() {
     let fx = TestFixture::new();
@@ -69,11 +146,21 @@ fn wt_clean_single_worktree_removes_and_sweeps_with_receipt() {
     assert!(wt_path.exists());
 
     let out_clean = fx.wt(&["clean", "feature-clean"]);
-    assert!(out_clean.status.success(), "wt clean failed: {}", String::from_utf8_lossy(&out_clean.stderr));
+    assert!(
+        out_clean.status.success(),
+        "wt clean failed: {}",
+        String::from_utf8_lossy(&out_clean.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&out_clean.stdout);
-    assert!(stdout.contains("✓ Removed worktree"), "receipt must contain ✓ Removed worktree: {stdout}");
-    assert!(stdout.contains("feature-clean"), "receipt must contain branch name: {stdout}");
+    assert!(
+        stdout.contains("✓ Removed worktree"),
+        "receipt must contain ✓ Removed worktree: {stdout}"
+    );
+    assert!(
+        stdout.contains("feature-clean"),
+        "receipt must contain branch name: {stdout}"
+    );
     assert!(!wt_path.exists(), "worktree directory must be removed");
 }
 
@@ -120,8 +207,14 @@ fn wt_clean_batch_removes_merged_branches_non_interactively() {
 
     let removed = val["data"]["branches_removed"].as_array().unwrap();
     let removed_names: Vec<&str> = removed.iter().map(|v| v.as_str().unwrap()).collect();
-    assert!(removed_names.contains(&"merged-feat"), "merged-feat must be cleaned");
-    assert!(!removed_names.contains(&"unmerged-feat"), "unmerged-feat must not be cleaned without --force/--all");
+    assert!(
+        removed_names.contains(&"merged-feat"),
+        "merged-feat must be cleaned"
+    );
+    assert!(
+        !removed_names.contains(&"unmerged-feat"),
+        "unmerged-feat must not be cleaned without --force/--all"
+    );
 }
 
 #[test]

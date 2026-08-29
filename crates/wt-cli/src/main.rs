@@ -1,7 +1,7 @@
 //! `wt` — instant git worktrees with heavy directories already
 //! hydrated. This file is only the entry point: command definitions
 //! live in `cli.rs`, dispatch in `commands/`, and the machinery in
-//! `hydrate`, `manifest`, `snapshots`, `gc`, `gitops`, and `timing`.
+//! `hydrate`, `manifest`, `gc`, `workspace`, and `timing`.
 
 mod base;
 mod cli;
@@ -10,12 +10,13 @@ mod config;
 mod envelope;
 mod error;
 mod gc;
-mod gitops;
 mod hydrate;
-mod manifest;
-mod snapshots;
+pub mod hydration_filter;
+pub mod manifest;
+mod output;
 mod timing;
 mod toolchain;
+mod workspace;
 
 use clap::Parser;
 

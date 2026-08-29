@@ -24,18 +24,17 @@
 //! tolerated as "already released" so an interrupted remove can
 //! simply be rerun.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use wt_store::{ContentId, GcMode, Store, StoreReclaimer, SweepPolicy, WorkspaceCleaner};
+use wt_store::{GcMode, StoreReclaimer, SweepPolicy, WorkspaceCleaner};
 
 use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, MigrateData, RemoveData, SweepData};
 use crate::error::{Error, Result};
-use crate::gitops;
 use crate::hydrate::open_store;
+use crate::workspace::{WorkspaceEngine, git_dir, repo_root_from_gitdir};
 
 /// Default grace period when `WT_GC_GRACE` is unset or unreadable.
 const DEFAULT_GRACE: Duration = Duration::from_secs(15 * 60);
@@ -123,64 +122,17 @@ pub fn max_snapshot_bytes_from_env() -> Result<Option<u64>> {
     }
 }
 
-/// Content ids named by a worktree's hydration ledger, deduplicated:
-/// one ledger row per materialized file, but references are claimed
-/// once per distinct blob.
-///
-/// Ticket 08: rows may be typed. `<rel>\t<id>` is the legacy blob row;
-/// `<rel>\tblob\t<id>` and `-\tsnapshot\t<id>` are the snapshot-era
-/// forms, so removal knows which ids are blobs (release refs) and
-/// which name snapshots (nothing to release).
-fn read_ledger(git_dir: &Path) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
-    let path = git_dir.join("wt-hydrated.tsv");
-    let text =
-        fs::read_to_string(&path).map_err(|e| Error::io("read hydration ledger", &path, e))?;
-    let mut blobs = BTreeSet::new();
-    let mut snapshots = BTreeSet::new();
-    for line in text.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let fields: Vec<&str> = line.split('\t').collect();
-        match fields.as_slice() {
-            [_, id] => {
-                blobs.insert(id.to_string());
-            }
-            [_, kind, id] => match *kind {
-                "blob" => {
-                    blobs.insert(id.to_string());
-                }
-                "snapshot" => {
-                    snapshots.insert(id.to_string());
-                }
-                other => {
-                    return Err(Error::Store(format!(
-                        "unknown ledger row type {other:?} in {}",
-                        path.display()
-                    )));
-                }
-            },
-            _ => {
-                return Err(Error::Store(format!(
-                    "malformed ledger row in {}: {line:?}",
-                    path.display()
-                )));
-            }
-        }
-    }
-    Ok((blobs, snapshots))
-}
-
 pub fn remove(
     name: &str,
     dir: Option<&Path>,
     cfg: &RunConfig,
 ) -> Result<(RemoveData, Vec<Diagnostic>)> {
-    let root = gitops::repo_root()?;
+    let engine = WorkspaceEngine::discover()?;
+    let root = engine.root().to_path_buf();
 
     let dest = match dir {
         Some(d) => d.to_path_buf(),
-        None => gitops::default_worktree_dest(&root, name)?,
+        None => engine.default_dest(name)?,
     };
     if !dest.join(".git").exists() {
         return Err(Error::Usage(format!(
@@ -192,44 +144,9 @@ pub fn remove(
     // The linked git dir holds the ledger. Resolve it while the
     // worktree still exists; for linked worktrees this lands inside
     // the main repo's .git/worktrees/<name>.
-    let git_dir_text = gitops::run(&dest, &["rev-parse", "--absolute-git-dir"])?;
-    let git_dir = PathBuf::from(&git_dir_text);
-    let (ledger_blobs, ledger_snapshots) = if git_dir.join("wt-hydrated.tsv").exists() {
-        read_ledger(&git_dir)?
-    } else {
-        (BTreeSet::new(), BTreeSet::new())
-    };
-    let ledger = &ledger_blobs;
+    let git_dir = git_dir(&dest)?;
 
     let mut store = open_store()?;
-    let no_refs = store.gc_mode() == GcMode::MarkSweepNoRefs;
-
-    // Ticket 07: make sure the store mirror exists before anything
-    // destructive happens. A missing mirror with a live sidecar is
-    // repaired here ("the next wt create or wt remove rewrites the
-    // mirror"), so even a crash right after this point leaves a
-    // correct root behind. Ticket 08: the repair carries BOTH record
-    // types — file records mark blobs directly, snapshot records mark
-    // through their manifests.
-    if (!ledger.is_empty() || !ledger_snapshots.is_empty())
-        && store.mirror_is_missing(&dest, &git_dir)?
-    {
-        let ids: Vec<ContentId> = ledger
-            .iter()
-            .map(|hex| {
-                ContentId::from_hex(hex)
-                    .ok_or_else(|| Error::Store(format!("malformed content id in ledger: {hex}")))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let snaps: Vec<ContentId> = ledger_snapshots
-            .iter()
-            .map(|hex| {
-                ContentId::from_hex(hex)
-                    .ok_or_else(|| Error::Store(format!("malformed content id in ledger: {hex}")))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        store.publish_worktree_mirror(&dest, &git_dir, ids.iter(), snaps.iter(), None, None)?;
-    }
 
     let mut diagnostics = Vec::new();
     if let Some(diag) = crate::base::check_worktree_base_movement(&store, &root, &dest, &git_dir) {
@@ -239,48 +156,28 @@ pub fn remove(
         diagnostics.push(diag);
     }
 
-    let mut released = 0usize;
-    if !ledger_blobs.is_empty() && !no_refs {
-        for hex in &ledger_blobs {
-            let id = ContentId::from_hex(hex)
-                .ok_or_else(|| Error::Store(format!("malformed content id in ledger: {hex}")))?;
-            match Store::release_ref(&mut store, &id) {
-                Ok(()) => released += 1,
-                Err(wt_store::Error::RefCountUnderflow(_)) => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-    }
-
-    let mirror_removed = !ledger_blobs.is_empty() || !ledger_snapshots.is_empty();
-    if mirror_removed {
-        fs::remove_file(git_dir.join("wt-hydrated.tsv")).map_err(|e| {
-            Error::io_unanchored("remove ledger", git_dir.join("wt-hydrated.tsv"), e)
-        })?;
-        // Retire the mirror now that both the sidecar and the
-        // worktree are going away.
-        store.remove_worktree_mirror(&dest, &git_dir)?;
-    }
-
-    gitops::run(&root, &["worktree", "remove", &dest.to_string_lossy()]).map_err(|e| {
-        Error::Git(format!(
-            "git worktree remove failed (references already released): {e}"
-        ))
-    })?;
+    let cleaner = GitWorkspaceCleaner;
+    let mut reclaimer = StoreReclaimer::new(&mut store, &cleaner);
+    let receipt = reclaimer.retire_worktree(&dest, &git_dir)?;
 
     if !cfg.json {
         println!(
-            "removed worktree {}; released {released} reference{}",
+            "removed worktree {}; released {} reference{}",
             dest.display(),
-            if released == 1 { "" } else { "s" }
+            receipt.references_released,
+            if receipt.references_released == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
     }
 
     let data = RemoveData {
         worktree_path: dest.display().to_string(),
         branch: name.to_string(),
-        references_released: released,
-        mirror_removed,
+        references_released: receipt.references_released,
+        mirror_removed: receipt.mirror_removed,
     };
 
     Ok((data, diagnostics))
@@ -302,39 +199,6 @@ fn dir_size(path: &Path) -> u64 {
     total
 }
 
-fn find_repo_root_from_gitdir(gitdir: &Path) -> Option<PathBuf> {
-    if gitdir.exists() {
-        let commondir = gitdir.join("commondir");
-        if let Ok(rel) = fs::read_to_string(&commondir) {
-            let mgd = gitdir.join(rel.trim());
-            if let Ok(canon) = mgd.canonicalize() {
-                if canon.file_name() == Some(std::ffi::OsStr::new(".git")) {
-                    if let Some(parent) = canon.parent() {
-                        return Some(parent.to_path_buf());
-                    }
-                }
-                return Some(canon);
-            }
-        }
-    }
-
-    if let Some(parent) = gitdir.parent() {
-        if parent.file_name() == Some(std::ffi::OsStr::new("worktrees")) {
-            if let Some(git_parent) = parent.parent() {
-                if git_parent.file_name() == Some(std::ffi::OsStr::new(".git")) {
-                    if let Some(repo) = git_parent.parent() {
-                        if repo.is_dir() {
-                            return Some(repo.to_path_buf());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
 /// Git-based workspace cleaner adapter for `wt-store::StoreReclaimer`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GitWorkspaceCleaner;
@@ -350,22 +214,14 @@ impl WorkspaceCleaner for GitWorkspaceCleaner {
         gitdir: &Path,
         branch_name: &str,
     ) -> std::io::Result<()> {
-        let repo_root = find_repo_root_from_gitdir(gitdir);
+        let repo_root = repo_root_from_gitdir(gitdir);
         if let Some(ref r_root) = repo_root {
+            let engine = WorkspaceEngine::from_root(r_root.clone());
             if worktree.exists() {
-                let _ = std::process::Command::new("git")
-                    .args(["worktree", "remove", "--force", &worktree.to_string_lossy()])
-                    .current_dir(r_root)
-                    .output();
+                let _ = engine.git(&["worktree", "remove", "--force", &worktree.to_string_lossy()]);
             }
-            let _ = std::process::Command::new("git")
-                .args(["worktree", "prune"])
-                .current_dir(r_root)
-                .output();
-            let _ = std::process::Command::new("git")
-                .args(["branch", "-D", branch_name])
-                .current_dir(r_root)
-                .output();
+            let _ = engine.git(&["worktree", "prune"]);
+            let _ = engine.delete_branch(branch_name);
         }
 
         if worktree.exists() {
@@ -376,6 +232,37 @@ impl WorkspaceCleaner for GitWorkspaceCleaner {
             let _ = fs::remove_dir_all(gitdir);
         }
 
+        Ok(())
+    }
+
+    fn remove_worktree(&self, worktree: &Path) -> std::io::Result<()> {
+        let dot_git = worktree.join(".git");
+        let gitdir = if dot_git.is_file() {
+            if let Ok(content) = fs::read_to_string(&dot_git) {
+                content
+                    .strip_prefix("gitdir: ")
+                    .map(|s| PathBuf::from(s.trim()))
+            } else {
+                None
+            }
+        } else if dot_git.is_dir() {
+            Some(dot_git)
+        } else {
+            None
+        };
+
+        if let Some(gitdir) = gitdir {
+            if let Some(root) = repo_root_from_gitdir(&gitdir) {
+                let engine = WorkspaceEngine::from_root(root);
+                let _ = engine.remove_worktree(worktree);
+            }
+        } else if let Some(parent) = worktree.parent() {
+            let engine = WorkspaceEngine::from_root(parent.to_path_buf());
+            let _ = engine.remove_worktree(worktree);
+        }
+        if worktree.exists() {
+            let _ = fs::remove_dir_all(worktree);
+        }
         Ok(())
     }
 }

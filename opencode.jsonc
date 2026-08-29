@@ -1,6 +1,18 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "permissions": [
-    { "action": "*", "resource": "*", "effect": "allow" }
-  ]
+  "permission": {
+    "*": "allow",
+    "bash": {
+      "*": "allow",
+      "rm -rf /*": "deny",
+      "rm -rf ~*": "deny"
+    },
+    "external_directory": {
+      "/tmp/*": "allow",
+      "/private/tmp/*": "allow",
+      "/var/folders/*": "allow",
+      "/private/var/folders/*": "allow",
+      "~/.cache/*": "allow"
+    }
+  }
 }

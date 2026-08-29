@@ -1,7 +1,7 @@
 //! Base branch tracking and movement diagnostics (ticket 02).
 
 use crate::envelope::Diagnostic;
-use crate::gitops;
+use crate::workspace;
 use std::path::Path;
 use wt_store::DiskStore;
 
@@ -15,10 +15,10 @@ pub fn check_base_movement(
     let mut diagnostics = Vec::new();
 
     // 1. Check the current worktree itself (if we are in a linked worktree with a mirror)
-    if let Ok(git_dir) = gitops::git_dir(repo_root) {
+    if let Ok(git_dir) = workspace::git_dir(repo_root) {
         if let Ok(Some(m)) = store.read_worktree_mirror(repo_root, &git_dir) {
             if let (Some(base_branch), Some(base_commit)) = (&m.base_branch, &m.base_commit) {
-                if let Ok(current_commit) = gitops::resolve_commit(repo_root, base_branch) {
+                if let Ok(current_commit) = workspace::resolve_commit(repo_root, base_branch) {
                     if current_commit != *base_commit {
                         diagnostics.push(Diagnostic::warning(
                             "BASE_BRANCH_MOVED",
@@ -53,7 +53,9 @@ pub fn check_base_movement(
                     if let (Some(parent_base), Some(parent_commit)) =
                         (&m.base_branch, &m.base_commit)
                     {
-                        if let Ok(current_commit) = gitops::resolve_commit(repo_root, parent_base) {
+                        if let Ok(current_commit) =
+                            workspace::resolve_commit(repo_root, parent_base)
+                        {
                             if current_commit != *parent_commit {
                                 let diag = Diagnostic::warning(
                                     "BASE_BRANCH_MOVED",
@@ -84,7 +86,7 @@ pub fn check_worktree_base_movement(
 ) -> Option<Diagnostic> {
     if let Ok(Some(m)) = store.read_worktree_mirror(worktree, git_dir) {
         if let (Some(base_branch), Some(base_commit)) = (&m.base_branch, &m.base_commit) {
-            if let Ok(current_commit) = gitops::resolve_commit(repo_root, base_branch) {
+            if let Ok(current_commit) = workspace::resolve_commit(repo_root, base_branch) {
                 if current_commit != *base_commit {
                     return Some(Diagnostic::warning(
                         "BASE_BRANCH_MOVED",
@@ -149,7 +151,7 @@ mod tests {
                 "main",
             ],
         );
-        let git_dir = gitops::git_dir(&worktree).unwrap();
+        let git_dir = workspace::git_dir(&worktree).unwrap();
 
         let store = DiskStore::open(&store_dir).unwrap();
         store
@@ -180,7 +182,7 @@ mod tests {
         assert_eq!(mirror.base_branch.as_deref(), Some("main"));
         assert_eq!(mirror.base_commit.as_deref(), Some(c1.as_str()));
 
-        let resolved = gitops::resolve_commit(&repo, "main").unwrap();
+        let resolved = workspace::resolve_commit(&repo, "main").unwrap();
         assert_eq!(resolved, c2);
 
         // Now movement is detected

@@ -27,9 +27,19 @@ class Wt < Formula
 
   def install
     bin.install "wt"
+
+    # Generate completions from the binary being installed so the
+    # tarball never has to ship completion artifacts.
+    bash_output = Utils.safe_popen_read("#{bin}/wt", "completions", "bash")
+    (bash_completion/"wt").write bash_output
+    zsh_output = Utils.safe_popen_read("#{bin}/wt", "completions", "zsh")
+    (zsh_completion/"_wt").write zsh_output
+    fish_output = Utils.safe_popen_read("#{bin}/wt", "completions", "fish")
+    (fish_completion/"wt.fish").write fish_output
   end
 
   test do
     assert_match version.to_s, shell_output("#{bin}/wt --version")
+    assert_match "wt", shell_output("#{bin}/wt completions bash")
   end
 end

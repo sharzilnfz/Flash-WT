@@ -191,6 +191,14 @@ snapshot hits entirely and rebuilds from freshly hashed blobs.")]
     Demo,
     /// Alias for `wt demo`.
     TestDrive,
+    /// Generate a shell completion script for the given shell.
+    /// Source the output (or drop it in a completion directory) to
+    /// enable tab-completion of subcommands and flags.
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 impl WtCommand {
@@ -209,6 +217,7 @@ impl WtCommand {
             WtCommand::List => "list",
             WtCommand::Demo => "demo",
             WtCommand::TestDrive => "test-drive",
+            WtCommand::Completions { .. } => "completions",
         }
     }
 }

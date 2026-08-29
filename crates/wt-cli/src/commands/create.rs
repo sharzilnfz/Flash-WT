@@ -8,42 +8,11 @@ use std::time::Instant;
 use crate::config::RunConfig;
 use crate::envelope::{CreateData, Diagnostic};
 use crate::error::{Error, Result};
-use crate::gitops;
 use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
 use crate::manifest::{self, LoadedPatterns, load_patterns};
+use crate::output::{HumanBytes, HumanCount};
 use crate::timing::StageTimings;
-
-fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-fn format_count(n: usize) -> String {
-    if n >= 10_000 {
-        let s = n.to_string();
-        let mut out = String::new();
-        for (i, c) in s.chars().rev().enumerate() {
-            if i > 0 && i % 3 == 0 {
-                out.push(',');
-            }
-            out.push(c);
-        }
-        format!("{} files", out.chars().rev().collect::<String>())
-    } else {
-        format!("{n} files")
-    }
-}
+use crate::workspace::WorkspaceEngine;
 
 pub fn run(
     name: &str,
@@ -62,10 +31,11 @@ fn create(
     dir: Option<&Path>,
     cfg: &RunConfig,
 ) -> Result<(CreateData, Vec<Diagnostic>)> {
-    let root = gitops::repo_root()?;
+    let engine = WorkspaceEngine::discover()?;
+    let root = engine.root().to_path_buf();
     let dest = match dir {
         Some(d) => d.to_path_buf(),
-        None => gitops::default_worktree_dest(&root, name)?,
+        None => engine.default_dest(name)?,
     };
     if dest.exists() {
         return Err(Error::Usage(format!("{} already exists", dest.display())));
@@ -76,19 +46,12 @@ fn create(
     let started = Instant::now();
     let start_point = base.unwrap_or("HEAD");
     let base_commit = if let Some(base_ref) = base {
-        Some(gitops::resolve_commit(&root, base_ref)?)
+        Some(engine.resolve_commit(base_ref)?)
     } else {
         None
     };
 
-    // Prefer creating the branch from start_point; an existing branch falls
-    // back to checking it out directly.
-    let dest_text = dest.to_string_lossy().into_owned();
-    gitops::run(
-        &root,
-        &["worktree", "add", "-b", name, &dest_text, start_point],
-    )
-    .or_else(|_| gitops::run(&root, &["worktree", "add", &dest_text, name]))?;
+    engine.create_worktree(name, &dest, start_point)?;
     timings.git_worktree_ms = started.elapsed().as_millis();
 
     if !cfg.json {
@@ -136,9 +99,9 @@ fn create(
         println!("✓ Created worktree {} ({name})", dest.display());
         if report.total_files > 0 {
             println!(
-                "✓ Hydrated {} ({}) via {} in {} ms",
-                format_count(report.total_files),
-                format_bytes(total_bytes),
+                "✓ Hydrated {} files ({}) via {} in {} ms",
+                HumanCount(report.total_files),
+                HumanBytes(total_bytes),
                 report.hydration_method,
                 total_ms
             );
@@ -148,7 +111,10 @@ fn create(
                 println!("  Next: cd {}", rel.display());
             } else if let Some(parent) = dest.parent() {
                 if parent == curr.parent().unwrap_or(&curr) {
-                    println!("  Next: cd ../{}", dest.file_name().unwrap_or_default().to_string_lossy());
+                    println!(
+                        "  Next: cd ../{}",
+                        dest.file_name().unwrap_or_default().to_string_lossy()
+                    );
                 } else {
                     println!("  Next: cd {}", dest.display());
                 }

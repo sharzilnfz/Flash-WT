@@ -10,24 +10,8 @@ use crate::config::RunConfig;
 use crate::envelope::{CleanData, Diagnostic};
 use crate::error::{Error, Result};
 use crate::gc;
-use crate::gitops;
-
-/// Format bytes into human-readable unit (e.g. `1.2 MB`, `450 KB`).
-fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
+use crate::output::HumanBytes;
+use crate::workspace::WorkspaceEngine;
 
 /// A discovered worktree candidate for cleanup.
 #[derive(Debug, Clone)]
@@ -46,19 +30,19 @@ pub fn run(
     age: Option<Duration>,
     cfg: &RunConfig,
 ) -> Result<(CleanData, Vec<Diagnostic>)> {
-    let root = gitops::repo_root()?;
+    let engine = WorkspaceEngine::discover()?;
 
     // Single worktree targeted cleanup
     if let Some(branch_name) = name {
-        return clean_single_worktree(&root, branch_name, dir, age, cfg);
+        return clean_single_worktree(&engine, branch_name, dir, age, cfg);
     }
 
     // Interactive or batch cleanup
-    clean_batch_worktrees(&root, all, force, age, cfg)
+    clean_batch_worktrees(&engine, all, force, age, cfg)
 }
 
 fn clean_single_worktree(
-    root: &Path,
+    engine: &WorkspaceEngine,
     name: &str,
     dir: Option<&Path>,
     age: Option<Duration>,
@@ -66,7 +50,7 @@ fn clean_single_worktree(
 ) -> Result<(CleanData, Vec<Diagnostic>)> {
     let dest = match dir {
         Some(d) => d.to_path_buf(),
-        None => gitops::default_worktree_dest(root, name)?,
+        None => engine.default_dest(name)?,
     };
 
     let mut diagnostics = Vec::new();
@@ -77,11 +61,7 @@ fn clean_single_worktree(
     diagnostics.append(&mut rm_diags);
 
     // If directory still exists on disk, remove git worktree tracking
-    let dest_text = dest.to_string_lossy().into_owned();
-    if dest.exists() {
-        let _ = gitops::run(root, &["worktree", "remove", "--force", &dest_text])
-            .or_else(|_| gitops::run(root, &["worktree", "remove", &dest_text]));
-    }
+    engine.remove_worktree_lenient(&dest);
 
     // Automatically invoke GC sweep to reclaim unreferenced blobs/snapshots
     let (sweep_data, mut sw_diags) = gc::sweep(age, &silent_cfg)?;
@@ -97,7 +77,7 @@ fn clean_single_worktree(
         if sweep_data.reclaimed > 0 || reclaimed_bytes > 0 {
             println!(
                 "✓ Reclaimed {} disk space ({} store objects swept)",
-                format_bytes(reclaimed_bytes),
+                HumanBytes(reclaimed_bytes),
                 sweep_data.reclaimed
             );
         } else {
@@ -118,23 +98,16 @@ fn clean_single_worktree(
     Ok((data, diagnostics))
 }
 
-fn discover_candidates(root: &Path) -> Result<Vec<CleanCandidate>> {
-    let porcelain = gitops::run(root, &["worktree", "list", "--porcelain"])?;
-    let raw_worktrees = crate::commands::list::parse_git_worktrees(&porcelain);
-
+fn discover_candidates(engine: &WorkspaceEngine) -> Result<Vec<CleanCandidate>> {
     let mut candidates = Vec::new();
     let mut is_first = true;
 
-    for wt in raw_worktrees {
-        let branch = wt.branch.clone().unwrap_or_default();
-        let is_merged = if !branch.is_empty() {
-            gitops::run(root, &["merge-base", "--is-ancestor", &branch, "HEAD"]).is_ok()
-        } else {
-            false
-        };
+    for md in engine.worktree_metadata()? {
+        let branch = md.raw.branch.clone().unwrap_or_default();
+        let is_merged = engine.is_branch_merged(&branch);
 
         candidates.push(CleanCandidate {
-            path: wt.path,
+            path: md.raw.path,
             branch,
             is_merged,
             is_main: is_first,
@@ -146,17 +119,16 @@ fn discover_candidates(root: &Path) -> Result<Vec<CleanCandidate>> {
 }
 
 fn clean_batch_worktrees(
-    root: &Path,
+    engine: &WorkspaceEngine,
     all: bool,
     force: bool,
     age: Option<Duration>,
     cfg: &RunConfig,
 ) -> Result<(CleanData, Vec<Diagnostic>)> {
-    let all_candidates = discover_candidates(root)?;
-    let candidates: Vec<CleanCandidate> = all_candidates
-        .into_iter()
-        .filter(|c| !c.is_main)
-        .collect();
+    let root = engine.root();
+    let all_candidates = discover_candidates(engine)?;
+    let candidates: Vec<CleanCandidate> =
+        all_candidates.into_iter().filter(|c| !c.is_main).collect();
 
     if candidates.is_empty() {
         if !cfg.json {
@@ -188,14 +160,28 @@ fn clean_batch_worktrees(
                 "[unmerged changes/commits]"
             };
             let check = if c.is_merged { "[x]" } else { "[ ]" };
-            println!("  {} {}. {} ({}) {}", check, i + 1, c.path.display(), c.branch, status);
+            println!(
+                "  {} {}. {} ({}) {}",
+                check,
+                i + 1,
+                c.path.display(),
+                c.branch,
+                status
+            );
         }
-        print!("\nEnter worktree numbers to delete (e.g. '1,2', 'all', Enter for pre-selected [x], 'q' to cancel): ");
-        io::stdout().flush().map_err(|e| Error::io("flush stdout", root, e))?;
+        print!(
+            "\nEnter worktree numbers to delete (e.g. '1,2', 'all', Enter for pre-selected [x], 'q' to cancel): "
+        );
+        io::stdout()
+            .flush()
+            .map_err(|e| Error::io("flush stdout", root, e))?;
 
         let mut input = String::new();
         let stdin = io::stdin();
-        stdin.lock().read_line(&mut input).map_err(|e| Error::io("read stdin", root, e))?;
+        stdin
+            .lock()
+            .read_line(&mut input)
+            .map_err(|e| Error::io("read stdin", root, e))?;
         let trimmed = input.trim().to_lowercase();
 
         if trimmed == "q" || trimmed == "quit" || trimmed == "n" || trimmed == "no" {
@@ -240,7 +226,9 @@ fn clean_batch_worktrees(
         let merged: Vec<_> = candidates.into_iter().filter(|c| c.is_merged).collect();
         if merged.is_empty() && !force {
             if !cfg.json {
-                println!("No merged worktrees found to clean. Use 'wt clean <name>' or 'wt clean --all'.");
+                println!(
+                    "No merged worktrees found to clean. Use 'wt clean <name>' or 'wt clean --all'."
+                );
             }
             return Ok((
                 CleanData {
@@ -286,7 +274,9 @@ fn clean_batch_worktrees(
     silent_cfg.json = true;
 
     for candidate in &selected_candidates {
-        if let Ok((rm_data, mut rm_diags)) = gc::remove(&candidate.branch, Some(&candidate.path), &silent_cfg) {
+        if let Ok((rm_data, mut rm_diags)) =
+            gc::remove(&candidate.branch, Some(&candidate.path), &silent_cfg)
+        {
             diagnostics.append(&mut rm_diags);
             references_released += rm_data.references_released;
             if rm_data.mirror_removed {
@@ -294,15 +284,17 @@ fn clean_batch_worktrees(
             }
         }
 
-        let path_text = candidate.path.to_string_lossy().into_owned();
-        let _ = gitops::run(root, &["worktree", "remove", "--force", &path_text])
-            .or_else(|_| gitops::run(root, &["worktree", "remove", &path_text]));
+        engine.remove_worktree_lenient(&candidate.path);
 
         removed_worktrees.push(candidate.path.display().to_string());
         branches_removed.push(candidate.branch.clone());
 
         if !cfg.json {
-            println!("✓ Removed worktree {} ({})", candidate.path.display(), candidate.branch);
+            println!(
+                "✓ Removed worktree {} ({})",
+                candidate.path.display(),
+                candidate.branch
+            );
         }
     }
 
@@ -319,7 +311,7 @@ fn clean_batch_worktrees(
         if sweep_data.reclaimed > 0 || reclaimed_bytes > 0 {
             println!(
                 "✓ Reclaimed {} disk space ({} store objects swept)",
-                format_bytes(reclaimed_bytes),
+                HumanBytes(reclaimed_bytes),
                 sweep_data.reclaimed
             );
         }

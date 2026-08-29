@@ -108,6 +108,101 @@ fn c_path(path: &Path) -> io::Result<CString> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL byte"))
 }
 
+/// Resolve the closest existing path by walking up ancestor directories if `path` does not exist.
+pub(crate) fn find_existing_ancestor(path: &Path) -> &Path {
+    if path.as_os_str().is_empty() {
+        return Path::new(".");
+    }
+    let mut current = path;
+    while !current.exists() {
+        if let Some(parent) = current.parent() {
+            if parent.as_os_str().is_empty() {
+                return Path::new(".");
+            }
+            current = parent;
+        } else {
+            return Path::new(".");
+        }
+    }
+    current
+}
+
+/// Resolve the device ID (`st_dev`) of `path`, falling back to its nearest existing ancestor.
+pub(crate) fn probe_device_id(path: &Path) -> io::Result<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let existing = find_existing_ancestor(path);
+        let meta = std::fs::metadata(existing)?;
+        Ok(meta.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(0)
+    }
+}
+
+/// True if `src` and `dest` reside on different filesystem devices.
+pub(crate) fn is_cross_device(src: &Path, dest: &Path) -> bool {
+    match (probe_device_id(src), probe_device_id(dest)) {
+        (Ok(src_dev), Ok(dest_dev)) => src_dev != dest_dev,
+        _ => false,
+    }
+}
+
+/// Probe reflink and ext4 capabilities for the filesystem holding `path`.
+pub(crate) fn probe_fs_capabilities(path: &Path) -> (bool, bool) {
+    let existing = find_existing_ancestor(path);
+    let Ok(st) = statfs_of(existing) else {
+        return (false, false);
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CStr;
+        let fstype = unsafe { CStr::from_ptr(st.f_fstypename.as_ptr()) };
+        let is_apfs = fstype.to_string_lossy().eq_ignore_ascii_case("apfs");
+        (is_apfs, false)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let f_type = st.f_type as libc::c_long;
+        let is_reflink = f_type == (libc::BTRFS_SUPER_MAGIC as libc::c_long)
+            || f_type == (libc::XFS_SUPER_MAGIC as libc::c_long);
+        let is_ext4 = f_type == (libc::EXT4_SUPER_MAGIC as libc::c_long);
+        (is_reflink, is_ext4)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = st;
+        (false, false)
+    }
+}
+
+/// Recursively count regular files and total file size in bytes under `dir`.
+pub(crate) fn count_files_and_bytes(dir: &Path) -> io::Result<(u64, u64)> {
+    use std::fs;
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        for entry in fs::read_dir(&path)? {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                files += 1;
+                bytes += entry.metadata()?.len();
+            }
+        }
+    }
+    Ok((files, bytes))
+}
+
 // Tests assert with unwrap/expect by design: a panic IS the failure
 // signal under test, so the workspace restriction lints stay off here.
 #[allow(clippy::unwrap_used, clippy::expect_used)]

@@ -65,6 +65,41 @@ pub enum SnapshotOutcome {
     Failed(String),
 }
 
+/// Request parameters for whole-directory snapshot projection.
+#[derive(Debug, Clone)]
+pub struct SnapshotProjectionRequest<'a> {
+    /// Directory paths relative to the heavy root.
+    pub dirs: &'a [String],
+    /// Explicit permissions for directories.
+    pub dir_modes: &'a BTreeMap<String, u32>,
+    /// Content addressed file table.
+    pub files: &'a BTreeMap<String, ContentId>,
+    /// Size of each file in bytes.
+    pub file_sizes: &'a BTreeMap<String, u64>,
+    /// Symbolic links relative to the heavy root.
+    pub symlinks: &'a BTreeMap<String, String>,
+    /// Explicit permissions for regular files.
+    pub modes: &'a BTreeMap<String, u32>,
+    /// Root directory of the source repository.
+    pub repo_root: &'a Path,
+    /// Inclusion pattern string for this heavy tree.
+    pub pattern: &'a str,
+    /// Source checkout root.
+    pub src_root: &'a Path,
+    /// Relative path to the heavy directory.
+    pub heavy_rel: &'a str,
+    /// Destination worktree path.
+    pub dest_root: &'a Path,
+    /// Optional SHA-256 hash of the pinned lockfile.
+    pub lockfile_hash: Option<&'a ContentId>,
+    /// Whether verification should bypass index hits.
+    pub verify: bool,
+    /// Whether snapshot projection is enabled.
+    pub snapshots_enabled: bool,
+    /// Whether v2 incremental snapshot rebuilds are enabled.
+    pub v2_enabled: bool,
+}
+
 /// Projection engine for whole-directory snapshot hydration.
 pub struct SnapshotProjectionEngine;
 
@@ -119,64 +154,14 @@ impl SnapshotProjectionEngine {
     /// `repo_root` and `pattern` key the v2 selection index. `verify`
     /// bypasses hits; v2 incremental rebuilds require `snapshots_enabled`
     /// and `v2_enabled`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn hydrate(
-        store: &mut DiskStore,
-        dirs: &[String],
-        _dir_modes: &BTreeMap<String, u32>,
-        files: &BTreeMap<String, ContentId>,
-        file_sizes: &BTreeMap<String, u64>,
-        symlinks: &BTreeMap<String, String>,
-        modes: &BTreeMap<String, u32>,
-        repo_root: &Path,
-        pattern: &str,
-        src_root: &Path,
-        heavy_rel: &str,
-        dest_root: &Path,
-        lockfile_hash: Option<&ContentId>,
-        verify: bool,
-        snapshots_enabled: bool,
-        v2_enabled: bool,
-    ) -> SnapshotOutcome {
+    pub fn hydrate(store: &mut DiskStore, req: &SnapshotProjectionRequest<'_>) -> SnapshotOutcome {
         #[cfg(target_os = "macos")]
         {
-            hydrate_impl(
-                store,
-                dirs,
-                files,
-                file_sizes,
-                symlinks,
-                modes,
-                repo_root,
-                pattern,
-                src_root,
-                heavy_rel,
-                dest_root,
-                lockfile_hash,
-                verify,
-                snapshots_enabled,
-                v2_enabled,
-            )
+            hydrate_impl(store, req)
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (
-                store,
-                dirs,
-                files,
-                file_sizes,
-                symlinks,
-                modes,
-                repo_root,
-                pattern,
-                src_root,
-                heavy_rel,
-                dest_root,
-                lockfile_hash,
-                verify,
-                snapshots_enabled,
-                v2_enabled,
-            );
+            let _ = (store, req);
             SnapshotOutcome::FellBack(None)
         }
     }
@@ -281,57 +266,42 @@ fn try_lockfile_hit_impl(
 }
 
 #[cfg(target_os = "macos")]
-#[allow(clippy::too_many_arguments)]
-fn hydrate_impl(
-    store: &mut DiskStore,
-    dirs: &[String],
-    files: &BTreeMap<String, ContentId>,
-    file_sizes: &BTreeMap<String, u64>,
-    symlinks: &BTreeMap<String, String>,
-    modes: &BTreeMap<String, u32>,
-    repo_root: &Path,
-    pattern: &str,
-    src_root: &Path,
-    heavy_rel: &str,
-    dest_root: &Path,
-    lockfile_hash: Option<&ContentId>,
-    verify: bool,
-    snapshots_enabled: bool,
-    v2_enabled: bool,
-) -> SnapshotOutcome {
-    if !snapshots_enabled {
+fn hydrate_impl(store: &mut DiskStore, req: &SnapshotProjectionRequest<'_>) -> SnapshotOutcome {
+    if !req.snapshots_enabled {
         return SnapshotOutcome::FellBack(None);
     }
-    let paranoid = verify;
+    let paranoid = req.verify;
     let backend = ClonefileBackend;
     // Gate is a no-op on filesystems without recursive clone support.
-    if !backend.supports(dest_root) {
+    if !backend.supports(req.dest_root) {
         return SnapshotOutcome::FellBack(None);
     }
     // v2 needs the same APFS substrate PLUS its own env gate.
-    let v2 = snapshots_enabled && v2_enabled;
-    let repo_key = repo_root.to_string_lossy().into_owned();
+    let v2 = req.snapshots_enabled && req.v2_enabled;
+    let repo_key = req.repo_root.to_string_lossy().into_owned();
 
-    let entries = match manifest_entries(dirs, files, symlinks, modes, heavy_rel) {
-        Ok(entries) => entries,
-        Err(msg) => return SnapshotOutcome::Failed(msg),
-    };
+    let entries =
+        match manifest_entries(req.dirs, req.files, req.symlinks, req.modes, req.heavy_rel) {
+            Ok(entries) => entries,
+            Err(msg) => return SnapshotOutcome::Failed(msg),
+        };
     let mut unique_blobs = std::collections::BTreeMap::new();
-    for (rel, id) in files {
-        if let Some(&size) = file_sizes.get(rel) {
+    for (rel, id) in req.files {
+        if let Some(&size) = req.file_sizes.get(rel) {
             unique_blobs.entry(*id).or_insert(size);
         }
     }
     let total_size: u64 = unique_blobs.values().sum();
     let manifest =
-        match Manifest::new_with_lockfile_and_size(entries, lockfile_hash.copied(), total_size) {
+        match Manifest::new_with_lockfile_and_size(entries, req.lockfile_hash.copied(), total_size)
+        {
             Ok(m) => m,
             Err(msg) => {
                 return SnapshotOutcome::Failed(format!("cannot build snapshot manifest: {msg}"));
             }
         };
 
-    let dest_heavy = dest_root.join(heavy_rel);
+    let dest_heavy = req.dest_root.join(req.heavy_rel);
 
     let mut lookup_ms = 0u128;
     let mut clonefile_ms = 0u128;
@@ -351,8 +321,8 @@ fn hydrate_impl(
                     let _ = crate::record_snapshot_hit(
                         store.root(),
                         &repo_key,
-                        pattern,
-                        heavy_rel,
+                        req.pattern,
+                        req.heavy_rel,
                         &manifest.hash,
                     );
                 } else {
@@ -369,7 +339,7 @@ fn hydrate_impl(
                     Ok(()) => {
                         return SnapshotOutcome::Hydrated(SnapshotHydration {
                             hash: manifest.hash,
-                            files: files.len(),
+                            files: req.files.len(),
                             mode: "hit",
                             cloned_units: 0,
                             linked_files: 0,
@@ -392,14 +362,27 @@ fn hydrate_impl(
         let mut incremental: Option<(usize, usize)> = None;
         if v2 {
             incremental = try_incremental(
-                store, &manifest, &repo_key, pattern, heavy_rel, paranoid, &mut build,
+                store,
+                &manifest,
+                &repo_key,
+                req.pattern,
+                req.heavy_rel,
+                paranoid,
+                &mut build,
             );
         }
 
         if incremental.is_none() {
             // FULL BUILD + publish, healing at most one swept-away
             // blob per plan's link(2)-ENOENT backstop.
-            match ensure_published(store, files, src_root, &manifest, paranoid, &mut build) {
+            match ensure_published(
+                store,
+                req.files,
+                req.src_root,
+                &manifest,
+                paranoid,
+                &mut build,
+            ) {
                 Ok(PublishOutcome::Published | PublishOutcome::WinnerValid) => {}
                 Ok(PublishOutcome::WinnerInvalid) => {
                     // Debris sits on our final name; never overwrite what
@@ -419,8 +402,8 @@ fn hydrate_impl(
             let _ = crate::record_snapshot_publish(
                 store.root(),
                 &repo_key,
-                pattern,
-                heavy_rel,
+                req.pattern,
+                req.heavy_rel,
                 &manifest.hash,
             );
         } else {
@@ -440,7 +423,7 @@ fn hydrate_impl(
                 let (cloned_units, linked_files) = incremental.unwrap_or((0, 0));
                 return SnapshotOutcome::Hydrated(SnapshotHydration {
                     hash: manifest.hash,
-                    files: files.len(),
+                    files: req.files.len(),
                     mode: if incremental.is_some() { "v2" } else { "build" },
                     cloned_units,
                     linked_files,
@@ -517,7 +500,10 @@ fn finish_clone(
 ) -> Result<(), CloneFailure> {
     if let Some(parent) = dest_heavy.parent() {
         fs::create_dir_all(parent).map_err(|e| {
-            CloneFailure::Fatal(format!("cannot create parent dirs for {}: {e}", dest_heavy.display()))
+            CloneFailure::Fatal(format!(
+                "cannot create parent dirs for {}: {e}",
+                dest_heavy.display()
+            ))
         })?;
     }
 
