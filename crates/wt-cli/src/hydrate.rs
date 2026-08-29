@@ -33,14 +33,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use wt_copy::Materializer;
-#[cfg(target_os = "macos")]
-use wt_store::bulkwalk;
-use wt_store::{ContentId, DiskStore, Entry as CacheEntry, GcMode, Store, ValidationCache};
+use wt_store::{ContentId, DiskStore, GcMode, IngestOptions, Store};
 
 use crate::config::{RunConfig, StrategyPolicy};
 use crate::envelope::Diagnostic;
@@ -50,6 +48,8 @@ use crate::manifest::{collect_matches, pattern_matches};
 use crate::snapshots;
 use crate::snapshots::Outcome as SnapshotOutcome;
 use crate::timing::StageTimings;
+
+pub use wt_store::Ingested;
 
 /// Where the per-machine store lives. `$WT_STORE` wins (tests use it
 /// for isolation); otherwise XDG cache conventions.
@@ -401,7 +401,17 @@ impl<'a> HydrationEngine<'a> {
         }
 
         let stage = Instant::now();
-        let ingested = ingest_dir(self.store, root, &src, cfg)?;
+        let ingested = self
+            .store
+            .ingest_tree(
+                root,
+                &src,
+                &IngestOptions {
+                    snapshots: cfg.snapshots,
+                    exclude: &|rel| crate::toolchain::is_volatile_cache(rel),
+                },
+            )
+            .map_err(|e| Error::Store(format!("ingest {}: {e}", src.display())))?;
         timings.ingest_ms += stage.elapsed().as_millis();
 
         if cfg.snapshots {
@@ -499,267 +509,6 @@ struct DirOutcome {
     ingested: Ingested,
     /// Per-file ladder placement report; `None` means snapshot served the directory.
     ladder: Option<MaterializeReport>,
-}
-
-/// Everything one heavy directory contributed to the store.
-pub struct Ingested {
-    /// Repo-relative directory paths to recreate even when empty.
-    pub dirs: Vec<String>,
-    /// Repo-relative directory path -> on-disk mode (`& 0o7777`).
-    /// Recorded on every ingest; materialize restores these bits
-    /// after placement, because `create_dir_all` normalizes new
-    /// directories through the process umask just like it once did
-    /// for files.
-    pub dir_modes: BTreeMap<String, u32>,
-    /// Repo-relative file path -> stored content address.
-    pub files: BTreeMap<String, ContentId>,
-    /// Repo-relative file path -> file size in bytes.
-    pub file_sizes: BTreeMap<String, u64>,
-    /// Repo-relative symlink path -> raw target (possibly dangling;
-    /// targets are never followed or stored as blobs). Recorded on
-    /// every ingest so both the fallback ladder and the snapshot
-    /// manifest can recreate the link verbatim.
-    pub symlinks: BTreeMap<String, String>,
-    /// Repo-relative file path -> on-disk mode (`& 0o7777`). Recorded
-    /// on every ingest; the fallback ladder restores it after
-    /// placement, the snapshot manifest consumes it too.
-    pub modes: BTreeMap<String, u32>,
-}
-
-/// Walk `src`, storing every regular file's bytes. Symlinks are never
-/// followed out of `src`; they are recorded with their raw targets
-/// (dangling ones included) so materialize can recreate them
-/// verbatim, and non-regular files are skipped — except under
-/// `WT_SNAPSHOTS=1`, where anything a manifest cannot represent fails
-/// loudly rather than silently vanishing from a snapshot.
-///
-/// Ticket 02: a validation cache beside the store remembers each
-/// path's size, mtime, and content id from the previous ingest. A
-/// file whose size AND mtime both still match is not read or hashed —
-/// its recorded blob is reused (checked against the store first, in
-/// case a sweep reclaimed it). Every other file goes through the
-/// normal read-and-hash path. The cache can only make runs cheaper,
-/// never wronger: materialize proves every blob before placing it
-/// (`ensure_verified`, ticket 05), so lying cached metadata fails
-/// loudly instead of landing bad bytes in a fresh tree.
-pub fn ingest_dir(
-    store: &mut DiskStore,
-    src_root: &Path,
-    src: &Path,
-    cfg: &RunConfig,
-) -> Result<Ingested> {
-    let snapshots = cfg.snapshots;
-    let mut ingested = Ingested {
-        dirs: Vec::new(),
-        dir_modes: BTreeMap::new(),
-        files: BTreeMap::new(),
-        file_sizes: BTreeMap::new(),
-        symlinks: BTreeMap::new(),
-        modes: BTreeMap::new(),
-    };
-    let mut cache = ValidationCache::open(store.root());
-
-    // macOS fast path (Step 0 follow-up): one getattrlistbulk per
-    // directory replaces readdir-plus-per-file-stat — at 40k files
-    // that is ~40k fewer syscalls. Only engaged with snapshots on,
-    // where every stat'd attribute is actually consumed; any failure
-    // silently falls back to the portable walk below.
-    #[cfg(target_os = "macos")]
-    let walked = if snapshots {
-        bulkwalk::walk(src).ok()
-    } else {
-        None
-    };
-    // Never constructed off macOS; the type exists only so the match
-    // below compiles unchanged.
-    #[cfg(not(target_os = "macos"))]
-    let walked: Option<std::convert::Infallible> = None;
-
-    match walked {
-        #[cfg(target_os = "macos")]
-        Some(entries) => {
-            // Bulk entries are relative to `src`; every consumer (and
-            // the legacy walk) speaks repo-relative paths, so prefix
-            // with the heavy directory's own repo-relative name.
-            let base = rel_text(src_root, src)?;
-            // The heavy root itself is a directory the manifest must
-            // carry (its clone replaces it wholesale on the snapshot
-            // path, but the per-file ladder recreates it).
-            let root_meta = fs::symlink_metadata(src).map_err(|e| Error::io("stat", src, e))?;
-            ingested
-                .dir_modes
-                .insert(base.clone(), root_meta.mode() & 0o7777);
-            ingested.dirs.push(base.clone());
-            for entry in entries {
-                let rel = if base.is_empty() {
-                    entry.rel_path.clone()
-                } else {
-                    format!("{base}/{}", entry.rel_path)
-                };
-                if crate::toolchain::is_volatile_cache(&rel) {
-                    continue;
-                }
-                let path = src.join(&entry.rel_path);
-                if entry.is_symlink {
-                    let target =
-                        fs::read_link(&path).map_err(|e| Error::io("read symlink", &path, e))?;
-                    ingested
-                        .symlinks
-                        .insert(rel, target.to_string_lossy().into_owned());
-                    continue;
-                }
-                if entry.is_dir {
-                    ingested.dir_modes.insert(rel.clone(), entry.mode & 0o7777);
-                    ingested.dirs.push(rel);
-                    continue;
-                }
-                if !entry.is_file {
-                    if snapshots {
-                        return Err(Error::Store(format!(
-                            "{} is not a regular file (fifos/sockets/devices are unsupported)",
-                            path.display()
-                        )));
-                    }
-                    continue;
-                }
-                if snapshots {
-                    ingested.modes.insert(rel.clone(), entry.mode & 0o7777);
-                }
-                let mtime = std::time::UNIX_EPOCH
-                    + std::time::Duration::new(entry.mtime_secs, entry.mtime_nanos);
-                let id = match cache.lookup(&rel, entry.size, mtime) {
-                    Some(id) if store.contains(&id) => id,
-                    _ => {
-                        let bytes = fs::read(&path).map_err(|e| Error::io("read", &path, e))?;
-                        let id = store.put(&bytes)?;
-                        cache.record(
-                            rel.clone(),
-                            CacheEntry {
-                                size: entry.size,
-                                mtime,
-                                id,
-                            },
-                        );
-                        id
-                    }
-                };
-                ingested.file_sizes.insert(rel.clone(), entry.size);
-                ingested.files.insert(rel, id);
-            }
-        }
-        None => ingest_dir_walk(store, &mut cache, &mut ingested, src_root, src, snapshots)?,
-    }
-
-    ingested.dirs.sort();
-    ingested.dirs.dedup();
-    cache
-        .save()
-        .map_err(|e| Error::io_unanchored("update ingest cache", store.root(), e))?;
-    Ok(ingested)
-}
-
-/// The portable read_dir+metadata walk: one `fs::metadata` per regular
-/// file on top of each directory's readdir. Also the fallback for the
-/// macOS bulk walker.
-fn ingest_dir_walk(
-    store: &mut DiskStore,
-    cache: &mut ValidationCache,
-    ingested: &mut Ingested,
-    src_root: &Path,
-    src: &Path,
-    snapshots: bool,
-) -> Result<()> {
-    let mut stack = vec![src.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let rel = rel_text(src_root, &dir)?;
-        if crate::toolchain::is_volatile_cache(&rel) {
-            continue;
-        }
-        let entries = fs::read_dir(&dir).map_err(|e| Error::io("read", &dir, e))?;
-        // One extra stat per DIRECTORY (not per file): its permission
-        // bits must survive hydration, since create_dir_all cannot
-        // carry them through the umask.
-        let dir_meta = fs::symlink_metadata(&dir).map_err(|e| Error::io("stat", &dir, e))?;
-        ingested
-            .dir_modes
-            .insert(rel.clone(), dir_meta.mode() & 0o7777);
-        ingested.dirs.push(rel);
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let rel = rel_text(src_root, &path)?;
-            if crate::toolchain::is_volatile_cache(&rel) {
-                continue;
-            }
-            let file_type = entry.file_type().map_err(|e| Error::io("stat", &path, e))?;
-            if file_type.is_symlink() {
-                // The raw target is what gets recorded, dangling or
-                // not: materialize recreates it verbatim via
-                // symlink(2), which never resolves the target. (With
-                // snapshots on the manifest consumes the same record.)
-                let target =
-                    fs::read_link(&path).map_err(|e| Error::io("read symlink", &path, e))?;
-                ingested.symlinks.insert(
-                    rel_text(src_root, &path)?,
-                    target.to_string_lossy().into_owned(),
-                );
-                continue;
-            }
-            if file_type.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if !file_type.is_file() {
-                // FIFOs, sockets, devices have no place in a snapshot:
-                // fail loudly before placement rather than silently
-                // dropping content the manifest cannot represent.
-                if snapshots {
-                    return Err(Error::Store(format!(
-                        "{} is not a regular file (fifos/sockets/devices are unsupported)",
-                        path.display()
-                    )));
-                }
-                continue;
-            }
-            let rel = rel_text(src_root, &path)?;
-            let meta = fs::metadata(&path).map_err(|e| Error::io("stat", &path, e))?;
-            ingested.modes.insert(rel.clone(), meta.mode() & 0o7777);
-            let size = meta.len();
-            let mtime = meta.modified().map_err(|e| Error::io("stat", &rel, e))?;
-            let id = match cache.lookup(&rel, size, mtime) {
-                // Cache hit: same size and same mtime as last time.
-                // Trust it only while the blob is actually still here.
-                Some(id) if store.contains(&id) => id,
-                _ => {
-                    // Miss (or a swept blob): pay for read and hash.
-                    let bytes = fs::read(&path).map_err(|e| Error::io("read", &path, e))?;
-                    let id = store.put(&bytes)?;
-                    // An mtime before the epoch cannot round-trip
-                    // through the cache format; skip caching rather
-                    // than fail, so such a file just stays cold.
-                    if mtime >= std::time::UNIX_EPOCH {
-                        cache.record(rel.clone(), CacheEntry { size, mtime, id });
-                    }
-                    id
-                }
-            };
-            ingested.file_sizes.insert(rel.clone(), size);
-            ingested.files.insert(rel, id);
-        }
-    }
-    Ok(())
-}
-
-/// Repo-relative text of `path` under `root`, or a loud error when a
-/// pattern somehow matched outside the ingestion root.
-fn rel_text(root: &Path, path: &Path) -> Result<String> {
-    path.strip_prefix(root)
-        .map_err(|_| {
-            Error::Store(format!(
-                "pattern matched path outside repository root: {}",
-                path.display()
-            ))
-        })
-        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Outcome of materializing one heavy directory via the per-file ladder.
