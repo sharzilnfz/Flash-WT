@@ -6,16 +6,14 @@ pub mod completions;
 pub mod create;
 pub mod demo;
 pub mod list;
-pub mod migrate;
-pub mod remove;
 pub mod scratch;
 pub mod scrub;
-pub mod sweep;
 
 use crate::cli::{StoreAction, WtCommand};
 use crate::config::RunConfig;
 use crate::envelope::Envelope;
 use crate::error::{Error, Result};
+use crate::gc;
 
 pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
     let command_name = command.name();
@@ -84,7 +82,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
             Ok(None)
         }
         WtCommand::Remove { name, dir } => {
-            let (data, diags) = remove::run(&name, dir.as_deref(), cfg)?;
+            let (data, diags) = gc::remove(&name, dir.as_deref(), cfg)?;
             if cfg.json {
                 let env = Envelope::ok(command_name, data, diags);
                 println!(
@@ -95,7 +93,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
             Ok(None)
         }
         WtCommand::Sweep { age } => {
-            let (data, diags) = sweep::run(age, cfg)?;
+            let (data, diags) = gc::sweep(age, cfg)?;
             if cfg.json {
                 let env = Envelope::ok(command_name, data, diags);
                 println!(
@@ -121,7 +119,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
                 activate_mark_sweep,
                 drop_legacy_refs,
             } => {
-                let (data, diags) = migrate::run(activate_mark_sweep, drop_legacy_refs, cfg)?;
+                let (data, diags) = gc::migrate(activate_mark_sweep, drop_legacy_refs, cfg)?;
                 if cfg.json {
                     let env = Envelope::ok(command_name, data, diags);
                     println!(

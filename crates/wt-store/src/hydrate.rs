@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::snapshot::{SnapshotOutcome, SnapshotProjectionEngine, SnapshotProjectionRequest};
@@ -77,6 +77,10 @@ pub struct HydrationReceipt {
     pub elapsed_ms: u128,
     /// Diagnostic warning strings.
     pub diagnostics: Vec<String>,
+    /// Incremental rebuild cloned units count.
+    pub v2_cloned: usize,
+    /// Incremental rebuild freshly linked files count.
+    pub v2_linked: usize,
 }
 
 impl DiskStore {
@@ -132,7 +136,7 @@ impl DiskStore {
                     self.publish_worktree_mirror(
                         req.worktree_root,
                         req.git_dir,
-                        distinct_blobs,
+                        BTreeSet::new(),
                         std::iter::once(&manifest_id),
                         req.base_branch,
                         req.base_commit,
@@ -148,6 +152,8 @@ impl DiskStore {
                         snapshot_hit: true,
                         elapsed_ms: start.elapsed().as_millis(),
                         diagnostics,
+                        v2_cloned: info.cloned_units,
+                        v2_linked: info.linked_files,
                     });
                 }
                 SnapshotOutcome::FellBack(diag) => {
@@ -162,15 +168,8 @@ impl DiskStore {
         }
 
         // Fallback materialization
-        let dest_heavy = if req.heavy_rel.is_empty() {
-            req.worktree_root.to_path_buf()
-        } else {
-            req.worktree_root.join(req.heavy_rel)
-        };
-        fs::create_dir_all(&dest_heavy)?;
-
         for rel in req.dirs {
-            let dir_path = dest_heavy.join(rel);
+            let dir_path = resolve_dest_path(req.worktree_root, req.heavy_rel, rel);
             fs::create_dir_all(&dir_path)?;
         }
 
@@ -222,7 +221,7 @@ impl DiskStore {
                         }
 
                         let src = self.blob_path(id);
-                        let dest = dest_heavy.join(rel);
+                        let dest = resolve_dest_path(req.worktree_root, req.heavy_rel, rel);
                         if let Some(parent) = dest.parent() {
                             if !parent.exists() {
                                 let _ = fs::create_dir_all(parent);
@@ -263,7 +262,7 @@ impl DiskStore {
         }
 
         for (rel, target) in req.symlinks {
-            let dest = dest_heavy.join(rel);
+            let dest = resolve_dest_path(req.worktree_root, req.heavy_rel, rel);
             if let Some(parent) = dest.parent() {
                 if !parent.exists() {
                     fs::create_dir_all(parent)?;
@@ -277,8 +276,7 @@ impl DiskStore {
 
         for rel in req.dirs.iter().rev() {
             if let Some(&mode) = req.dir_modes.get(rel) {
-                let path = dest_heavy.join(rel);
-                #[cfg(unix)]
+                let path = resolve_dest_path(req.worktree_root, req.heavy_rel, rel);
                 {
                     let _ = fs::set_permissions(&path, fs::Permissions::from_mode(mode));
                 }
@@ -326,6 +324,18 @@ impl DiskStore {
             snapshot_hit: false,
             elapsed_ms: start.elapsed().as_millis(),
             diagnostics,
+            v2_cloned: 0,
+            v2_linked: 0,
         })
+    }
+}
+
+fn resolve_dest_path(worktree_root: &Path, heavy_rel: &str, rel: &str) -> PathBuf {
+    if heavy_rel.is_empty() {
+        worktree_root.join(rel)
+    } else if rel == heavy_rel || rel.starts_with(&format!("{heavy_rel}/")) {
+        worktree_root.join(rel)
+    } else {
+        worktree_root.join(heavy_rel).join(rel)
     }
 }

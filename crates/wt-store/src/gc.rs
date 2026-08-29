@@ -171,6 +171,16 @@ impl DiskStore {
             .map_err(Error::Io)
             .map(|_| ())
     }
+    /// Unlink the store mirror for a worktree if present.
+    pub fn unlink_worktree_mirror(&self, worktree: &Path, gitdir: &Path) -> Result<bool> {
+        let Ok(worktree) = fs::canonicalize(worktree) else {
+            return Ok(false);
+        };
+        let Ok(gitdir) = fs::canonicalize(gitdir) else {
+            return Ok(false);
+        };
+        mirror::remove(self.root(), &worktree, &gitdir).map_err(Error::Io)
+    }
 
     /// True when the mirror for this identity is missing but the
     /// sidecar still exists — the state the plan says the next
@@ -615,6 +625,13 @@ pub trait WorkspaceCleaner: Send + Sync {
     fn worktree_size(&self, path: &Path) -> u64;
     /// Clean up a worktree from git tracking and disk.
     fn clean_workspace(&self, worktree: &Path, gitdir: &Path, branch_name: &str) -> io::Result<()>;
+    /// Remove a worktree directory from disk.
+    fn remove_worktree(&self, worktree: &Path) -> io::Result<()> {
+        if worktree.exists() {
+            fs::remove_dir_all(worktree)?;
+        }
+        Ok(())
+    }
 }
 
 /// Fallback / no-op workspace cleaner.
@@ -632,6 +649,10 @@ impl WorkspaceCleaner for NoopWorkspaceCleaner {
         _gitdir: &Path,
         _branch_name: &str,
     ) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn remove_worktree(&self, _worktree: &Path) -> io::Result<()> {
         Ok(())
     }
 }
@@ -682,6 +703,15 @@ pub struct SweepSummary {
     pub lease_bytes_reclaimed: u64,
     /// Audit disagreement lines between mark-and-sweep and legacy refcounts.
     pub audit_disagreements: Vec<String>,
+}
+
+/// Summary receipt returned when a worktree is retired.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetirementReceipt {
+    /// Count of distinct blob references decremented.
+    pub references_released: usize,
+    /// Whether a store mirror was removed.
+    pub mirror_removed: bool,
 }
 
 /// Unified store and lease reclamation engine.
@@ -856,6 +886,91 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
             }
         }
     }
+
+    /// Retire a worktree: release its blob references from the sidecar ledger,
+    /// delete the store mirror, and remove the worktree directory.
+    pub fn retire_worktree(
+        &mut self,
+        worktree_path: &Path,
+        gitdir: &Path,
+    ) -> Result<RetirementReceipt> {
+        let ledger_path = gitdir.join("wt-hydrated.tsv");
+        let mut blob_ids = BTreeSet::new();
+        let mut snapshot_ids = BTreeSet::new();
+        let mut had_ledger = false;
+
+        if ledger_path.exists() {
+            had_ledger = true;
+            if let Ok(text) = fs::read_to_string(&ledger_path) {
+                for line in text.lines() {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let fields: Vec<&str> = line.split('\t').collect();
+                    match fields.as_slice() {
+                        [_, id_str] => {
+                            if let Some(cid) = ContentId::from_hex(id_str) {
+                                blob_ids.insert(cid);
+                            }
+                        }
+                        [_, kind, id_str] if *kind == "blob" => {
+                            if let Some(cid) = ContentId::from_hex(id_str) {
+                                blob_ids.insert(cid);
+                            }
+                        }
+                        [_, kind, id_str] if *kind == "snapshot" => {
+                            if let Some(cid) = ContentId::from_hex(id_str) {
+                                snapshot_ids.insert(cid);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if (!blob_ids.is_empty() || !snapshot_ids.is_empty())
+            && self.store.mirror_is_missing(worktree_path, gitdir).unwrap_or(false)
+        {
+            let _ = self.store.publish_worktree_mirror(
+                worktree_path,
+                gitdir,
+                blob_ids.iter(),
+                snapshot_ids.iter(),
+                None,
+                None,
+            );
+        }
+
+        let mut references_released = 0;
+        if !blob_ids.is_empty() && self.store.gc_mode() != GcMode::MarkSweepNoRefs {
+            for cid in &blob_ids {
+                match Store::release_ref(self.store, cid) {
+                    Ok(()) => {
+                        references_released += 1;
+                    }
+                    Err(Error::RefCountUnderflow(_)) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        if had_ledger {
+            let _ = fs::remove_file(&ledger_path);
+        }
+
+        let mirror_removed =
+            self.store.unlink_worktree_mirror(worktree_path, gitdir).unwrap_or(false) || had_ledger;
+
+        if worktree_path.exists() {
+            let _ = self.cleaner.remove_worktree(worktree_path);
+        }
+
+        Ok(RetirementReceipt {
+            references_released,
+            mirror_removed,
+        })
+    }
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -895,5 +1010,39 @@ mod tests {
         assert_eq!(summary.leases_reclaimed, 1);
         assert_eq!(summary.reclaimed_blobs, 1);
         assert_eq!(summary.examined_blobs, 1);
+    }
+
+    #[test]
+    fn store_reclaimer_retire_worktree_releases_refs_and_removes_mirror() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_root = dir.path().join("store");
+        let mut store = DiskStore::open(&store_root).expect("open store");
+
+        let blob_id = store.put(b"worktree payload").expect("put blob");
+        store.add_ref(&blob_id).expect("add ref");
+        assert_eq!(store.ref_count(&blob_id).expect("ref count"), 1);
+
+        let worktree = dir.path().join("my-wt");
+        let gitdir = dir.path().join("my-gitdir");
+        fs::create_dir_all(&worktree).expect("create wt");
+        fs::create_dir_all(&gitdir).expect("create gitdir");
+
+        let sidecar = gitdir.join("wt-hydrated.tsv");
+        fs::write(&sidecar, format!("src/lib.rs\tblob\t{blob_id}\n")).expect("write sidecar");
+
+        let mut blobs = BTreeSet::new();
+        blobs.insert(blob_id);
+        store
+            .publish_worktree_mirror(&worktree, &gitdir, blobs.iter(), std::iter::empty(), None, None)
+            .expect("publish mirror");
+
+        let cleaner = NoopWorkspaceCleaner;
+        let mut reclaimer = StoreReclaimer::new(&mut store, &cleaner);
+        let receipt = reclaimer.retire_worktree(&worktree, &gitdir).expect("retire worktree");
+
+        assert_eq!(receipt.references_released, 1);
+        assert!(receipt.mirror_removed);
+        assert_eq!(store.ref_count(&blob_id).expect("ref count"), 0);
+        assert!(!sidecar.exists());
     }
 }

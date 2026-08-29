@@ -24,8 +24,8 @@ pub mod lockfile;
 pub mod mirror;
 pub use disk::{DiskStore, FsCapabilities, probe_fs};
 pub use gc::{
-    GcMode, MarkReport, MarkSwept, NoopWorkspaceCleaner, StoreReclaimer, SweepPolicy, SweepSummary,
-    WorkspaceCleaner,
+    GcMode, MarkReport, MarkSwept, NoopWorkspaceCleaner, RetirementReceipt, StoreReclaimer,
+    SweepPolicy, SweepSummary, WorkspaceCleaner,
 };
 pub use ingest::{IngestOptions, Ingested};
 pub use hydrate::{HydrationReceipt, HydrationRequest};
