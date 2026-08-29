@@ -5,7 +5,7 @@
 Instant git worktrees with heavy directories already hydrated.
 
 ```sh
-wt create my-feature
+wt new my-feature
 ```
 
 One command gives you a new worktree on a new branch with `node_modules/`, `target/`, `.venv/`, and build caches already in place. No reinstalling. No rebuilding. Files materialize from a local content-addressed store as private copy-on-write clones. A 40,000-file project environment appears in 1.5 seconds instead of minutes.
@@ -79,7 +79,17 @@ brew upgrade wt
 curl -fsSL https://raw.githubusercontent.com/sharzilnfz/wt/main/install.sh | sh
 ```
 
-The script downloads the prebuilt static binary for your architecture, verifies its SHA-256 checksum, and installs to `~/.local/bin`.
+The script downloads the prebuilt static binary for your architecture, verifies its SHA-256 checksum, installs to `~/.local/bin`, and drops shell completions into your active shell's completion directory (skip with `WT_COMPLETIONS=no`).
+
+### Shell completions
+
+`wt completions <shell>` generates a tab-completion script covering every subcommand and flag. Supported shells: `bash`, `zsh`, `fish`, `elvish`, `powershell`.
+
+```sh
+wt completions bash > ~/.local/share/bash-completion/completions/wt
+```
+
+The curl installer and the Homebrew formula both install completions automatically.
 
 ### Build from source
 
@@ -95,13 +105,26 @@ Run `wt` from inside any git repository:
 
 ```sh
 # Create a worktree at ../<repo>-feature on branch feature with hydrated directories
-wt create feature
+wt new feature
 
-# Remove the worktree and release its store references
-wt remove feature
+# Inspect active worktrees, their disk usage, and shared savings
+wt list
 
-# Reclaim space from deleted worktrees and stale cache data
-wt sweep
+# Remove the worktree, release its store references, and reclaim freed space
+wt clean feature
+
+# Remove every stale/merged worktree non-interactively, then reclaim space
+wt clean --all
+```
+
+The classic verbs `wt create`, `wt remove`, and `wt sweep` still work and remain fully supported.
+
+### Zero-setup test drive
+
+No git repository or configuration needed. `wt demo` builds a synthetic 10,000-file project, measures baseline copy versus `wt` copy-on-write hydration, validates that mutations stay isolated, and cleans up after itself:
+
+```sh
+wt demo
 ```
 
 ### Configure what gets hydrated
@@ -122,15 +145,14 @@ Edit `.wtinclude` to match your project's heaviest rebuild artifacts.
 
 ### Fast path on macOS (APFS)
 
-Enable whole-directory snapshots and incremental rebuilds in your shell:
+On macOS, whole-directory snapshots and diff-based incremental rebuilds are enabled automatically. `wt` probes the filesystem at startup: on APFS it hydrates by cloning whole directory trees (~0.45s for 40,000 files), and when dependencies change slightly it clones the previous snapshot and patches only the modified files. No environment variables required.
+
+To opt out and force per-file hydration:
 
 ```sh
-export WT_SNAPSHOTS=1
-export WT_SNAPSHOTS_V2=1
+export WT_SNAPSHOTS=0
+export WT_SNAPSHOTS_V2=0
 ```
-
-- `WT_SNAPSHOTS=1` activates directory-level APFS cloning (~0.45s to hydrate 40,000 files).
-- `WT_SNAPSHOTS_V2=1` activates diff-based rebuilds. When dependencies change slightly, `wt` clones the previous snapshot and patches only modified files.
 
 ## How it works
 
@@ -148,8 +170,8 @@ Read [docs/archive/product-handoff.md](docs/archive/product-handoff.md) and the 
 | Variable | Default | Description |
 |---|---|---|
 | `WT_STORE` | `~/.cache/wt/store` | Directory for the content-addressed object store |
-| `WT_SNAPSHOTS` | `0` | Enable whole-directory APFS snapshot caching (macOS only) |
-| `WT_SNAPSHOTS_V2` | `0` | Enable diff-based incremental snapshot rebuilds |
+| `WT_SNAPSHOTS` | `1` on APFS, `0` elsewhere | Enable whole-directory APFS snapshot caching; `WT_SNAPSHOTS=0` opts out |
+| `WT_SNAPSHOTS_V2` | `1` on APFS, `0` elsewhere | Enable diff-based incremental snapshot rebuilds; `WT_SNAPSHOTS_V2=0` opts out |
 | `WT_VERIFY` | `0` | Force full cryptographic re-verification of all blobs |
 | `WT_HARDLINK` | `0` | Enable hardlink materialization mode |
 | `WT_NO_HARDLINK` | `0` | Force byte-by-byte copies instead of links |
