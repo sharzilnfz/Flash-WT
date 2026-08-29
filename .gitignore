@@ -8,3 +8,6 @@ skills-lock.json
 AGENT_HANDOFF_PLAN_REVISED.md
 step0-instrumentation-ticket.md
 v2-diff-rebuild-design-note-revised.md
+
+# verification skill proof artifacts (survive cleanup, never committed)
+/artifacts/
