@@ -10,24 +10,8 @@ use crate::config::RunConfig;
 use crate::envelope::{CleanData, Diagnostic};
 use crate::error::{Error, Result};
 use crate::gc;
+use crate::output::HumanBytes;
 use crate::workspace::WorkspaceEngine;
-
-/// Format bytes into human-readable unit (e.g. `1.2 MB`, `450 KB`).
-fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
 
 /// A discovered worktree candidate for cleanup.
 #[derive(Debug, Clone)]
@@ -93,7 +77,7 @@ fn clean_single_worktree(
         if sweep_data.reclaimed > 0 || reclaimed_bytes > 0 {
             println!(
                 "✓ Reclaimed {} disk space ({} store objects swept)",
-                format_bytes(reclaimed_bytes),
+                HumanBytes(reclaimed_bytes),
                 sweep_data.reclaimed
             );
         } else {
@@ -307,7 +291,7 @@ fn clean_batch_worktrees(
         if sweep_data.reclaimed > 0 || reclaimed_bytes > 0 {
             println!(
                 "✓ Reclaimed {} disk space ({} store objects swept)",
-                format_bytes(reclaimed_bytes),
+                HumanBytes(reclaimed_bytes),
                 sweep_data.reclaimed
             );
         }

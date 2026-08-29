@@ -13,6 +13,7 @@ mod gc;
 mod gitops;
 mod hydrate;
 mod manifest;
+mod output;
 mod snapshots;
 mod timing;
 mod toolchain;

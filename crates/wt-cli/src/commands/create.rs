@@ -10,40 +10,9 @@ use crate::envelope::{CreateData, Diagnostic};
 use crate::error::{Error, Result};
 use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
 use crate::manifest::{self, LoadedPatterns, load_patterns};
+use crate::output::{HumanBytes, HumanCount};
 use crate::timing::StageTimings;
 use crate::workspace::WorkspaceEngine;
-
-fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-fn format_count(n: usize) -> String {
-    if n >= 10_000 {
-        let s = n.to_string();
-        let mut out = String::new();
-        for (i, c) in s.chars().rev().enumerate() {
-            if i > 0 && i % 3 == 0 {
-                out.push(',');
-            }
-            out.push(c);
-        }
-        format!("{} files", out.chars().rev().collect::<String>())
-    } else {
-        format!("{n} files")
-    }
-}
 
 pub fn run(
     name: &str,
@@ -130,9 +99,9 @@ fn create(
         println!("✓ Created worktree {} ({name})", dest.display());
         if report.total_files > 0 {
             println!(
-                "✓ Hydrated {} ({}) via {} in {} ms",
-                format_count(report.total_files),
-                format_bytes(total_bytes),
+                "✓ Hydrated {} files ({}) via {} in {} ms",
+                HumanCount(report.total_files),
+                HumanBytes(total_bytes),
                 report.hydration_method,
                 total_ms
             );

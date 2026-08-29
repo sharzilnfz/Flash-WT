@@ -13,40 +13,8 @@ use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, LeaseEntry, ListData, WorktreeEntry};
 use crate::error::Result;
 use crate::hydrate::open_store;
+use crate::output::{HumanBytes, HumanDuration, format_table};
 use crate::workspace::WorkspaceEngine;
-
-/// Format bytes into a human-readable string.
-fn format_bytes(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-
-    let b = bytes as f64;
-    if bytes == 0 {
-        "0 B".to_string()
-    } else if b < KB {
-        format!("{bytes} B")
-    } else if b < MB {
-        format!("{:.1} KB", b / KB)
-    } else if b < GB {
-        format!("{:.1} MB", b / MB)
-    } else {
-        format!("{:.1} GB", b / GB)
-    }
-}
-
-/// Format duration into a human-readable string (e.g. 45s, 12m, 3h, 2d).
-fn format_duration(secs: u64) -> String {
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86400)
-    }
-}
 
 /// Lookup blob size in store, using an in-memory cache to avoid repeated stats.
 fn get_blob_size(
@@ -294,7 +262,7 @@ fn print_human_table(entries: &[WorktreeEntry], total_disk_saved: u64) {
         return;
     }
 
-    let mut rows: Vec<(String, String, String, String, String, String)> = Vec::new();
+    let mut rows: Vec<Vec<String>> = Vec::new();
 
     for entry in entries {
         let active_mark = if entry.is_active { "*" } else { " " };
@@ -306,50 +274,41 @@ fn print_human_table(entries: &[WorktreeEntry], total_disk_saved: u64) {
             format!(
                 "{} files ({})",
                 entry.files_hydrated,
-                format_bytes(entry.bytes_hydrated)
+                HumanBytes(entry.bytes_hydrated)
             )
         };
-        let disk_saved = format_bytes(entry.bytes_saved);
+        let disk_saved = HumanBytes(entry.bytes_saved).to_string();
         let status = if let Some(ref l) = entry.lease {
             if l.is_expired {
                 format!("expired (pid: {})", l.pid)
             } else if l.pid_alive {
-                format!("ttl: {} (pid: {})", format_duration(l.ttl_remaining_secs), l.pid)
+                format!("ttl: {} (pid: {})", HumanDuration(l.ttl_remaining_secs), l.pid)
             } else {
-                format!("ttl: {} (pid: {} [dead])", format_duration(l.ttl_remaining_secs), l.pid)
+                format!("ttl: {} (pid: {} [dead])", HumanDuration(l.ttl_remaining_secs), l.pid)
             }
         } else if let Some(age) = entry.age_secs {
-            format!("{} ago", format_duration(age))
+            format!("{} ago", HumanDuration(age))
         } else {
             "-".to_string()
         };
 
-        rows.push((
+        rows.push(vec![
             active_mark.to_string(),
             branch.clone(),
             path.clone(),
             hydrated,
             disk_saved,
             status,
-        ));
+        ]);
     }
-
-    let max_branch = rows.iter().map(|r| r.1.len()).max().unwrap_or(6).max(6); // "BRANCH".len() == 6
-    let max_path = rows.iter().map(|r| r.2.len()).max().unwrap_or(4).max(4); // "PATH".len() == 4
-    let max_hydrated = rows.iter().map(|r| r.3.len()).max().unwrap_or(8).max(8); // "HYDRATED".len() == 8
-    let max_saved = rows.iter().map(|r| r.4.len()).max().unwrap_or(10).max(10); // "DISK SAVED".len() == 10
 
     println!(
-        "  {:<max_branch$}  {:<max_path$}  {:<max_hydrated$}  {:<max_saved$}  AGE / STATUS",
-        "BRANCH", "PATH", "HYDRATED", "DISK SAVED"
+        "{}",
+        format_table(
+            &["", "BRANCH", "PATH", "HYDRATED", "DISK SAVED", "AGE / STATUS"],
+            &rows
+        )
     );
-
-    for (active, branch, path, hydrated, saved, status) in rows {
-        println!(
-            "{active} {:<max_branch$}  {:<max_path$}  {:<max_hydrated$}  {:<max_saved$}  {status}",
-            branch, path, hydrated, saved
-        );
-    }
 
     let worktree_count = entries.len();
     let total_files: usize = entries.iter().map(|e| e.files_hydrated).sum();
@@ -358,7 +317,7 @@ fn print_human_table(entries: &[WorktreeEntry], total_disk_saved: u64) {
     if total_files > 0 {
         println!(
             "Total disk saved: {} across {} worktree{} ({} files deduplicated)",
-            format_bytes(total_disk_saved),
+            HumanBytes(total_disk_saved),
             worktree_count,
             if worktree_count == 1 { "" } else { "s" },
             total_files
@@ -366,33 +325,9 @@ fn print_human_table(entries: &[WorktreeEntry], total_disk_saved: u64) {
     } else {
         println!(
             "Total disk saved: {} across {} worktree{}",
-            format_bytes(total_disk_saved),
+            HumanBytes(total_disk_saved),
             worktree_count,
             if worktree_count == 1 { "" } else { "s" }
         );
-    }
-}
-
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn format_bytes_examples() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1024), "1.0 KB");
-        assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
-        assert_eq!(format_bytes(15 * 1024 * 1024), "15.0 MB");
-        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.0 GB");
-    }
-
-    #[test]
-    fn format_duration_examples() {
-        assert_eq!(format_duration(30), "30s");
-        assert_eq!(format_duration(120), "2m");
-        assert_eq!(format_duration(3600), "1h");
-        assert_eq!(format_duration(86400 * 3), "3d");
     }
 }
