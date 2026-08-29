@@ -1,6 +1,7 @@
 // Tests assert with unwrap/expect by design: a panic IS the failure
 // signal under test, so the workspace restriction lints stay off here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg(target_os = "macos")]
 
 //! Tests for APFS snapshot defaults and opt-out mechanics (ticket 04).
 
@@ -60,7 +61,6 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn apfs_defaults_enable_snapshots_without_explicit_env() {
     let fx = TestFixture::new();
@@ -79,7 +79,6 @@ fn apfs_defaults_enable_snapshots_without_explicit_env() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn apfs_opt_out_disables_snapshots_via_env() {
     let fx = TestFixture::new();

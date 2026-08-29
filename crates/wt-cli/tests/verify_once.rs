@@ -72,6 +72,8 @@ fn wt(
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_wt"));
     cmd.args(args)
         .env("WT_STORE", store)
+        .env("WT_SNAPSHOTS", "0")
+        .env("WT_SNAPSHOTS_V2", "0")
         .env_remove("WT_HARDLINK")
         .env_remove("WT_NO_HARDLINK")
         .env_remove("WT_VERIFY")
