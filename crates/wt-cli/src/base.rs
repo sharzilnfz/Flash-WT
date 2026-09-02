@@ -35,8 +35,21 @@ pub fn check_base_movement(
     // 2. If a base_ref was passed (e.g. `wt create <name> --base <base_ref>`),
     // check if base_ref itself is an existing worktree whose base has moved!
     if let Some(target_base) = base_ref {
+        let repo_canonical = repo_root.canonicalize().unwrap_or_else(|_| repo_root.to_path_buf());
         for read in wt_store::read_mirrors(store.root()) {
             if let Ok(m) = read.mirror {
+                // Scope to active repository only; ignore mirrors from other repos
+                let mirror_repo = match workspace::repo_root_from_gitdir(&m.gitdir) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let mirror_canonical = mirror_repo
+                    .canonicalize()
+                    .unwrap_or_else(|_| mirror_repo.clone());
+                if mirror_canonical != repo_canonical && mirror_repo != repo_root {
+                    continue;
+                }
+
                 let is_matching_worktree = m
                     .worktree
                     .file_name()
@@ -192,5 +205,100 @@ mod tests {
         assert!(diag.message.contains("main"));
         assert!(diag.message.contains(&c1));
         assert!(diag.message.contains(&c2));
+    }
+
+    #[test]
+    fn check_base_movement_ignores_other_repo_mirrors() {
+        let temp = tempfile::tempdir().unwrap();
+        let store_dir = temp.path().join("store");
+        let repo_a = temp.path().join("repo-a");
+        let repo_b = temp.path().join("repo-b");
+        for repo in [&repo_a, &repo_b] {
+            fs::create_dir_all(repo).unwrap();
+            git(repo, &["init"]);
+            git(repo, &["config", "user.name", "Test"]);
+            git(repo, &["config", "user.email", "test@example.com"]);
+            fs::write(repo.join("file.txt"), "hello").unwrap();
+            git(repo, &["add", "file.txt"]);
+            git(repo, &["commit", "-m", "initial"]);
+            git(repo, &["branch", "-M", "main"]);
+        }
+        let c1_a = git(&repo_a, &["rev-parse", "HEAD"]);
+        let c1_b = git(&repo_b, &["rev-parse", "HEAD"]);
+
+        let wt_a = temp.path().join("repo-a-feat");
+        git(
+            &repo_a,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat",
+                &wt_a.to_string_lossy(),
+                "main",
+            ],
+        );
+        let git_dir_a = workspace::git_dir(&wt_a).unwrap();
+
+        let wt_b = temp.path().join("repo-b-feat");
+        git(
+            &repo_b,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat",
+                &wt_b.to_string_lossy(),
+                "main",
+            ],
+        );
+        let git_dir_b = workspace::git_dir(&wt_b).unwrap();
+
+        let store = DiskStore::open(&store_dir).unwrap();
+        store
+            .publish_worktree_mirror(
+                &wt_a,
+                &git_dir_a,
+                std::iter::empty(),
+                std::iter::empty(),
+                Some("main"),
+                Some(&c1_a),
+            )
+            .unwrap();
+        store
+            .publish_worktree_mirror(
+                &wt_b,
+                &git_dir_b,
+                std::iter::empty(),
+                std::iter::empty(),
+                Some("main"),
+                Some(&c1_b),
+            )
+            .unwrap();
+
+        // Advance only repo-a's main
+        fs::write(repo_a.join("file2.txt"), "world").unwrap();
+        git(&repo_a, &["add", "file2.txt"]);
+        git(&repo_a, &["commit", "-m", "second"]);
+        let c2_a = git(&repo_a, &["rev-parse", "HEAD"]);
+        assert_ne!(c1_a, c2_a);
+        // repo-b stays at c1_b
+        assert_eq!(c1_b, git(&repo_b, &["rev-parse", "HEAD"]));
+
+        // Check from repo-b perspective: base_ref "feat" should not report movement
+        // from repo-a's mirror, even though repo-a's mirror has moved.
+        let diags_b = check_base_movement(&store, &repo_b, Some("feat"));
+        assert!(
+            diags_b.is_empty(),
+            "repo-b should ignore repo-a's moved mirror, got {diags_b:?}"
+        );
+
+        // Check from repo-a perspective: should report its own moved parent
+        let diags_a = check_base_movement(&store, &repo_a, Some("feat"));
+        assert!(
+            !diags_a.is_empty(),
+            "repo-a should report its own moved parent"
+        );
+        assert!(diags_a.iter().any(|d| d.code == "BASE_BRANCH_MOVED"));
     }
 }
