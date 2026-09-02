@@ -3,7 +3,6 @@
 //! blob retries, lockfile fast-path hits, and clone placement.
 
 use std::collections::BTreeMap;
-#[cfg(target_os = "macos")]
 use std::fs;
 use std::path::Path;
 #[cfg(target_os = "macos")]
@@ -215,6 +214,12 @@ fn try_lockfile_hit_impl(
         return SnapshotOutcome::FellBack(None);
     }
 
+    if rec.mtime_secs > 0 && is_nested_stale(&heavy_src, rec.mtime_secs) {
+        return SnapshotOutcome::FellBack(Some(
+            "nested file newer than snapshot; invalidating lockfile fast path".into(),
+        ));
+    }
+
     let mut lookup_ms = 0u128;
     let mut clonefile_ms = 0u128;
 
@@ -263,6 +268,66 @@ fn try_lockfile_hit_impl(
     }
 
     SnapshotOutcome::FellBack(None)
+}
+
+#[cfg(target_os = "macos")]
+fn is_nested_stale(heavy_src: &Path, snapshot_secs: u64) -> bool {
+    if snapshot_secs == 0 {
+        return false;
+    }
+    if let Ok(entries) = crate::bulkwalk::walk(heavy_src) {
+        for e in entries {
+            if e.mtime_secs > snapshot_secs + 1 {
+                return true;
+            }
+        }
+        return false;
+    }
+    portable_nested_stale(heavy_src, snapshot_secs)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
+fn is_nested_stale(heavy_src: &Path, snapshot_secs: u64) -> bool {
+    portable_nested_stale(heavy_src, snapshot_secs)
+}
+
+#[allow(dead_code)]
+fn portable_nested_stale(heavy_src: &Path, snapshot_secs: u64) -> bool {
+    if snapshot_secs == 0 {
+        return false;
+    }
+    let mut stack = vec![heavy_src.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => return true,
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => return true,
+            };
+            let path = entry.path();
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(_) => return true,
+            };
+            let mtime_secs = meta
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if mtime_secs > snapshot_secs + 1 {
+                return true;
+            }
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                stack.push(path);
+            }
+        }
+    }
+    false
 }
 
 #[cfg(target_os = "macos")]
