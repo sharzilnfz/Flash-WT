@@ -14,6 +14,7 @@ mod hydrate;
 pub mod hydration_filter;
 pub mod manifest;
 mod output;
+mod signal;
 mod timing;
 mod toolchain;
 mod workspace;
@@ -24,6 +25,7 @@ use cli::Cli;
 use config::RunConfig;
 
 fn main() {
+    signal::init_signal_handlers();
     let cli = Cli::parse();
     let command_name = cli.command.name();
     // Env policy is parsed exactly once, here, and threaded through
