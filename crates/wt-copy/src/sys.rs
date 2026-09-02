@@ -146,8 +146,26 @@ pub(crate) fn probe_device_id(path: &Path) -> io::Result<u64> {
 /// True if `src` and `dest` reside on different filesystem devices.
 pub(crate) fn is_cross_device(src: &Path, dest: &Path) -> bool {
     match (probe_device_id(src), probe_device_id(dest)) {
-        (Ok(src_dev), Ok(dest_dev)) => src_dev != dest_dev,
+        (Ok(src_dev), Ok(dest_dev)) if src_dev != dest_dev => {
+            #[cfg(target_os = "linux")]
+            {
+                if is_btrfs_filesystem(src) && is_btrfs_filesystem(dest) {
+                    return false;
+                }
+            }
+            true
+        }
+        (Ok(_src_dev), Ok(_dest_dev)) => false,
         _ => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_btrfs_filesystem(path: &Path) -> bool {
+    let existing = find_existing_ancestor(path);
+    match statfs_of(existing) {
+        Ok(st) => (st.f_type as libc::c_long) == (libc::BTRFS_SUPER_MAGIC as libc::c_long),
+        Err(_) => false,
     }
 }
 

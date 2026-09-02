@@ -63,11 +63,17 @@ pub fn copy_file_range_file(from: &Path, to: &Path) -> io::Result<()> {
         };
         if rc < 0 {
             let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
             drop(fs::remove_file(to));
             return Err(err);
         }
         if rc == 0 {
-            break;
+            drop(dest);
+            let _ = fs::remove_file(to);
+            crate::sys::buffered_copy_file(from, to).map(|_| ())?;
+            return Ok(());
         }
         remaining -= rc as usize;
     }

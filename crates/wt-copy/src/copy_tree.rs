@@ -52,10 +52,12 @@ fn walk(
         } else if file_type.is_dir() {
             fs::create_dir(&to)?;
             walk(&from, &to, copy_file)?;
-        } else {
+        } else if file_type.is_file() {
             #[cfg(test)]
             test_hooks::maybe_fail_injected()?;
             copy_file(&from, &to)?;
+        } else {
+            continue;
         }
     }
     Ok(())
