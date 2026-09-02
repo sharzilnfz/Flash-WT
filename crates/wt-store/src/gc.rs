@@ -769,6 +769,7 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
                             if ledger_path.exists() {
                                 if let Ok(text) = fs::read_to_string(&ledger_path) {
                                     if self.store.gc_mode() != GcMode::MarkSweepNoRefs {
+                                        let mut blob_ids = BTreeSet::new();
                                         for line in text.lines() {
                                             if line.is_empty() {
                                                 continue;
@@ -777,23 +778,22 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
                                             match fields.as_slice() {
                                                 [_, id_str] => {
                                                     if let Some(cid) = ContentId::from_hex(id_str) {
-                                                        match Store::release_ref(self.store, &cid) {
-                                                            Ok(()) => {}
-                                                            Err(Error::RefCountUnderflow(_)) => {}
-                                                            Err(e) => return Err(e),
-                                                        }
+                                                        blob_ids.insert(cid);
                                                     }
                                                 }
                                                 [_, kind, id_str] if *kind == "blob" => {
                                                     if let Some(cid) = ContentId::from_hex(id_str) {
-                                                        match Store::release_ref(self.store, &cid) {
-                                                            Ok(()) => {}
-                                                            Err(Error::RefCountUnderflow(_)) => {}
-                                                            Err(e) => return Err(e),
-                                                        }
+                                                        blob_ids.insert(cid);
                                                     }
                                                 }
                                                 _ => {}
+                                            }
+                                        }
+                                        for cid in blob_ids {
+                                            match Store::release_ref(self.store, &cid) {
+                                                Ok(()) => {}
+                                                Err(Error::RefCountUnderflow(_)) => {}
+                                                Err(e) => return Err(e),
                                             }
                                         }
                                     }
