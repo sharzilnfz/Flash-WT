@@ -93,6 +93,9 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
             age,
         } => {
             let (data, diags) = clean::run(name.as_deref(), dir.as_deref(), all, force, age, cfg)?;
+            let has_errors = diags
+                .iter()
+                .any(|d| d.severity == crate::envelope::Severity::Error);
             if cfg.json {
                 let env = Envelope::ok(command_name, data, diags);
                 println!(
@@ -100,7 +103,11 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
                     serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
                 );
             }
-            Ok(None)
+            if has_errors {
+                Ok(Some(1))
+            } else {
+                Ok(None)
+            }
         }
         WtCommand::Remove { name, dir } => {
             let (data, diags) = gc::remove(&name, dir.as_deref(), cfg)?;
