@@ -35,7 +35,9 @@ pub fn check_base_movement(
     // 2. If a base_ref was passed (e.g. `wt create <name> --base <base_ref>`),
     // check if base_ref itself is an existing worktree whose base has moved!
     if let Some(target_base) = base_ref {
-        let repo_canonical = repo_root.canonicalize().unwrap_or_else(|_| repo_root.to_path_buf());
+        let repo_canonical = repo_root
+            .canonicalize()
+            .unwrap_or_else(|_| repo_root.to_path_buf());
         for read in wt_store::read_mirrors(store.root()) {
             if let Ok(m) = read.mirror {
                 // Scope to active repository only; ignore mirrors from other repos

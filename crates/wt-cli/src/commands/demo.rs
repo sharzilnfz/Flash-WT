@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
-use wt_store::{ContentId, DiskStore, Store};
+use wt_store::{ContentId, DiskStore};
 
 use crate::config::RunConfig;
 use crate::envelope::{DemoData, Diagnostic};

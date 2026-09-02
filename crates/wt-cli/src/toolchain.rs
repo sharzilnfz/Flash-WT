@@ -421,8 +421,7 @@ export PATH
         let pth_content = format!("{}\n{}/src\n", src.display(), src.display());
         let pth_path = dest_venv.join("lib/python3.11/site-packages/foo.pth");
         fs::write(&pth_path, &pth_content).unwrap();
-        let editable_path =
-            dest_venv.join("lib/python3.11/site-packages/_editable_foo.pth");
+        let editable_path = dest_venv.join("lib/python3.11/site-packages/_editable_foo.pth");
         let editable_content = format!("{}\n", src.display());
         fs::write(&editable_path, &editable_content).unwrap();
 
@@ -465,7 +464,11 @@ export PATH
         let perms = fs::metadata(&bin_path).unwrap().permissions().mode();
         assert_eq!(perms & 0o777, 0o755);
         // ensure src path not present
-        assert!(!updated.windows(src_venv.to_string_lossy().len()).any(|w| w == src_venv.to_string_lossy().as_bytes()));
+        assert!(
+            !updated
+                .windows(src_venv.to_string_lossy().len())
+                .any(|w| w == src_venv.to_string_lossy().as_bytes())
+        );
     }
 
     #[test]

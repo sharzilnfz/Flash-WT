@@ -18,7 +18,6 @@
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
@@ -26,7 +25,7 @@ use std::time::{Duration, SystemTime};
 use sha2::{Digest, Sha256};
 
 use crate::verified::VerifiedLedger;
-use crate::{ContentId, Error, Result, Store};
+use crate::{ContentId, Error, Result};
 
 /// Probed filesystem capabilities for a store root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,20 +115,6 @@ pub struct DiskStore {
     fs_caps: FsCapabilities,
 }
 
-/// Held `flock(2)` on the `refs/` directory for the lifetime of the
-/// guard; released on drop.
-struct RefsLock {
-    _file: fs::File,
-}
-
-impl Drop for RefsLock {
-    fn drop(&mut self) {
-        // SAFETY: the fd is valid for as long as `_file` is alive,
-        // i.e. through the end of this drop.
-        unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
-    }
-}
-
 /// What one sweep pass observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Swept {
@@ -178,14 +163,9 @@ impl DiskStore {
     /// Deliberately locks the directory rather than a `.lock` file
     /// inside it: same exclusion semantics with no artifact left in
     /// the store layout.
-    fn lock_refs(&self) -> io::Result<RefsLock> {
+    pub(crate) fn lock_refs(&self) -> io::Result<crate::fsutil::FlockGuard> {
         let dir = fs::File::open(self.root.join("refs"))?;
-        // SAFETY: flock(2) takes only an fd and constants; the fd is
-        // valid for as long as `dir` is alive.
-        if unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(RefsLock { _file: dir })
+        crate::fsutil::FlockGuard::lock_exclusive(dir)
     }
 
     /// Persist any pending verified-ledger updates. Called once at the
@@ -454,10 +434,10 @@ impl DiskStore {
         perms.set_mode(perms.mode() & !0o222);
         Ok(fs::set_permissions(dest, perms)?)
     }
-}
 
-impl Store for DiskStore {
-    fn put(&mut self, content: &[u8]) -> Result<ContentId> {
+    /// Store bytes, deduplicated by content. Returns the content's
+    /// [`ContentId`]. Does not change any reference count.
+    pub fn put(&mut self, content: &[u8]) -> Result<ContentId> {
         let id = ContentId(Sha256::digest(content).into());
         let path = self.object_path(&id);
         if !path.exists() {
@@ -516,7 +496,8 @@ impl Store for DiskStore {
         Ok(id)
     }
 
-    fn get(&self, id: &ContentId) -> Result<Vec<u8>> {
+    /// Fetch bytes by id, verifying the hash before returning.
+    pub fn get(&self, id: &ContentId) -> Result<Vec<u8>> {
         let path = self.object_path(id);
         if !path.exists() {
             return Err(Error::UnknownContent(*id));
@@ -528,11 +509,14 @@ impl Store for DiskStore {
         Ok(content)
     }
 
-    fn contains(&self, id: &ContentId) -> bool {
+    /// True if the store holds this content. Does not verify the hash.
+    pub fn contains(&self, id: &ContentId) -> bool {
         self.object_path(id).exists()
     }
 
-    fn add_ref(&mut self, id: &ContentId) -> Result<()> {
+    /// Increment the reference count. Errors with
+    /// [`Error::UnknownContent`] if the id was never put.
+    pub fn add_ref(&mut self, id: &ContentId) -> Result<()> {
         // The flock makes the read-modify-write below atomic across
         // processes; a lost increment here could let a legacy sweep
         // collect live content.
@@ -561,7 +545,9 @@ impl Store for DiskStore {
         self.write_ref_count(id, next)
     }
 
-    fn release_ref(&mut self, id: &ContentId) -> Result<()> {
+    /// Decrement the reference count. Errors with
+    /// [`Error::RefCountUnderflow`] if already at zero or absent.
+    pub fn release_ref(&mut self, id: &ContentId) -> Result<()> {
         let _lock = self.lock_refs()?;
         if !self.contains(id) {
             return Err(Error::RefCountUnderflow(*id));
@@ -576,7 +562,8 @@ impl Store for DiskStore {
         self.write_ref_count(id, current - 1)
     }
 
-    fn ref_count(&self, id: &ContentId) -> Result<u64> {
+    /// Current reference count (0 if stored but never referenced).
+    pub fn ref_count(&self, id: &ContentId) -> Result<u64> {
         if !self.contains(id) {
             return Err(Error::UnknownContent(*id));
         }

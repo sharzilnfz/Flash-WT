@@ -546,7 +546,7 @@ fn invalid_winner_debris_falls_back_to_per_file_ladder() {
     // Derive the manifest hash by ingesting exactly what the CLI will
     // ingest: same bytes -> same blob ids -> same manifest hash.
     let store = wt_store::DiskStore::open(fx.store_path()).unwrap();
-    use wt_store::{Manifest, SnapshotEntry, Store as _};
+    use wt_store::{Manifest, SnapshotEntry};
     let mut store = store;
     let f0 = store.put(b"file zero\n").unwrap();
     let deep = store.put(b"deep c\n").unwrap();
@@ -604,7 +604,7 @@ fn gc_marks_through_valid_manifests_only() {
     // the snapshot is gone, nothing is marked through it.
     let base = tempfile::tempdir().unwrap();
     let mut store = wt_store::DiskStore::open(base.path().join("store")).unwrap();
-    use wt_store::{Manifest, SnapshotEntry, Store as _};
+    use wt_store::{Manifest, PublishOptions, SnapshotEntry};
 
     let b1 = store.put(b"alpha").unwrap();
     let b2 = store.put(b"beta").unwrap();
@@ -615,7 +615,10 @@ fn gc_marks_through_valid_manifests_only() {
     ];
     let m = Manifest::new(entries).unwrap();
     assert_eq!(
-        store.publish_snapshot(m.entries.clone(), false).unwrap(),
+        store
+            .publish_snapshot(m.entries.clone(), PublishOptions::default())
+            .unwrap()
+            .outcome,
         wt_store::PublishOutcome::Published
     );
 

@@ -29,9 +29,9 @@ pub fn run(
             path.display()
         )));
     }
-    let dest = path.canonicalize().map_err(|e| {
-        Error::io_unanchored("canonicalize destination", path, e)
-    })?;
+    let dest = path
+        .canonicalize()
+        .map_err(|e| Error::io_unanchored("canonicalize destination", path, e))?;
 
     // Determine source repository root
     let source_root = if let Some(src) = source {
@@ -41,9 +41,8 @@ pub fn run(
                 src.display()
             )));
         }
-        src.canonicalize().map_err(|e| {
-            Error::io_unanchored("canonicalize source", src, e)
-        })?
+        src.canonicalize()
+            .map_err(|e| Error::io_unanchored("canonicalize source", src, e))?
     } else if let Ok(engine) = WorkspaceEngine::discover() {
         engine.root().to_path_buf()
     } else {
@@ -91,7 +90,11 @@ pub fn run(
         report.timings.emit(started, timing_enabled);
         let total_bytes = report.bytes_shared_cow + report.bytes_copied;
         let total_ms = started.elapsed().as_millis();
-        println!("✓ Hydrated {} ({})", dest.display(), report.hydration_method);
+        println!(
+            "✓ Hydrated {} ({})",
+            dest.display(),
+            report.hydration_method
+        );
         if report.total_files > 0 {
             println!(
                 "✓ Hydrated {} files ({}) via {} in {} ms",

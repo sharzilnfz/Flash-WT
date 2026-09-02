@@ -84,17 +84,11 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
             age,
         } => {
             let (data, diags) = clean::run(name.as_deref(), dir.as_deref(), all, force, age, cfg)?;
-            let has_errors = diags
-                .iter()
-                .any(|d| d.level.as_deref() == Some("error"));
+            let has_errors = diags.iter().any(|d| d.level.as_deref() == Some("error"));
             if cfg.json {
                 emit_json(command_name, data, diags)?;
             }
-            if has_errors {
-                Ok(Some(1))
-            } else {
-                Ok(None)
-            }
+            if has_errors { Ok(Some(1)) } else { Ok(None) }
         }
         WtCommand::Remove { name, dir } => {
             let (data, diags) = gc::remove(&name, dir.as_deref(), cfg)?;

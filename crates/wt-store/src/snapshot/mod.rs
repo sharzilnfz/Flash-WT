@@ -51,7 +51,10 @@ pub use manifest::{EntryKind, Manifest, SnapshotEntry};
 pub use projection::{
     SnapshotHydration, SnapshotOutcome, SnapshotProjectionEngine, SnapshotProjectionRequest,
 };
-pub use publish::{BuildError, PublishOutcome, PublishReceipt, SnapshotBuildTiming};
+pub use publish::{
+    BuildError, PublishOptions, PublishOutcome, PublishReceipt, SnapshotBuildTiming,
+};
+pub(crate) use tree::paranoid_verify_tree;
 
 use std::fs;
 use std::io;

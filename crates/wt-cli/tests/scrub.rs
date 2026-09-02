@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use common::{Fixture, list_files};
-use wt_store::{ContentId, DiskStore, Store};
+use wt_store::{ContentId, DiskStore, PublishOptions};
 
 /// Flip the first byte of one stored blob, then restore its original
 /// mtime: size never changes, so no stat-visible property does, and
@@ -161,7 +161,7 @@ fn scrub_deletes_corrupt_blob_and_references_fail_cleanly() {
     // not a panic and never bad bytes.
     let disk = DiskStore::open(&store).unwrap();
     assert!(matches!(
-        Store::get(&disk, &id),
+        disk.get(&id),
         Err(wt_store::Error::UnknownContent(_))
     ));
     assert!(matches!(
@@ -291,7 +291,8 @@ fn publish_test_snapshot(store: &Path) -> PathBuf {
         SnapshotEntry::file("sub/f2.txt", b2, 0o644),
     ];
     let manifest = wt_store::Manifest::new(entries.clone()).unwrap();
-    ds.publish_snapshot(entries, false).unwrap();
+    ds.publish_snapshot(entries, PublishOptions::default())
+        .unwrap();
     store.join("snapshots").join(manifest.hash.to_string())
 }
 

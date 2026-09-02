@@ -33,7 +33,7 @@ use std::time::{Duration, UNIX_EPOCH};
 #[cfg(target_os = "macos")]
 use crate::bulkwalk;
 use crate::validation::{Entry, ValidationCache};
-use crate::{ContentId, DiskStore, Error, Result, Store};
+use crate::{ContentId, DiskStore, Error, Result};
 
 /// Everything one ingested tree contributed to the store.
 pub struct Ingested {
@@ -281,7 +281,9 @@ fn ingest_file(
 
 fn ingest_symlink(ingested: &mut Ingested, rel: String, path: &Path) -> Result<()> {
     let target = fs::read_link(path).map_err(|e| io_ctx("read symlink", path, e))?;
-    ingested.symlinks.insert(rel, target.to_string_lossy().into_owned());
+    ingested
+        .symlinks
+        .insert(rel, target.to_string_lossy().into_owned());
     Ok(())
 }
 

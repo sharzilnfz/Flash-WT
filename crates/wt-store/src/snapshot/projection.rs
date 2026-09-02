@@ -14,7 +14,9 @@ use crate::snapdiff::SnapshotDiff;
 use crate::snapindex::select_old_snapshot;
 use crate::snapshot::SnapshotBuildTiming;
 #[cfg(target_os = "macos")]
-use crate::snapshot::{BuildError, Manifest, PublishOutcome, SnapshotEntry, snapshot_tree_path};
+use crate::snapshot::{
+    BuildError, Manifest, PublishOptions, PublishOutcome, SnapshotEntry, snapshot_tree_path,
+};
 use crate::{ContentId, DiskStore};
 #[cfg(target_os = "macos")]
 use wt_copy::{ClonefileBackend, CopyBackend};
@@ -529,12 +531,11 @@ fn try_incremental(
         return None;
     }
 
-    match store.publish_snapshot_incremental_with_lockfile_and_timing(
-        manifest.entries.clone(),
-        manifest.lockfile_hash,
-        &old_hash,
-        paranoid,
-    ) {
+    let opts = PublishOptions::default()
+        .lockfile_hash(manifest.lockfile_hash)
+        .base_snapshot(Some(old_hash))
+        .paranoid(paranoid);
+    match store.publish_snapshot(manifest.entries.clone(), opts) {
         Ok(receipt) => {
             let timing = receipt.timing;
             *build = Some(timing);
@@ -701,11 +702,10 @@ fn ensure_published(
 ) -> Result<PublishOutcome, String> {
     let mut healed = false;
     loop {
-        match store.publish_snapshot_with_lockfile_and_timing(
-            manifest.entries.clone(),
-            manifest.lockfile_hash,
-            paranoid,
-        ) {
+        let opts = PublishOptions::default()
+            .lockfile_hash(manifest.lockfile_hash)
+            .paranoid(paranoid);
+        match store.publish_snapshot(manifest.entries.clone(), opts) {
             Ok(receipt) => {
                 *build = Some(receipt.timing);
                 return Ok(receipt.outcome);
@@ -731,8 +731,6 @@ fn heal_blob(
     src_root: &Path,
     blob: ContentId,
 ) -> Result<(), String> {
-    use crate::Store as _;
-
     let rel = files
         .iter()
         .find(|(_, id)| **id == blob)

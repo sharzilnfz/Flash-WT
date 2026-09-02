@@ -1,6 +1,6 @@
 # Ticket 04: Snapshot Publication Consolidation & Scrub Reuse
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Description
 

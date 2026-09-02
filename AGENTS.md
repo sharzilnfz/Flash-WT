@@ -1,5 +1,7 @@
 # AGENTS.md
 
+Always use codebase-memory MCP for all searching and querying
+
 ## Agent skills
 
 ### Issue tracker

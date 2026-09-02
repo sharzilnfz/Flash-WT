@@ -218,7 +218,9 @@ impl WorkspaceCleaner for GitWorkspaceCleaner {
         if let Some(ref r_root) = repo_root {
             let engine = WorkspaceEngine::from_root(r_root.clone());
             if worktree.exists() {
-                if let Err(e) = engine.git(&["worktree", "remove", "--force", &worktree.to_string_lossy()]) {
+                if let Err(e) =
+                    engine.git(&["worktree", "remove", "--force", &worktree.to_string_lossy()])
+                {
                     if worktree.exists() {
                         return Err(std::io::Error::other(e.to_string()));
                     }

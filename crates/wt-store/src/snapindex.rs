@@ -210,12 +210,6 @@ impl SelectionIndex {
         }
     }
 
-    /// Publish the whole index atomically: temp file inside the
-    /// snapshots directory, then one rename onto the final name.
-    pub fn save(&self, root: &Path) -> io::Result<()> {
-        self.save_durable(root)
-    }
-
     /// Publish the whole index crash-durably: temp file inside the
     /// snapshots directory, fsync, rename onto final name, fsync parent dir.
     pub fn save_durable(&self, root: &Path) -> io::Result<()> {
@@ -400,12 +394,6 @@ impl SnapshotLru {
         }
     }
 
-    /// Publish the whole sidecar atomically: temp file inside the
-    /// snapshots directory, then one rename onto the final name.
-    pub fn save(&self, root: &Path) -> io::Result<()> {
-        self.save_durable(root)
-    }
-
     /// Publish the whole sidecar crash-durably.
     pub fn save_durable(&self, root: &Path) -> io::Result<()> {
         let dir = root.join("snapshots");
@@ -520,43 +508,8 @@ fn append_journal(root: &Path, line: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Held `flock(2)` on `<root>/snapshots/metadata.lock` during sweep
-/// compaction.
-pub struct MetadataLock {
-    file: fs::File,
-}
-
-impl MetadataLock {
-    /// Acquire an exclusive lock on `<root>/snapshots/metadata.lock`.
-    pub fn acquire(root: &Path) -> io::Result<Self> {
-        let dir = root.join("snapshots");
-        fs::create_dir_all(&dir)?;
-        let path = dir.join("metadata.lock");
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-        use std::os::unix::io::AsRawFd;
-        let fd = file.as_raw_fd();
-        // SAFETY: flock(2) takes only an fd and constants; the fd is
-        // valid for as long as `file` is alive.
-        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self { file })
-    }
-}
-
-impl Drop for MetadataLock {
-    fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        let fd = self.file.as_raw_fd();
-        // SAFETY: fd is valid for the lifetime of self.file.
-        unsafe { libc::flock(fd, libc::LOCK_UN) };
-    }
-}
+/// Held `flock(2)` on `<root>/snapshots/metadata.lock` during sweep compaction.
+pub type MetadataLock = crate::fsutil::FlockGuard;
 
 /// Compact `<root>/snapshots/journal.tsv` into canonical `index.tsv` and `lru.tsv`.
 ///
@@ -568,7 +521,7 @@ pub fn compact_journal(root: &Path) -> io::Result<()> {
     if !dir.exists() {
         return Ok(());
     }
-    let _lock = MetadataLock::acquire(root)?;
+    let _lock = crate::fsutil::FlockGuard::lock_file_exclusive(&dir.join("metadata.lock"))?;
     let j_path = journal_path(root);
     let mut journal_file = match fs::OpenOptions::new().read(true).write(true).open(&j_path) {
         Ok(f) => f,
@@ -748,7 +701,7 @@ mod tests {
         );
         idx.record_publish(ROOT_A, PAT, HEAVY, &id(2), 200);
 
-        idx.save(store).expect("save");
+        idx.save_durable(store).expect("save");
         let back = SelectionIndex::load(store);
         assert_eq!(back, idx, "escaped round-trip must be lossless");
     }
@@ -1004,8 +957,7 @@ mod tests {
 
     #[test]
     fn select_walks_ring_newest_first_and_skips_invalid_candidates() {
-        use crate::Store as _;
-        use crate::snapshot::{Manifest, SnapshotEntry};
+        use crate::snapshot::{Manifest, PublishOptions, SnapshotEntry};
 
         let base = tempfile::tempdir().unwrap();
         let mut store = crate::DiskStore::open(base.path().join("store")).unwrap();
@@ -1015,8 +967,9 @@ mod tests {
         let m_old = Manifest::new(entries).unwrap();
         assert_eq!(
             store
-                .publish_snapshot(m_old.entries.clone(), false)
-                .unwrap(),
+                .publish_snapshot(m_old.entries.clone(), PublishOptions::default())
+                .unwrap()
+                .outcome,
             crate::PublishOutcome::Published
         );
         super::record_publish(store.root(), ROOT_A, PAT, HEAVY, &m_old.hash).unwrap();
@@ -1031,8 +984,9 @@ mod tests {
         let m_new = Manifest::new(entries2).unwrap();
         assert_eq!(
             store
-                .publish_snapshot(m_new.entries.clone(), false)
-                .unwrap(),
+                .publish_snapshot(m_new.entries.clone(), PublishOptions::default())
+                .unwrap()
+                .outcome,
             crate::PublishOutcome::Published
         );
         super::record_publish(store.root(), ROOT_A, PAT, HEAVY, &m_new.hash).unwrap();
@@ -1079,7 +1033,7 @@ mod tests {
         lru.record(&id(1), 100);
         lru.record(&id(2), 200);
         lru.record(&id(1), 150); // upsert, no duplicate line
-        lru.save(store).unwrap();
+        lru.save_durable(store).unwrap();
         let back = SnapshotLru::load(store);
         assert_eq!(back, lru);
         assert_eq!(back.entries.len(), 2);

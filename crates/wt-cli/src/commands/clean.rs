@@ -273,7 +273,10 @@ fn clean_batch_worktrees(
                 if candidate.path.exists() {
                     diagnostics.push(Diagnostic::error(
                         "REMOVE_FAILED",
-                        format!("worktree {} still exists after removal", candidate.path.display()),
+                        format!(
+                            "worktree {} still exists after removal",
+                            candidate.path.display()
+                        ),
                     ));
                     continue;
                 }

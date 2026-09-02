@@ -19,19 +19,21 @@ use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
 use wt_store::{
-    ContentId, DiskStore, Manifest, MarkSwept, PublishOutcome, SnapshotEntry, SnapshotLru,
+    ContentId, DiskStore, Manifest, MarkSwept, PublishOptions, PublishOutcome, SnapshotEntry,
+    SnapshotLru,
 };
 
 /// Publish one distinct, valid snapshot carrying `tag`; returns its
 /// manifest hash (the directory name under `snapshots/`).
 fn publish_snapshot(store: &mut DiskStore, tag: &[u8]) -> ContentId {
-    use wt_store::Store as _;
-
     let blob = store.put(tag).unwrap();
     let entries = vec![SnapshotEntry::file("f.bin", blob, 0o644)];
     let manifest = Manifest::new(entries.clone()).unwrap();
     assert_eq!(
-        store.publish_snapshot(entries, false).unwrap(),
+        store
+            .publish_snapshot(entries, PublishOptions::default())
+            .unwrap()
+            .outcome,
         PublishOutcome::Published
     );
     manifest.hash
@@ -80,7 +82,7 @@ fn stamp_lru(store: &Path, stamps: &[(ContentId, u64)]) {
     SnapshotLru {
         entries: stamps.to_vec(),
     }
-    .save(store)
+    .save_durable(store)
     .unwrap();
 }
 

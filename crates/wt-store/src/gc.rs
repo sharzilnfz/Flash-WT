@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::mirror::{self, ReadMirror};
-use crate::{ContentId, DiskStore, Error, Result, Store};
+use crate::{ContentId, DiskStore, Error, Result};
 
 /// The store's collection mode, persisted as `<root>/gc-mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -722,14 +722,14 @@ pub struct RetirementReceipt {
 }
 
 /// Unified store and lease reclamation engine.
-pub struct StoreReclaimer<'a, C: WorkspaceCleaner> {
+pub struct StoreReclaimer<'a> {
     store: &'a mut DiskStore,
-    cleaner: &'a C,
+    cleaner: &'a dyn WorkspaceCleaner,
 }
 
-impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
+impl<'a> StoreReclaimer<'a> {
     /// Construct a new `StoreReclaimer` on the given store with a workspace cleaner adapter.
-    pub fn new(store: &'a mut DiskStore, cleaner: &'a C) -> Self {
+    pub fn new(store: &'a mut DiskStore, cleaner: &'a dyn WorkspaceCleaner) -> Self {
         Self { store, cleaner }
     }
 
@@ -790,7 +790,7 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
                                             }
                                         }
                                         for cid in blob_ids {
-                                            match Store::release_ref(self.store, &cid) {
+                                            match self.store.release_ref(&cid) {
                                                 Ok(()) => {}
                                                 Err(Error::RefCountUnderflow(_)) => {}
                                                 Err(e) => return Err(e),
@@ -971,7 +971,7 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
         let mut references_released = 0;
         if !blob_ids.is_empty() && self.store.gc_mode() != GcMode::MarkSweepNoRefs {
             for cid in &blob_ids {
-                match Store::release_ref(self.store, cid) {
+                match self.store.release_ref(cid) {
                     Ok(()) => {
                         references_released += 1;
                     }

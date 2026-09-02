@@ -62,7 +62,7 @@ pub(super) fn clone_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
 
 /// Every relpath under `dir` (files, symlinks, AND directories —
 /// empty dirs matter), sorted. For the paranoid structural pass.
-fn collect_rels(dir: &Path, prefix: &str, out: &mut Vec<String>) -> io::Result<()> {
+pub(crate) fn collect_rels(dir: &Path, prefix: &str, out: &mut Vec<String>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
@@ -91,7 +91,7 @@ fn malformed_entry(entry: &SnapshotEntry, problem: &str) -> BuildError {
 /// must carry its recorded target. Covers bulk-cloned and freshly-
 /// linked content alike — see the trust model on
 /// [`DiskStore::publish_snapshot_incremental`].
-pub(super) fn paranoid_verify_tree(tree_dir: &Path, manifest: &Manifest) -> Result<(), BuildError> {
+pub(crate) fn paranoid_verify_tree(tree_dir: &Path, manifest: &Manifest) -> Result<(), BuildError> {
     let mut got = Vec::new();
     if let Err(e) = collect_rels(tree_dir, "", &mut got) {
         return Err(BuildError::Fatal(format!(
@@ -480,8 +480,7 @@ impl DiskStore {
                 .map_err(|_| malformed_entry(entry, "NUL in target path"))?;
 
                 let raw_fd = dir_fd.map_or(libc::AT_FDCWD, DirFd::raw);
-                let rc =
-                    unsafe { libc::symlinkat(c_target.as_ptr(), raw_fd, c_name.as_ptr()) };
+                let rc = unsafe { libc::symlinkat(c_target.as_ptr(), raw_fd, c_name.as_ptr()) };
                 if rc != 0 {
                     let err = io::Error::last_os_error();
                     return Err(BuildError::Fatal(format!(
@@ -539,13 +538,7 @@ impl DiskStore {
                 let raw_fd = dir_fd.map_or(libc::AT_FDCWD, DirFd::raw);
                 let stage = Instant::now();
                 let rc = unsafe {
-                    libc::linkat(
-                        libc::AT_FDCWD,
-                        c_blob.as_ptr(),
-                        raw_fd,
-                        c_name.as_ptr(),
-                        0,
-                    )
+                    libc::linkat(libc::AT_FDCWD, c_blob.as_ptr(), raw_fd, c_name.as_ptr(), 0)
                 };
                 if rc != 0 {
                     let err = io::Error::last_os_error();
@@ -588,9 +581,8 @@ impl DiskStore {
 }
 
 fn replace_with_blob_copy(blob_path: &Path, dest: &Path, mode: u32) -> Result<(), BuildError> {
-    fs::remove_file(dest).map_err(|e| {
-        BuildError::Fatal(format!("cannot unlink {}: {e}", dest.display()))
-    })?;
+    fs::remove_file(dest)
+        .map_err(|e| BuildError::Fatal(format!("cannot unlink {}: {e}", dest.display())))?;
     wt_copy::buffered_copy_file(blob_path, dest).map_err(|e| {
         BuildError::Fatal(format!(
             "cannot copy blob {} to {}: {e}",
@@ -598,8 +590,7 @@ fn replace_with_blob_copy(blob_path: &Path, dest: &Path, mode: u32) -> Result<()
             dest.display()
         ))
     })?;
-    fs::set_permissions(dest, fs::Permissions::from_mode(mode)).map_err(|e| {
-        BuildError::Fatal(format!("cannot chmod {}: {e}", dest.display()))
-    })?;
+    fs::set_permissions(dest, fs::Permissions::from_mode(mode))
+        .map_err(|e| BuildError::Fatal(format!("cannot chmod {}: {e}", dest.display())))?;
     Ok(())
 }

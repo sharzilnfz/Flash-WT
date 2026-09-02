@@ -73,7 +73,9 @@ pub enum WtCommand {
     },
     /// Create a worktree for NAME (used as the git branch name) and
     /// hydrate the heavy directories listed in the .wtinclude manifest.
-    #[command(alias = "new", long_about = "Create a worktree for NAME (used as the git branch \
+    #[command(
+        alias = "new",
+        long_about = "Create a worktree for NAME (used as the git branch \
 name) and hydrate the heavy directories listed in the .wtinclude manifest.
 
 Hydrated files are private, fully writable copy-on-write clones of store
@@ -97,7 +99,8 @@ prints per-stage timings (`wt-stage ingest=...` and friends) to stderr.
 
 Whole-directory snapshots are automatically enabled by default on macOS APFS.
 WT_SNAPSHOTS=0 opts out and forces per-file hydration. WT_VERIFY=1 bypasses
-snapshot hits entirely and rebuilds from freshly hashed blobs.")]
+snapshot hits entirely and rebuilds from freshly hashed blobs."
+    )]
     Create {
         /// Branch name; also names the new worktree directory.
         name: String,

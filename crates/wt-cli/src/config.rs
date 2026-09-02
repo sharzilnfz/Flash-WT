@@ -142,19 +142,20 @@ mod tests {
     fn flag_parsing_recognizes_false_variants_and_empty() {
         let _guard = ENV_LOCK.lock().unwrap();
         // false variants
-        for v in ["0", "false", "FALSE", "False", "no", "NO", "off", "OFF", "Off"] {
+        for v in [
+            "0", "false", "FALSE", "False", "no", "NO", "off", "OFF", "Off",
+        ] {
             set("WT_SNAPSHOTS", Some(v));
             assert!(
                 !flag_with_default("WT_SNAPSHOTS", true),
                 "value {v:?} should be false"
             );
-            assert!(
-                !flag("WT_SNAPSHOTS"),
-                "flag {v:?} should be false"
-            );
+            assert!(!flag("WT_SNAPSHOTS"), "flag {v:?} should be false");
         }
         // true variants
-        for v in ["1", "true", "TRUE", "yes", "YES", "on", "ON", "anything", "2"] {
+        for v in [
+            "1", "true", "TRUE", "yes", "YES", "on", "ON", "anything", "2",
+        ] {
             set("WT_SNAPSHOTS", Some(v));
             assert!(
                 flag_with_default("WT_SNAPSHOTS", false),
@@ -166,7 +167,10 @@ mod tests {
         set("WT_SNAPSHOTS", Some(""));
         assert!(flag_with_default("WT_SNAPSHOTS", true));
         assert!(!flag_with_default("WT_SNAPSHOTS", false));
-        assert!(!flag("WT_SNAPSHOTS"), "empty should be false for flag (default false)");
+        assert!(
+            !flag("WT_SNAPSHOTS"),
+            "empty should be false for flag (default false)"
+        );
         set("WT_SNAPSHOTS", Some("   "));
         assert!(flag_with_default("WT_SNAPSHOTS", true));
         // unset

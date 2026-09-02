@@ -128,6 +128,43 @@ enum StageSeed {
     CloneTree,
 }
 
+/// Options controlling snapshot publication in [`DiskStore::publish_snapshot`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PublishOptions {
+    /// Optional lockfile hash to associate with the published snapshot manifest.
+    pub lockfile_hash: Option<ContentId>,
+    /// Base snapshot hash for incremental rebuild. If set, an incremental tree clone & diff
+    /// will be used rather than a fresh tree build.
+    pub base_snapshot: Option<ContentId>,
+    /// Full hash verification on blobs before linking / whole staged tree proof pass.
+    pub paranoid: bool,
+}
+
+impl PublishOptions {
+    /// Default publish options (full build, no lockfile, standard verification).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set whether full paranoid read-and-hash verification is performed.
+    pub fn paranoid(mut self, paranoid: bool) -> Self {
+        self.paranoid = paranoid;
+        self
+    }
+
+    /// Set an optional pinned lockfile hash for the snapshot manifest.
+    pub fn lockfile_hash(mut self, lockfile_hash: Option<ContentId>) -> Self {
+        self.lockfile_hash = lockfile_hash;
+        self
+    }
+
+    /// Set an optional base snapshot hash to enable incremental v2 tree cloning.
+    pub fn base_snapshot(mut self, base_snapshot: Option<ContentId>) -> Self {
+        self.base_snapshot = base_snapshot;
+        self
+    }
+}
+
 impl DiskStore {
     /// Directory of the published snapshot for `hash`.
     ///
@@ -143,203 +180,57 @@ impl DiskStore {
         super::read_published(self.root(), hash)
     }
 
-    /// Build the snapshot tree for `entries` in
-    /// `<root>/snapshots/tmp/<uuid>` and atomically rename it into
-    /// place. Every file blob is verified BEFORE linking, per policy:
-    /// full read-and-hash when `paranoid`, verified-ledger trust
-    /// otherwise ([`DiskStore::ensure_verified`]).
+    /// Build the snapshot tree for `entries` in `<root>/snapshots/tmp/<uuid>`
+    /// and atomically rename it into place.
     ///
-    /// Concurrent publish: the rename is the single atomic act. If it
-    /// loses (EEXIST/ENOTEMPTY), the winner is validated — valid means
-    /// discard our temp and use theirs; invalid debris stays untouched
-    /// and the caller treats this as a miss. See [`PublishOutcome`].
+    /// Every file blob is verified BEFORE linking, per policy: full read-and-hash
+    /// when `options.paranoid`, verified-ledger trust otherwise ([`DiskStore::ensure_verified`]).
+    /// When `options.base_snapshot` is provided, seeds staging with a recursive `clonefile(2)`
+    /// of the base snapshot and applies the manifest diff in place.
     ///
-    /// Returns [`BuildError::MissingBlob`] when a blob disappeared
-    /// mid-build (sweep race): the CALLER re-puts the source content
-    /// and retries once — this method borrows immutably precisely so
-    /// the retry can mutate the store in between.
+    /// Concurrent publish: the rename is the single atomic act. If it loses (EEXIST/ENOTEMPTY),
+    /// the winner is validated — valid means discard our temp and use theirs; invalid debris stays
+    /// untouched and the caller treats this as a miss. See [`PublishOutcome`].
+    ///
+    /// Returns [`BuildError::MissingBlob`] when a blob disappeared mid-build (sweep race):
+    /// the CALLER re-puts the source content and retries once.
     pub fn publish_snapshot(
         &self,
         entries: Vec<SnapshotEntry>,
-        paranoid: bool,
-    ) -> Result<PublishOutcome, BuildError> {
-        self.publish_snapshot_with_lockfile_and_timing(entries, None, paranoid)
-            .map(|receipt| receipt.outcome)
-    }
-
-    /// Publish a snapshot with an optional lockfile hash.
-    pub fn publish_snapshot_with_lockfile(
-        &self,
-        entries: Vec<SnapshotEntry>,
-        lockfile_hash: Option<ContentId>,
-        paranoid: bool,
-    ) -> Result<PublishOutcome, BuildError> {
-        self.publish_snapshot_with_lockfile_and_timing(entries, lockfile_hash, paranoid)
-            .map(|receipt| receipt.outcome)
-    }
-
-    /// [`Self::publish_snapshot`] plus a returned [`PublishReceipt`]
-    /// with internal phase timings (Step 0 instrumentation):
-    /// verify = all ensure_verified/get hashing+stat work; link_train
-    /// = staging mkdirs + hardlinks + chmods + symlinks; publish =
-    /// manifest serialization/hash, `.complete`, renames.
-    pub fn publish_snapshot_with_timing(
-        &self,
-        entries: Vec<SnapshotEntry>,
-        paranoid: bool,
+        options: PublishOptions,
     ) -> Result<PublishReceipt, BuildError> {
-        self.publish_snapshot_with_lockfile_and_timing(entries, None, paranoid)
-    }
-
-    /// [`Self::publish_snapshot_with_lockfile`] plus internal phase timings.
-    pub fn publish_snapshot_with_lockfile_and_timing(
-        &self,
-        entries: Vec<SnapshotEntry>,
-        lockfile_hash: Option<ContentId>,
-        paranoid: bool,
-    ) -> Result<PublishReceipt, BuildError> {
-        self.stage_and_publish(
-            entries,
-            lockfile_hash,
-            StageSeed::FreshTree,
-            &mut |tree_dir, manifest, timing| {
-                self.fill_full_tree(tree_dir, manifest, paranoid, timing)
-            },
-        )
-    }
-
-    /// The full-build delta: place every manifest entry from blobs.
-    fn fill_full_tree(
-        &self,
-        tree_dir: &Path,
-        manifest: &Manifest,
-        paranoid: bool,
-        timing: &mut SnapshotBuildTiming,
-    ) -> Result<(), BuildError> {
-        let mut tt = TreeTimings::default();
-        self.build_tree(tree_dir, manifest, paranoid, &mut tt)?;
-        timing.verify_ms = tt.verify_ms;
-        timing.link_train_ms = tt.link_train_ms;
-        Ok(())
-    }
-
-    /// v2 incremental rebuild: produce the same published snapshot as
-    /// [`Self::publish_snapshot`] would, but seed staging with ONE
-    /// recursive `clonefile(2)` of a previous snapshot's entire tree
-    /// and apply the manifest diff in place, instead of re-linking
-    /// every file from blobs.
-    ///
-    /// # Arguments
-    ///
-    /// - `entries`: the FULL new entry list. Validated and hashed here
-    ///   like any build.
-    /// - `old_hash`: the published snapshot whose tree is cloned
-    ///   wholesale. It must still be valid at call time; anything else
-    ///   aborts the attempt (see below).
-    /// - `paranoid`: as in [`Self::publish_snapshot`].
-    ///
-    /// # Mechanics
-    ///
-    /// Staging works exactly like the full builder (temp dir under
-    /// `snapshots/tmp/`, atomic rename at the end), except `tree/` is
-    /// not pre-created: it IS the clone destination. ONE
-    /// `clonefile(snapshots/<old>/tree -> staging/tree)` hands every
-    /// inode a private CoW copy — safe to mutate in place. ANY clone
-    /// failure (missing or evicted old snapshot, non-APFS volume,
-    /// refusal of any kind) aborts the whole attempt with
-    /// [`BuildError::Fatal`]; the caller then falls back to a full
-    /// build. There is deliberately NO per-unit fallback anymore.
-    ///
-    /// The diff against the old manifest is computed here and applied
-    /// inside the private copy:
-    ///
-    /// - deletions deepest-first (`remove_file`, or `remove_dir_all`
-    ///   for a deleted directory's whole subtree);
-    /// - added entries and content-modified entries re-placed through
-    ///   the SAME shared placement helper as the full builder
-    ///   (verify-first policy per `paranoid`, hardlink,
-    ///   skip-no-op-chmod, symlink recreation, parent-dir creation);
-    /// - mode-only flips on same-ref files chmod'd IN PLACE (the
-    ///   cloned inode is private) instead of relinked — cheaper and
-    ///   byte-equivalent;
-    /// - any manifest-required directory still missing after all that
-    ///   (an added empty dir, or one whose children were all removed)
-    ///   gets created.
-    ///
-    /// Publish semantics — winner-collision handling, temp cleanup on
-    /// error — mirror [`PublishOutcome`] exactly.
-    ///
-    /// # Trust model under `paranoid` (`WT_VERIFY=1`)
-    ///
-    /// Before the rename, EVERY path in the staged tree — bulk-cloned
-    /// and freshly-linked alike — is checked against the manifest:
-    /// each file is read-and-hashed against its blob id, each symlink
-    /// compared by target, and the path set must match exactly (no
-    /// strays, no omissions). Any mismatch fails the whole incremental
-    /// publish with [`BuildError::Fatal`] BEFORE the rename — the
-    /// caller then falls back to a full paranoid rebuild, which hashes
-    /// everything it links. Non-paranoid runs trust the old snapshot's
-    /// verified-at-publish status for cloned contents, exactly like a
-    /// hit trusts a published snapshot.
-    pub fn publish_snapshot_incremental(
-        &self,
-        entries: Vec<SnapshotEntry>,
-        old_hash: &ContentId,
-        paranoid: bool,
-    ) -> Result<PublishOutcome, BuildError> {
-        self.publish_snapshot_incremental_with_lockfile_and_timing(
-            entries, None, old_hash, paranoid,
-        )
-        .map(|receipt| receipt.outcome)
-    }
-
-    /// Publish an incremental snapshot with an optional lockfile hash.
-    pub fn publish_snapshot_incremental_with_lockfile(
-        &self,
-        entries: Vec<SnapshotEntry>,
-        lockfile_hash: Option<ContentId>,
-        old_hash: &ContentId,
-        paranoid: bool,
-    ) -> Result<PublishOutcome, BuildError> {
-        self.publish_snapshot_incremental_with_lockfile_and_timing(
-            entries,
-            lockfile_hash,
-            old_hash,
-            paranoid,
-        )
-        .map(|receipt| receipt.outcome)
-    }
-
-    /// [`Self::publish_snapshot_incremental`] plus a returned
-    /// [`PublishReceipt`]; the timing additionally fills
-    /// `clone_units_ms` / `clone_units` / `linked_files`.
-    pub fn publish_snapshot_incremental_with_timing(
-        &self,
-        entries: Vec<SnapshotEntry>,
-        old_hash: &ContentId,
-        paranoid: bool,
-    ) -> Result<PublishReceipt, BuildError> {
-        self.publish_snapshot_incremental_with_lockfile_and_timing(
-            entries, None, old_hash, paranoid,
-        )
-    }
-
-    /// [`Self::publish_snapshot_incremental_with_lockfile`] plus internal phase timings.
-    pub fn publish_snapshot_incremental_with_lockfile_and_timing(
-        &self,
-        entries: Vec<SnapshotEntry>,
-        lockfile_hash: Option<ContentId>,
-        old_hash: &ContentId,
-        paranoid: bool,
-    ) -> Result<PublishReceipt, BuildError> {
-        self.stage_and_publish(
-            entries,
-            lockfile_hash,
-            StageSeed::CloneTree,
-            &mut |tree_dir, manifest, timing| {
-                self.fill_incremental_tree(tree_dir, manifest, old_hash, paranoid, timing)
-            },
-        )
+        if let Some(old_hash) = options.base_snapshot {
+            self.stage_and_publish(
+                entries,
+                options.lockfile_hash,
+                StageSeed::CloneTree,
+                &mut |tree_dir, manifest, timing| {
+                    self.fill_incremental_tree(
+                        tree_dir,
+                        manifest,
+                        &old_hash,
+                        options.paranoid,
+                        timing,
+                    )
+                },
+            )
+        } else {
+            self.stage_and_publish(
+                entries,
+                options.lockfile_hash,
+                StageSeed::FreshTree,
+                &mut |tree_dir, manifest, timing| {
+                    let mut tree_timings = TreeTimings {
+                        verify_ms: timing.verify_ms,
+                        link_train_ms: timing.link_train_ms,
+                    };
+                    self.build_tree(tree_dir, manifest, options.paranoid, &mut tree_timings)?;
+                    timing.verify_ms = tree_timings.verify_ms;
+                    timing.link_train_ms = tree_timings.link_train_ms;
+                    Ok(())
+                },
+            )
+        }
     }
 
     /// The v2 delta application, run against an already-cloned or

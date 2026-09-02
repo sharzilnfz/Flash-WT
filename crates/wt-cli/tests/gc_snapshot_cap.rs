@@ -15,17 +15,20 @@ use std::fs;
 use std::path::Path;
 
 use common::Fixture;
-use wt_store::{ContentId, DiskStore, Manifest, PublishOutcome, SnapshotEntry, SnapshotLru};
+use wt_store::{
+    ContentId, DiskStore, Manifest, PublishOptions, PublishOutcome, SnapshotEntry, SnapshotLru,
+};
 
 /// Publish one distinct, valid unreferenced snapshot carrying `tag`.
 fn publish_snapshot(store: &mut DiskStore, tag: &[u8]) -> ContentId {
-    use wt_store::Store as _;
-
     let blob = store.put(tag).unwrap();
     let entries = vec![SnapshotEntry::file("f.bin", blob, 0o644)];
     let manifest = Manifest::new(entries.clone()).unwrap();
     assert_eq!(
-        store.publish_snapshot(entries, false).unwrap(),
+        store
+            .publish_snapshot(entries, PublishOptions::default())
+            .unwrap()
+            .outcome,
         PublishOutcome::Published
     );
     manifest.hash
@@ -44,8 +47,6 @@ fn surviving_snapshots(store: &Path) -> Vec<String> {
     names
 }
 
-/// A mark-sweep store holding `count` YOUNG (inside-grace)
-/// unreferenced snapshots with strictly increasing last-use stamps.
 fn capped_store(count: usize) -> (tempfile::TempDir, Vec<ContentId>) {
     let base = tempfile::tempdir().unwrap();
     let mut store = DiskStore::open(base.path().join("store")).unwrap();
@@ -59,7 +60,7 @@ fn capped_store(count: usize) -> (tempfile::TempDir, Vec<ContentId>) {
             .map(|(i, h)| (*h, 100 * (i as u64 + 1)))
             .collect(),
     }
-    .save(store.root())
+    .save_durable(store.root())
     .unwrap();
     fs::write(base.path().join("store").join("gc-mode"), "mark-sweep\n").unwrap();
     (base, hashes)
@@ -162,7 +163,7 @@ fn byte_budget_env_evicts_oldest_unreferenced_snapshots_once_threshold_exceeded(
             .map(|(i, h)| (*h, 100 * (i as u64 + 1)))
             .collect(),
     }
-    .save(store.root())
+    .save_durable(store.root())
     .unwrap();
     fs::write(base.path().join("store").join("gc-mode"), "mark-sweep\n").unwrap();
 
@@ -210,7 +211,7 @@ fn dual_budget_count_and_bytes_operate_alongside() {
             .map(|(i, h)| (*h, 100 * (i as u64 + 1)))
             .collect(),
     }
-    .save(store.root())
+    .save_durable(store.root())
     .unwrap();
     fs::write(base.path().join("store").join("gc-mode"), "mark-sweep\n").unwrap();
 
