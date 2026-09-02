@@ -2,21 +2,21 @@
 
 ## Executive Summary
 
-`wt` provides instant Git worktrees with heavy untracked directories hydrated in milliseconds. It achieves sub-second hydration by treating the content-addressed store as the source of truth and checked-out directories as disposable projections.
+`wt-hydrate` (with optional `wt` alias) provides instant Git worktrees with heavy untracked directories hydrated in milliseconds. It achieves sub-second hydration by treating the content-addressed store as a local snapshot cache and checked-out directories as disposable Copy-on-Write projections.
 
-This audit reviewed the full codebase across `crates/wt-copy`, `crates/wt-store`, `crates/wt-cli`, benchmarks, test suites, and distribution packaging. We verified the architecture, traced historical evolution across 6 ADRs, identified over-engineering opportunities, and checked launch readiness for version 0.1.0.
+Following the completion and verification of the **v0.1.0 Launch Readiness & Safety Remediation** milestone (PR #6), this audit performed a comprehensive whole-repository ponytail scan across `crates/wt-copy`, `crates/wt-store`, `crates/wt-cli`, benchmarks, test suites, CI workflows, and distribution packaging.
 
-`throughput checkpoint: n/a, read-only investigation`
+We verified the architecture against current code, audited all 84 source files, cataloged completed safety fixes, and identified high-impact opportunities for post-v0.1 simplification.
 
 ---
 
 ## Principles That Shaped Decisions
 
-1. **`principle-laziness-protocol`**. We targeted complete deletion of legacy refcount code ([`refs/`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/disk.rs#L285-L316)) and deprecation forwarders ([`manifest.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/manifest.rs)) instead of maintaining backward-compatibility shims before version 0.1.0.
-2. **`principle-subtract-before-you-add`**. We prioritized cutting the three-layer WAL snapshot index ([`snapindex.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/snapindex.rs#L128-L233)) down to a single atomic TSV index before adding further storage features.
-3. **`principle-minimize-reader-load`**. We identified single-caller delegators in [`CopyEngine`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/engine.rs#L137-L184) and [`WorkspaceEngine`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/workspace.rs#L33-L68) to collapse shallow wrappers into direct caller invocations.
-4. **`principle-guard-the-context-window`**. We dispatched 6 parallel subagents across isolated architectural slices (`how`, `why`, and 4 `swarm` workers) to review 28,606 lines of Rust without context compaction.
-5. **`principle-prove-it-works`**. We proved clean compilation and zero Clippy warnings across all workspace targets, while uncovering runtime bottlenecks in debug-mode test fixtures.
+1. **`principle-laziness-protocol`**. Delete dead code and speculative wrappers rather than maintaining pre-v0.1 shims.
+2. **`principle-subtract-before-you-add`**. Cut redundant single-caller forwarders, zero-sized wrapper types, and speculative safety gates.
+3. **`principle-minimize-reader-load`**. Eliminate hand-rolled standard library routines in favor of Rust standard library features (`u32::from_le_bytes`, `Path::ancestors`, `std::io::copy`, `derive(Default)`).
+4. **`principle-guard-the-context-window`**. Audit each subsystem in isolated parallel sweeps without context compaction.
+5. **`principle-prove-it-works`**. Verify that all workspace targets compile with 0 warnings under `-D warnings` and pass all 133+ unit and integration tests.
 
 ---
 
@@ -24,10 +24,11 @@ This audit reviewed the full codebase across `crates/wt-copy`, `crates/wt-store`
 
 ```mermaid
 graph TD
-    User["Developer / Agent CLI<br><code>wt new | wt clean | wt list | wt scratch | wt demo</code>"] --> CLI["crates/wt-cli"]
+    User["Developer / Coding Agent<br><code>wt new | wt clean | wt list | wt hydrate | wt scratch | wt demo</code>"] --> CLI["crates/wt-cli"]
     
-    CLI --> Ws["WorkspaceEngine (git operations)"]
+    CLI --> Ws["WorkspaceEngine (git operations & safety checks)"]
     CLI --> Hydrate["HydrationEngine (manifest & filter)"]
+    CLI --> Signal["SignalHandler (SIGINT/SIGTERM transactional rollback)"]
     CLI --> Reclaim["StoreReclaimer (cleanup & sweep)"]
     
     Ws --> Tree["Worktree On-Disk<br>(Disposable Projection)"]
@@ -35,16 +36,24 @@ graph TD
     Reclaim --> Store
     
     Store -->|"CoW Clone (<15ms)"| Tree
-    Store --> Copy["crates/wt-copy (CopyEngine)<br>- APFS clonefile<br>- Linux reflink<br>- Hardlinks / CoW<br>- Fallback copy"]
+    Store --> Copy["crates/wt-copy (CopyEngine)<br>- APFS clonefile<br>- Linux reflink / FICLONE<br>- Hardlinks / CoW<br>- Fallback copy"]
 ```
 
 ### Evolutionary Narrative
 
-1. **Foundational V1 (Instant Worktrees)**. Started with a SHA-256 CAS object store. Worktrees hydrated via read-only hardlinks. Garbage collection depended on individual refcount files in `refs/<hex>`. Creating a 4,000-file worktree required thousands of serialized disk writes and stripped file write permissions.
-2. **Fast Hydration & CoW Materialization**. Replaced read-only hardlinks with Copy-on-Write clones via APFS `fclonefileat(2)`. Added [`ValidationCache`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/validation.rs) to bypass re-hashing unchanged files by recording `(size, mtime, ContentId)`.
-3. **Whole-Directory Snapshots & Store-Local Mark-and-Sweep GC ([ADR-0004](file:///Users/sharzilnafis/Projects/dumps/idea1/docs/adr/0004-mark-and-sweep-gc.md) & [ADR-0005](file:///Users/sharzilnafis/Projects/dumps/idea1/docs/adr/0005-directory-snapshots.md))**. Switched from per-blob refcounts to atomic store-local TSV mirrors ([`StoreMirror`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/mirror.rs)). Introduced whole-directory snapshots (`snapshots/<hash>/tree/`) projected into worktrees via a single `clonefile(2)` syscall in under 15 milliseconds.
-4. **V2 Incremental Diff Rebuilds ([ADR-0006](file:///Users/sharzilnafis/Projects/dumps/idea1/docs/adr/0006-external-library-evaluation.md))**. Replaced slow full rebuilds with flat sorted manifest diffing ([`SnapshotDiff`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/snapdiff.rs)). Evaluated and rejected external dependencies (`snapdir`, `clonetree`). Adopted macOS `getattrlistbulk(2)` batch walking in [`bulkwalk.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/bulkwalk.rs).
-5. **Agent Workflows, Sandboxes & 3-Verb Workflow**. Introduced version 1 NDJSON envelopes ([`Envelope`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/envelope.rs)), lease-backed scratch sandboxes ([`WorktreeLease`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/lease.rs)), Python virtualenv path relocation ([`toolchain.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/toolchain.rs)), and zero-setup benchmarking ([`demo.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/commands/demo.rs)).
+1. **Foundational V1 (Instant Worktrees)**: Started with SHA-256 CAS object store and read-only hardlinks. Garbage collection depended on individual refcount files in `refs/<hex>`.
+2. **Fast Hydration & CoW Materialization**: Replaced read-only hardlinks with Copy-on-Write clones via APFS `fclonefileat(2)`. Added `ValidationCache` to bypass re-hashing unchanged files.
+3. **Whole-Directory Snapshots & Store-Local Mark-and-Sweep GC ([ADR-0004](docs/adr/0004-mark-and-sweep-gc.md) & [ADR-0005](docs/adr/0005-directory-snapshots.md))**: Introduced atomic store-local TSV mirrors (`StoreMirror`) and whole-directory snapshots (`snapshots/<hash>/tree/`) projected via a single `clonefile(2)` syscall.
+4. **V2 Incremental Diff Rebuilds ([ADR-0006](docs/adr/0006-external-library-evaluation.md))**: Added flat manifest diffing (`SnapshotDiff`) and macOS `getattrlistbulk(2)` batch walking in `bulkwalk.rs`.
+5. **v0.1.0 Launch Readiness & Safety Hardening**: 
+   - Strict `clean` safety contract with porcelain status verification and `--force` requirements.
+   - CAS lease sweep refcount deduplication (`BTreeSet<ContentId>`) and inode permission protection.
+   - Lockfile fast-path nested staleness stat validation (`is_nested_stale`).
+   - Linux `copy_file_range` short write handling, `EINTR` retry loops, and Btrfs subvolume reflink support.
+   - `SIGINT`/`SIGTERM` signal handlers and `CreateGuard` transactional rollback.
+   - Python virtualenv `.pth` rewriting and binary byte-shebang support.
+   - Release archive normalization (`wt-v<version>-<target>.tar.gz`).
+   - Standalone `hydrate <path>` command, `init` starter command, in-memory defaults on `new`, and canonical renaming to `wt-hydrate` with `wt` alias.
 
 ---
 
@@ -52,186 +61,220 @@ graph TD
 
 | Architectural Decision | Chosen Approach | Rejected Alternative | Core Rationale |
 | :--- | :--- | :--- | :--- |
-| **Storage Architecture** | Userspace content-addressed store (`~/.cache/wt/store`) | Virtual Filesystem (FUSE, NFS, kernel extensions) | FUSE/kexts add syscall overhead and installation friction on macOS. Userspace store avoids intercepting every I/O call ([ADR-0001](file:///Users/sharzilnafis/Projects/dumps/idea1/docs/adr/0001-store-is-truth-tree-is-a-projection.md)). |
-| **Core Product Scope** | Tool-agnostic worktree hydration primitive | JS Package Manager / Monorepo build cache | `pnpm` handles npm deduplication, and Nix handles system packages. Nobody owned fast cross-ecosystem hydration of untracked heavy directories (`node_modules`, `target`, `.venv`) at the filesystem level ([ADR-0002](file:///Users/sharzilnafis/Projects/dumps/idea1/docs/adr/0002-tool-agnostic-worktree-hydration-first.md)). |
-| **Language & Runtime** | Rust single static binary | Go, C++, Python, Node.js daemon | Single static binary installable via curl or brew. Direct C-FFI bindings to macOS APFS `clonefile(2)` and `getattrlistbulk(2)` without runtime overhead ([ADR-0003](file:///Users/sharzilnafis/Projects/dumps/idea1/docs/adr/0003-rust-single-binary-explicit-first.md)). |
-| **Process Model** | Explicit, stateless CLI commands | Long-running background watcher daemon | Explicit commands (`wt new`, `wt clean`) are transparent, honest about disk side effects, and debuggable. Daemons introduce state desynchronization and crash recovery complexity ([ADR-0003](file:///Users/sharzilnafis/Projects/dumps/idea1/docs/adr/0003-rust-single-binary-explicit-first.md)). |
-| **Hydration Primitive (macOS)** | 1-syscall whole-directory `clonefile(2)` | Per-file reflink loop / hardlinks | Serialized per-file syscalls pay thousands of open/close/clone roundtrips. APFS directory clone completes in under 15ms for 10,000+ files ([ADR-0005](file:///Users/sharzilnafis/Projects/dumps/idea1/docs/adr/0005-directory-snapshots.md)). |
-| **GC Roots Architecture** | Store-local TSV mirror files (`<store>/worktrees/<key>.tsv`) | Per-blob refcount files OR `git worktree list` global discovery | Per-blob refcounts require thousands of atomic disk writes per create. `git worktree list` is unreliable because git administrative records outlive `rm -rf`. Store mirrors allow O(1) atomic publication per create ([ADR-0004](file:///Users/sharzilnafis/Projects/dumps/idea1/docs/adr/0004-mark-and-sweep-gc.md)). |
-| **Snapshot Diff Rebuilds** | Flat sorted manifest diff + whole-tree clone + delta | Hierarchical Merkle trees | Flat manifests are already sorted by path bytes. Merkle trees break backward compatibility and require catalog lookups. Flat diffs run in milliseconds with zero compatibility breakage. |
-| **GC Policy & Safety** | 15-minute grace period (`WT_GC_GRACE`) + mark-and-sweep | Immediate deletion / Hardlink-count GC | `pnpm`-style hardlink-count GC fails on CoW filesystems because cloned files get new inodes with `st_nlink=1`. The grace period ensures interrupted creates never lose live data. |
+| **Storage Architecture** | Userspace content-addressed store (`~/.cache/wt/store`) | Virtual Filesystem (FUSE, NFS, kexts) | Userspace store avoids kext signing, kernel panics, and syscall interception overhead ([ADR-0001](docs/adr/0001-store-is-truth-tree-is-a-projection.md)). |
+| **Core Product Scope** | Tool-agnostic worktree hydration primitive | Package manager / Build cache | Accelerates ignored directory hydration without re-implementing dependency resolvers ([ADR-0002](docs/adr/0002-tool-agnostic-worktree-hydration-first.md)). |
+| **Language & Runtime** | Rust single static binary (`wt-hydrate` / `wt`) | Go, C++, Python daemon | Single static binary installable via curl or brew. Direct C-FFI to APFS `clonefile` and `getattrlistbulk` ([ADR-0003](docs/adr/0003-rust-single-binary-explicit-first.md)). |
+| **Process Model** | Explicit, stateless CLI commands | Long-running background daemon | Explicit commands avoid state desynchronization and background daemon crashes ([ADR-0003](docs/adr/0003-rust-single-binary-explicit-first.md)). |
+| **Hydration Primitive** | 1-syscall whole-directory `clonefile(2)` | Per-file reflink loop / hardlinks | Directory cloning completes in <15ms for 10,000+ files on APFS ([ADR-0005](docs/adr/0005-directory-snapshots.md)). |
+| **GC Roots Architecture** | Store-local TSV mirror files (`<store>/worktrees/<key>.tsv`) | Per-blob refcount files | Store mirrors enable O(1) atomic publication per create ([ADR-0004](docs/adr/0004-mark-and-sweep-gc.md)). |
+| **Snapshot Diff Rebuilds** | Flat sorted manifest diff + whole-tree clone + delta | Hierarchical Merkle trees | Flat diffs run in milliseconds with zero catalog lookup overhead. |
+| **GC Safety Contract** | 15-minute grace period (`WT_GC_GRACE`) + mark-and-sweep | Immediate deletion / Hardlink-count GC | Protects in-flight worktrees and prevents data loss on interrupted creates. |
 
 ---
 
 ## 3. Subsystem Architecture Map
 
-### 3.1 `crates/wt-copy` (Storage & Copy Backends)
+### 3.1 `crates/wt-copy` (Placement & Copy Backends)
 
-| Component | File & Line Range | Responsibility |
-| :--- | :--- | :--- |
-| `CopyBackend` Trait | [`crates/wt-copy/src/lib.rs:164-186`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/lib.rs#L164-L186) | Directory copy interface & safety classifications. |
-| `ClonefileBackend` | [`crates/wt-copy/src/clonefile.rs:25-86`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/clonefile.rs#L25-L86) | macOS APFS `libc::clonefile(2)` backend (`CLONE_NOFOLLOW`). |
-| `ReflinkBackend` | [`crates/wt-copy/src/reflink.rs:25-103`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/reflink.rs#L25-L103) | Linux Btrfs/XFS `ioctl(FICLONE)` backend. |
-| `CopyFileRangeBackend` | [`crates/wt-copy/src/copy_file_range.rs:25-98`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/copy_file_range.rs#L25-L98) | Linux `copy_file_range(2)` server-side copy backend. |
-| `HardlinkBackend` | [`crates/wt-copy/src/hardlink.rs:26-98`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/hardlink.rs#L26-L98) | POSIX hardlinks with write bit stripping (`mode & !0o222`). |
-| `DeepCopyBackend` | [`crates/wt-copy/src/deep_copy.rs:24-97`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/deep_copy.rs#L24-L97) | Fallback buffered standard byte copy backend. |
-| `select_backend` | [`crates/wt-copy/src/selection.rs:35-86`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/selection.rs#L35-L86) | Dynamic backend selection based on filesystem capability probes. |
-| `Materializer` | [`crates/wt-copy/src/materialize.rs:223-410`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/materialize.rs#L223-L410) | Per-file placement engine with cross-device detection and ENOENT parent auto-creation. |
-| `CopyEngine` | [`crates/wt-copy/src/engine.rs:46-184`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/engine.rs#L46-L184) | Unified high-level coordinator for directory copying and file materialization. |
+| Component | Responsibility |
+| :--- | :--- |
+| `CopyBackend` Trait | Directory copy interface & safety classifications (`crates/wt-copy/src/lib.rs`). |
+| `ClonefileBackend` | macOS APFS `libc::clonefile(2)` backend (`crates/wt-copy/src/clonefile.rs`). |
+| `ReflinkBackend` | Linux Btrfs/XFS `ioctl(FICLONE)` backend (`crates/wt-copy/src/reflink.rs`). |
+| `CopyFileRangeBackend` | Linux `copy_file_range(2)` with `EINTR` retries & short write handling (`crates/wt-copy/src/copy_file_range.rs`). |
+| `HardlinkBackend` | POSIX hardlinks with write bit stripping (`crates/wt-copy/src/hardlink.rs`). |
+| `DeepCopyBackend` | Fallback buffered standard byte copy backend (`crates/wt-copy/src/deep_copy.rs`). |
+| `select_backend` | Dynamic backend selection based on filesystem capability probes (`crates/wt-copy/src/selection.rs`). |
+| `Materializer` | Per-file placement engine with cross-device detection (`crates/wt-copy/src/materialize.rs`). |
+| `CopyEngine` | High-level coordinator for directory copying and file materialization (`crates/wt-copy/src/engine.rs`). |
 
 ### 3.2 `crates/wt-store` (Object Store, Snapshots & GC)
 
-| Component | File & Line Range | Responsibility |
-| :--- | :--- | :--- |
-| `DiskStore` | [`crates/wt-store/src/disk.rs:108-588`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/disk.rs#L108-L588) | 256-shard content-addressed store (`objects/xx/yyyy...`). |
-| `durable_write` | [`crates/wt-store/src/fsutil.rs:24-58`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/fsutil.rs#L24-L58) | Crash-durable write protocol (write -> fsync -> rename -> fsync parent dir). |
-| `bulk_walk_tree` | [`crates/wt-store/src/bulkwalk.rs:57-142`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/bulkwalk.rs#L57-L142) | macOS `getattrlistbulk(2)` batch directory walker. |
-| `ingest_tree` | [`crates/wt-store/src/ingest.rs:45-168`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/ingest.rs#L45-L168) | Tree scanning & blob CAS storage with validation caching. |
-| `find_lockfile` | [`crates/wt-store/src/lockfile.rs:45-120`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/lockfile.rs#L45-L120) | Multi-ecosystem lockfile discovery (`pnpm`, `npm`, `yarn`, `bun`, `cargo`, `uv`, `poetry`). |
-| `VerifiedLedger` | [`crates/wt-store/src/verified.rs:25-180`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/verified.rs#L25-L180) | Verified blob ledger cache (`verified.tsv`). |
-| `ValidationCache` | [`crates/wt-store/src/validation.rs:25-170`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/validation.rs#L25-L170) | Ingest stat cache (`ingest-cache.tsv`) mapping `path -> (size, mtime, ContentId)`. |
-| `Manifest` | [`crates/wt-store/src/snapshot/manifest.rs:55-240`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/snapshot/manifest.rs#L55-L240) | Manifest parser & file mode normalizer. |
-| `build_tree` | [`crates/wt-store/src/snapshot/tree.rs:45-280`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/snapshot/tree.rs#L45-L280) | Parallel snapshot tree builder using `DirFd` and `linkat`. |
-| `publish_snapshot` | [`crates/wt-store/src/snapshot/publish.rs:45-310`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/snapshot/publish.rs#L45-L310) | Atomic snapshot publication protocol with `.complete` token. |
-| `SnapshotProjectionEngine` | [`crates/wt-store/src/snapshot/projection.rs:45-420`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/snapshot/projection.rs#L45-L420) | Lockfile fast path & whole-directory projection lifecycle. |
-| `SnapshotDiff` | [`crates/wt-store/src/snapdiff.rs:45-240`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/snapdiff.rs#L45-L240) | O(N) merge diff for v2 incremental cloning. |
-| `SelectionIndex` / `SnapshotLru` | [`crates/wt-store/src/snapindex.rs:45-480`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/snapindex.rs#L45-L480) | Lockfile index (`index.tsv`), LRU tracker (`lru.tsv`), and WAL journal (`journal.tsv`). |
-| `StoreMirror` | [`crates/wt-store/src/mirror.rs:45-290`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/mirror.rs#L45-L290) | Store-local worktree GC root records (`<store>/worktrees/<key>.tsv`). |
-| `WorktreeLease` | [`crates/wt-store/src/lease.rs:45-260`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/lease.rs#L45-L260) | Ephemeral lease management with process start-time verification. |
-| `StoreReclaimer` / `sweep` | [`crates/wt-store/src/gc.rs:725-896`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/gc.rs#L725-L896) | Unified store and lease mark-and-sweep reclamation engine. |
-| `DiskStore::scrub` | [`crates/wt-store/src/scrub.rs:180-384`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/scrub.rs#L180-L384) | Sharded parallel blob and snapshot integrity verification. |
-| `DiskStore::hydrate` | [`crates/wt-store/src/hydrate.rs:86-332`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/hydrate.rs#L86-L332) | Unified store hydration entry point. |
+| Component | Responsibility |
+| :--- | :--- |
+| `DiskStore` | 256-shard content-addressed store (`objects/xx/yyyy...`) (`crates/wt-store/src/disk.rs`). |
+| `durable_write` | Crash-durable write protocol (`crates/wt-store/src/fsutil.rs`). |
+| `bulk_walk_tree` | macOS `getattrlistbulk(2)` batch directory walker (`crates/wt-store/src/bulkwalk.rs`). |
+| `ingest_tree` | Tree scanning & blob CAS storage with validation caching (`crates/wt-store/src/ingest.rs`). |
+| `find_lockfile` | Multi-ecosystem lockfile discovery (`crates/wt-store/src/lockfile.rs`). |
+| `VerifiedLedger` | Verified blob ledger cache (`verified.tsv`) (`crates/wt-store/src/verified.rs`). |
+| `ValidationCache` | Ingest stat cache (`ingest-cache.tsv`) mapping `path -> (size, mtime, ContentId)` (`crates/wt-store/src/validation.rs`). |
+| `Manifest` | Manifest parser & file mode normalizer (`crates/wt-store/src/snapshot/manifest.rs`). |
+| `build_tree` | Snapshot tree builder using `DirFd` and `linkat` with inode protection (`crates/wt-store/src/snapshot/tree.rs`). |
+| `publish_snapshot` | Atomic snapshot publication protocol with `.complete` token (`crates/wt-store/src/snapshot/publish.rs`). |
+| `SnapshotProjectionEngine` | Lockfile fast path with bulkwalk nested mtime validation (`crates/wt-store/src/snapshot/projection.rs`). |
+| `SnapshotDiff` | O(N) merge diff for v2 incremental cloning (`crates/wt-store/src/snapdiff.rs`). |
+| `SelectionIndex` / `SnapshotLru` | Lockfile index (`index.tsv`), LRU tracker (`lru.tsv`), and WAL journal (`journal.tsv`) (`crates/wt-store/src/snapindex.rs`). |
+| `StoreMirror` | Store-local worktree GC root records (`<store>/worktrees/<key>.tsv`) (`crates/wt-store/src/mirror.rs`). |
+| `WorktreeLease` | Ephemeral lease management with process start-time verification (`crates/wt-store/src/lease.rs`). |
+| `StoreReclaimer` / `sweep` | Deduplicated lease sweep & mark-and-sweep reclamation (`crates/wt-store/src/gc.rs`). |
+| `DiskStore::scrub` | Sharded parallel blob and snapshot integrity verification (`crates/wt-store/src/scrub.rs`). |
+| `DiskStore::hydrate` | Unified store hydration entry point (`crates/wt-store/src/hydrate.rs`). |
 
 ### 3.3 `crates/wt-cli` (CLI Interface & Presentation)
 
-| Component | File & Line Range | Responsibility |
-| :--- | :--- | :--- |
-| `WorkspaceEngine` | [`crates/wt-cli/src/workspace.rs:249-385`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/workspace.rs#L249-L385) | Git CLI wrapper & porcelain parser (`git worktree list --porcelain`). |
-| `RunConfig` | [`crates/wt-cli/src/config.rs:71-114`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/config.rs#L71-L114) | Unified environment policy parser (`WT_STORE`, `WT_SNAPSHOTS`, `WT_TIMING`, etc.). |
-| `HydrationFilter` | [`crates/wt-cli/src/hydration_filter.rs:87-160`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/hydration_filter.rs#L87-L160) | `.wtinclude` pattern matcher & volatile compiler cache excluder. |
-| `relocate_toolchains` | [`crates/wt-cli/src/toolchain.rs:54-135`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/toolchain.rs#L54-L135) | Python virtualenv path and shebang rewrites. |
-| `Envelope` | [`crates/wt-cli/src/envelope.rs:45-78`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/envelope.rs#L45-L78) | Version 1 NDJSON envelope schema for agent workflows. |
-| `create::run` | [`crates/wt-cli/src/commands/create.rs:17-141`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/commands/create.rs#L17-L141) | `wt create` and `wt new` command execution. |
-| `clean::run` | [`crates/wt-cli/src/commands/clean.rs:25-99`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/commands/clean.rs#L25-L99) | `wt clean` interactive and batch worktree cleanup. |
-| `list::run` | [`crates/wt-cli/src/commands/list.rs:30-253`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/commands/list.rs#L30-L253) | `wt list` active worktree discovery and disk space accounting. |
-| `scratch::run` | [`crates/wt-cli/src/commands/scratch.rs:84-254`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/commands/scratch.rs#L84-L254) | `wt scratch` and `wt isolate` ephemeral sandboxes. |
-| `scrub::run` | [`crates/wt-cli/src/commands/scrub.rs:6-93`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/commands/scrub.rs#L6-L93) | `wt scrub` command execution. |
-| `demo::run` | [`crates/wt-cli/src/commands/demo.rs:363-523`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/commands/demo.rs#L363-L523) | `wt demo` performance test drive benchmark. |
+| Component | Responsibility |
+| :--- | :--- |
+| `WorkspaceEngine` | Git CLI wrapper, porcelain parser, and merge ancestry checks (`crates/wt-cli/src/workspace.rs`). |
+| `RunConfig` | Unified environment policy parser with case-insensitive booleans (`crates/wt-cli/src/config.rs`). |
+| `HydrationFilter` | `.wtinclude` pattern matcher & volatile compiler cache excluder (`crates/wt-cli/src/hydration_filter.rs`). |
+| `relocate_toolchains` | Python virtualenv `.pth` rewrites, byte-shebang parsing, cycle detection (`crates/wt-cli/src/toolchain.rs`). |
+| `signal` | Dedicated `SIGINT`/`SIGTERM` handler thread for ephemeral lease and sandbox cleanup (`crates/wt-cli/src/signal.rs`). |
+| `Envelope` | Version 1 NDJSON envelope schema for agent workflows (`crates/wt-cli/src/envelope.rs`). |
+| `create::run` | Transactional worktree creation with `CreateGuard` rollback (`crates/wt-cli/src/commands/create.rs`). |
+| `clean::run` | Worktree cleanup with porcelain status checks and truthful receipts (`crates/wt-cli/src/commands/clean.rs`). |
+| `hydrate::run` | Standalone hydration of pre-existing worktrees (`crates/wt-cli/src/commands/hydrate.rs`). |
+| `init::run` | Explicit starter `.wtinclude` manifest generation (`crates/wt-cli/src/commands/init.rs`). |
+| `list::run` | Worktree discovery and disk savings reporting labeled as estimated logical reuse (`crates/wt-cli/src/commands/list.rs`). |
+| `scratch::run` | Ephemeral sandboxes with process monitoring (`crates/wt-cli/src/commands/scratch.rs`). |
+| `scrub::run` | Store corruption verification command (`crates/wt-cli/src/commands/scrub.rs`). |
+| `demo::run` | Performance test drive benchmark (`crates/wt-cli/src/commands/demo.rs`). |
 
 ---
 
 ## 4. Ranked Ponytail Audit Findings
 
-Findings are ranked by lines saved.
+Ranked by potential line savings.
 
-### Crate: `crates/wt-store` (-1,192 lines)
+### Crate: `crates/wt-store` (-688 lines)
 
-1. `yagni:` Triple-layer snapshot WAL journal, index compaction, and compaction locking. Unify into a single atomic TSV index written via temporary file rename. [[`crates/wt-store/src/snapindex.rs:128-233`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/snapindex.rs#L128-L233)] **[-360 lines]**
-2. `delete:` Legacy per-blob refcounting engine, refcount path construction, and `refs/` directory locking. Mark-and-sweep store mirrors are the source of truth. [[`crates/wt-store/src/disk.rs:285-316, 535-588`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/disk.rs#L285-L316)] **[-145 lines]**
-3. `delete:` Three-way `GcMode` transition machinery (`Legacy`, `MarkSweep`, `MarkSweepNoRefs`), mode marker files, and legacy audit loops. Fix default GC mode to Mark-and-Sweep. [[`crates/wt-store/src/gc.rs:42-98, 488-528`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/gc.rs#L42-L98)] **[-135 lines]**
-4. `shrink:` Duplicated TSV timestamp serialization, parsing, and atomic save boilerplate between [`ValidationCache`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/validation.rs#L114-L169) and [`VerifiedLedger`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/verified.rs#L127-L179). Extract shared `format_mtime` and `parse_mtime` helpers. **[-75 lines]**
-5. `shrink:` Duplicated file processing loops between `getattrlistbulk` walking and portable recursive walking. Unify entry consumer logic into a single closure. [[`crates/wt-store/src/ingest.rs:108-184, 195-284`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/ingest.rs#L108-L184)] **[-55 lines]**
-6. `yagni:` Single-implementation [`Store`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/lib.rs#L140-L180) trait. Move methods directly onto [`DiskStore`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/disk.rs). **[-52 lines]**
-7. `delete:` Obsolete Ticket 06 refcount sweep method `DiskStore::sweep`. Garbage collection is owned by [`StoreReclaimer`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/gc.rs#L725-L896). [[`crates/wt-store/src/disk.rs:389-436`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/disk.rs#L389-L436)] **[-48 lines]**
-8. `delete:` Triplicate `libc::flock` guard structs (`RefsLock`, `RefsDirLock`, `MetadataLock`). Replace with a single shared `FlockGuard` in [`fsutil.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/fsutil.rs). **[-45 lines]**
-9. `yagni:` Generic [`WorkspaceCleaner`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/gc.rs#L629-L666) trait parameter on `StoreReclaimer`. Use dynamic dispatch or a function pointer without generic viral propagation. **[-38 lines]**
-10. `yagni:` Private wrapper enum `Verdict` and `read_published_checked`. Return `Option<Manifest>` directly from `read_published`. [[`crates/wt-store/src/snapshot/mod.rs:93-147`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/snapshot/mod.rs#L93-L147)] **[-32 lines]**
-11. `stdlib:` Hand-rolled little-endian byte slice decoding functions (`read_u32`, `read_u64`). Replace with standard library `u32::from_le_bytes`. [[`crates/wt-store/src/bulkwalk.rs:456-488`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/bulkwalk.rs#L456-L488)] **[-25 lines]**
-12. `delete:` Duplicate recursive directory walkers `collect_tree_rels` in `scrub.rs` and `collect_rels` in `snapshot/tree.rs`. Use shared [`fsutil::collect_dir_rels`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/fsutil.rs). **[-14 lines]**
-13. `shrink:` Custom 21-line character-shifting hex decoder in `ContentId::from_hex`. Replace with standard 7-line slice iterator. [[`crates/wt-store/src/lib.rs#L79-L99`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/lib.rs#L79-L99)] **[-14 lines]**
-14. `stdlib:` Hand-rolled directory ancestor traversal loop in `find_lockfile`. Replace with standard `Path::ancestors()`. [[`crates/wt-store/src/lockfile.rs:39-57`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-store/src/lockfile.rs#L39-L57)] **[-12 lines]**
-
----
-
-### Crate: `crates/wt-cli` (-428 lines, -1 dependency)
-
-1. `delete:` Dead [`HydrationFilter`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/hydration_filter.rs#L89-L160) struct and 8 unused methods. All callers use free functions. Delete struct and forwarder aliases. **[-108 lines]**
-2. `native:` Duplicate Clap enum subcommands (`New`/`Create`, `Isolate`/`Scratch`, `TestDrive`/`Demo`). Use native Clap `#[command(alias = "...")]` attributes. [[`crates/wt-cli/src/cli.rs:35-49`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/cli.rs#L35-L49)] **[-58 lines]**
-3. `shrink:` Repetitive 7-line JSON envelope printing blocks across 8 match branches in `commands/mod.rs`. Extract single `emit_json` helper function. [[`crates/wt-cli/src/commands/mod.rs:20-173`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/commands/mod.rs#L20-L173)] **[-45 lines]**
-4. `shrink:` Hand-rolled thread pooling and recursive directory copying in `demo.rs`. Replace with a compact 25-line recursive baseline helper. [[`crates/wt-cli/src/commands/demo.rs:18-86`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/commands/demo.rs#L18-L86)] **[-40 lines]**
-5. `stdlib:` Verbose 4x manual `CleanData` zeroed struct instantiations in early exits. Derive `Default` on [`CleanData`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/envelope.rs) and call `CleanData::default()`. [[`crates/wt-cli/src/commands/clean.rs:138-148`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/commands/clean.rs#L138-L148)] **[-36 lines]**
-6. `delete:` Duplicate functions in `workspace.rs` (`repo_root`, `resolve_commit`) and dead `remove_worktree` method. [[`crates/wt-cli/src/workspace.rs:33-68, 376-385`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/workspace.rs#L33-L68)] **[-35 lines]**
-7. `shrink:` Repeated file read, path replace, and metadata permission rewrite blocks in virtualenv relocation. Extract `update_text_file` helper. [[`crates/wt-cli/src/toolchain.rs:121-209`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/toolchain.rs#L121-L209)] **[-32 lines]**
-8. `delete:` Dead parsed fields `is_locked` and `is_prunable` on [`RawGitWorktree`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/workspace.rs#L141-L142). **[-16 lines]**
-9. `shrink:` Duplicated mirror check step in `check_base_movement`. Delegate to `check_worktree_base_movement`. [[`crates/wt-cli/src/base.rs:18-33`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/base.rs#L18-L33)] **[-14 lines]**
-10. `delete:` Forwarder module [`crates/wt-cli/src/manifest.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/manifest.rs). Import from `hydration_filter` directly. **[-11 lines]**
-11. `native:` Direct `sha2` crate dependency in `wt-cli`. Replace scratch ID generation with timestamp-PID bit mixing and use `wt_store` content hashing in demo. [[`crates/wt-cli/src/commands/scratch.rs:21-34`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/commands/scratch.rs#L21-L34), [`crates/wt-cli/Cargo.toml`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/Cargo.toml#L24)] **[-10 lines, -1 dep]**
-12. `delete:` Dead constructor [`Diagnostic::info`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/envelope.rs#L35-L42). **[-9 lines]**
-13. `shrink:` Forwarder function `commands::create::run` delegating to `create`. [[`crates/wt-cli/src/commands/create.rs:17-25`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/commands/create.rs#L17-L25)] **[-9 lines]**
-14. `shrink:` Redundant `Error::io_unanchored` constructor. [[`crates/wt-cli/src/error.rs:56-62`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/src/error.rs#L56-L62)] **[-7 lines]**
-
----
-
-### Crate: `crates/wt-copy` (-227 lines)
-
-1. `delete:` Speculative safety gate `Safety::UnsafePending` and `Error::UnsafeBackend`. All shipped copy backends are safe. [[`crates/wt-copy/src/lib.rs:95-105, 168-173`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/lib.rs#L95-L105)] **[-72 lines]**
-2. `yagni:` Unused `CopyEngine` file materialization wrapper methods (`materialize_file`, `materialize_files`). Callers use `Materializer` directly. [[`crates/wt-copy/src/engine.rs:137-184`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/engine.rs#L137-L184)] **[-35 lines]**
-3. `delete:` Dead methods on `Materializer` (`custom`, `for_directories`, `backend`, `new`) and `BatchPlacementReceipt::new`. [[`crates/wt-copy/src/materialize.rs:230-238, 318-321`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/materialize.rs#L230-L238)] **[-31 lines]**
-4. `yagni:` Zero-sized wrapper structs [`ReflinkOut`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/materialize.rs#L135-L148) and [`CopyFileRangeOut`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/materialize.rs#L150-L165). Forward to standalone placement functions directly. **[-25 lines]**
-5. `shrink:` Heap-allocating `candidates()` vector allocation loop in `select_backend`. Replace with direct prioritized capability match. [[`crates/wt-copy/src/selection.rs:51-86`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/selection.rs#L51-L86)] **[-18 lines]**
-6. `stdlib:` Hand-rolled parent directory ancestor walking in `find_existing_ancestor`. Replace with `Path::ancestors()`. [[`crates/wt-copy/src/sys.rs:112-128`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/sys.rs#L112-L128)] **[-12 lines]**
-7. `shrink:` Duplicate fallback match arms in `CopyEngine::copy_dir`. Combine pattern match arms. [[`crates/wt-copy/src/engine.rs:109-130`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/engine.rs#L109-L130)] **[-10 lines]**
-8. `stdlib:` Manual 128 KiB buffer allocation and read/write loop in `buffered_copy_file`. Replace with `std::io::copy`. [[`crates/wt-copy/src/sys.rs:92-101`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/sys.rs#L92-L101)] **[-9 lines]**
-9. `shrink:` Byte-by-byte null-terminator zip loop in `fstype_is`. Delegate to `sys::probe_fs_capabilities`. [[`crates/wt-copy/src/clonefile.rs:59-65`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/clonefile.rs#L59-L65)] **[-5 lines]**
-10. `native:` Duplicated hard-link creation and read-only permission stripping sequence between `hardlink.rs` and `materialize.rs`. Extract `hardlink_readonly` helper. [[`crates/wt-copy/src/hardlink.rs:54-60`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/hardlink.rs#L54-L60)] **[-5 lines]**
-11. `delete:` Duplicate `c_path` helper function in `clonefile.rs`. Use [`sys::c_path`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/sys.rs#L106-L109). **[-4 lines]**
-12. `shrink:` Redundant file existence pre-check before `fs::remove_file`. [[`crates/wt-copy/src/materialize.rs:374-376`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-copy/src/materialize.rs#L374-L376)] **[-2 lines]**
+1. `shrink:` Duplicate snapshot verification logic in `verify_snapshot_dir`. Reuse `DiskStore::find_snapshot` and `paranoid_verify_tree`. [`crates/wt-store/src/scrub.rs:81-159`](crates/wt-store/src/scrub.rs) **[-60 lines]**
+2. `shrink:` Duplicate entry ingestion logic between macOS `getattrlistbulk` loop and portable walk. Extract shared `ingest_entry` helper. [`crates/wt-store/src/ingest.rs:110-181, 219-282`](crates/wt-store/src/ingest.rs) **[-60 lines]**
+3. `shrink:` Combinatorial `publish_snapshot_*` boilerplate wrapper methods (8 public variants). Consolidate into options struct. [`crates/wt-store/src/snapshot/publish.rs:161-209, 285-334`](crates/wt-store/src/snapshot/publish.rs) **[-45 lines]**
+4. `shrink:` Hand-rolled parallel scoped threadpool in `hydrate()` fallback. Reuse `wt_copy` copy batching / parallel dispatcher. [`crates/wt-store/src/hydrate.rs:178-260`](crates/wt-store/src/hydrate.rs) **[-45 lines]**
+5. `delete:` Legacy refcount `DiskStore::sweep` and `Swept` struct. Mark-and-sweep `StoreReclaimer` is the sole GC engine. [`crates/wt-store/src/disk.rs:134-140, 399-436`](crates/wt-store/src/disk.rs) **[-44 lines]**
+6. `shrink:` Duplicate entry placement logic between `place_entry` and `place_entry_relative`. Unify placement helper with optional directory fd. [`crates/wt-store/src/snapshot/tree.rs:401-508, 521-617`](crates/wt-store/src/snapshot/tree.rs) **[-40 lines]**
+7. `yagni:` Single-implementation `WorkspaceCleaner` trait. Use dynamic dispatch or function pointer without generic trait parameter. [`crates/wt-store/src/gc.rs:629-665`](crates/wt-store/src/gc.rs) **[-37 lines]**
+8. `delete:` Redundant `MetadataLock` RAII flock struct. Use unified flock helper in `fsutil.rs`. [`crates/wt-store/src/snapindex.rs:523-559`](crates/wt-store/src/snapindex.rs) **[-37 lines]**
+9. `yagni:` Single-implementation `Store` trait and `impl Store for DiskStore`. Move methods directly onto `DiskStore`. [`crates/wt-store/src/lib.rs:159-180, crates/wt-store/src/disk.rs:459-588`](crates/wt-store/src/lib.rs) **[-35 lines]**
+10. `shrink:` Duplicate serialization and stat parsing logic between `ValidationCache` and `VerifiedLedger`. Use shared TSV codec. [`crates/wt-store/src/validation.rs:110-169, crates/wt-store/src/verified.rs:123-179`](crates/wt-store/src/validation.rs) **[-30 lines]**
+11. `delete:` Redundant `audit_marks_against_refs` legacy transition audit code. [`crates/wt-store/src/gc.rs:488-514`](crates/wt-store/src/gc.rs) **[-27 lines]**
+12. `shrink:` Duplicate `wt-hydrated.tsv` line parsing in `sweep_leases` and `retire_worktree`. Shared `parse_hydrated_ledger` helper. [`crates/wt-store/src/gc.rs:772-791, 911-936`](crates/wt-store/src/gc.rs) **[-25 lines]**
+13. `delete:` Redundant `RefsDirLock` and `lock_refs` duplicating `RefsLock` in `disk.rs`. Unified `RefsLock` in `fsutil.rs`. [`crates/wt-store/src/scrub.rs:41-63`](crates/wt-store/src/scrub.rs) **[-23 lines]**
+14. `stdlib:` Hand-rolled little-endian integer readers `read_u32`, `read_i32`, `read_u64`, `read_i64`. Use `u32::from_le_bytes`, `u64::from_le_bytes`. [`crates/wt-store/src/bulkwalk.rs:456-489`](crates/wt-store/src/bulkwalk.rs) **[-20 lines]**
+15. `shrink:` Duplicate torn-tail line stripping logic across `SelectionIndex::load_canonical`, `SnapshotLru::load_canonical`, and `compact_journal`. Shared `trim_complete_lines` helper. [`crates/wt-store/src/snapindex.rs:149-155, 354-360, 586-594`](crates/wt-store/src/snapindex.rs) **[-18 lines]**
+16. `shrink:` Verbose line-by-line string assembly in `StoreMirror::serialize`. [`crates/wt-store/src/mirror.rs:147-173`](crates/wt-store/src/mirror.rs) **[-14 lines]**
+17. `delete:` Duplicate `collect_tree_rels` helper. Reuse `collect_rels` from `snapshot/tree.rs`. [`crates/wt-store/src/scrub.rs:66-78`](crates/wt-store/src/scrub.rs) **[-13 lines]**
+18. `stdlib:` Hand-rolled directory ancestor loop in `find_lockfile`. Use `std::path::Path::ancestors`. [`crates/wt-store/src/lockfile.rs:40-56`](crates/wt-store/src/lockfile.rs) **[-12 lines]**
+19. `shrink:` Redundant disk stat total size recomputation in `stage_and_publish`. Reuse precomputed size. [`crates/wt-store/src/snapshot/publish.rs:501-512`](crates/wt-store/src/snapshot/publish.rs) **[-12 lines]**
+20. `shrink:` Manual chunking and char conversion in `ContentId::from_hex`. Concise chunk parser. [`crates/wt-store/src/lib.rs:76-100`](crates/wt-store/src/lib.rs) **[-12 lines]**
+21. `shrink:` Verbose string-building in `WorktreeLease::serialize`. Single `format!` call. [`crates/wt-store/src/lease.rs:63-77`](crates/wt-store/src/lease.rs) **[-11 lines]**
+22. `delete:` Dead `DiskStore::link_out` method. Superseded by `wt_copy::Materializer`. [`crates/wt-store/src/disk.rs:448-456`](crates/wt-store/src/disk.rs) **[-9 lines]**
+23. `shrink:` Redundant `rel_text` calls per entry in `ingest_tree_walk`. Compute `rel` once per iteration. [`crates/wt-store/src/ingest.rs:221-257`](crates/wt-store/src/ingest.rs) **[-8 lines]**
+24. `shrink:` Duplicate commit fragment cleaning in `check_git_line`. [`crates/wt-store/src/lockfile.rs:127-133, 143-149`](crates/wt-store/src/lockfile.rs) **[-8 lines]**
+25. `shrink:` Duplicate distinct blob set collection & `add_ref` loop. [`crates/wt-store/src/hydrate.rs:118-122, 287-292`](crates/wt-store/src/hydrate.rs) **[-8 lines]**
+26. `delete:` Unused `ValidationCache::len` and `ValidationCache::is_empty`. [`crates/wt-store/src/validation.rs:93-100`](crates/wt-store/src/validation.rs) **[-8 lines]**
+27. `shrink:` Allocation-heavy string vector join in `SelectionRecord::serialize`. [`crates/wt-store/src/snapindex.rs:75-80`](crates/wt-store/src/snapindex.rs) **[-6 lines]**
+28. `delete:` Redundant pass-through wrappers `SelectionIndex::save` and `SnapshotLru::save`. Call `save_durable` directly. [`crates/wt-store/src/snapindex.rs:215-217, 405-407`](crates/wt-store/src/snapindex.rs) **[-6 lines]**
+29. `stdlib:` Hand-rolled parent/filename splitter in `split_parent_and_filename`. Use `str::rsplit_once('/')`. [`crates/wt-store/src/snapshot/tree.rs:203-210`](crates/wt-store/src/snapshot/tree.rs) **[-6 lines]**
+30. `shrink:` String allocation per file/dir in `resolve_dest_path`. [`crates/wt-store/src/hydrate.rs:334-340`](crates/wt-store/src/hydrate.rs) **[-5 lines]**
+31. `shrink:` Redundant `lease_path` scratch prefix formatting. Inline formatting. [`crates/wt-store/src/lease.rs:116-123`](crates/wt-store/src/lease.rs) **[-4 lines]**
+32. `shrink:` Heap allocation for hex decoding in `unescape`. Use `char::to_digit(16)`. [`crates/wt-store/src/mirror.rs:82-84`](crates/wt-store/src/mirror.rs) **[-4 lines]**
 
 ---
 
-### Packaging, Tests & Benchmarks (-350 lines)
+### Crate: `crates/wt-cli` (-604 lines, -1 dependency)
 
-1. `shrink:` Consolidate 3 separate benchmark runners ([`benchmarks/run.sh`](file:///Users/sharzilnafis/Projects/dumps/idea1/benchmarks/run.sh), [`benchmarks/eval.sh`](file:///Users/sharzilnafis/Projects/dumps/idea1/benchmarks/eval.sh), [`benchmarks/v2-bench.sh`](file:///Users/sharzilnafis/Projects/dumps/idea1/benchmarks/v2-bench.sh)) by delegating duplicate stage-timing parsing and tree verification to `eval.sh`. **[-200 lines]**
-2. `shrink:` 7 integration test files in `crates/wt-cli/tests/` independently re-implement `TestFixture` and `fn git`. Centralize shared constructors into [`tests/common/mod.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/tests/common/mod.rs). **[-150 lines]**
-
-```
-net: -2197 lines, -1 deps possible
-```
-
----
-
-## 5. Live Verification Evidence
-
-### 5.1 Cargo Workspace Dependency Graph
-```
-wt-cli v0.1.0
-├── clap v4.6 (derive)
-├── clap_complete v4.6
-├── libc v0.2
-├── serde v1.0 (derive)
-├── serde_json v1.0
-├── sha2 v0.10 (candidate for removal in wt-cli)
-├── tempfile v3.27
-├── thiserror v2.0
-├── wt-copy v0.1.0
-│   └── libc v0.2
-└── wt-store v0.1.0
-    ├── libc v0.2
-    ├── sha2 v0.10
-    ├── tempfile v3.27
-    └── wt-copy v0.1.0
-```
-
-### 5.2 Grep Counts & Code Volume Metrics
-- **Total Lines of Rust Code**: 28,606 lines across 84 `.rs` files.
-- **Compiler & Clippy Health**: Verified with `cargo clippy --all-targets` (zero warnings, zero errors under `deny(unsafe_op_in_unsafe_fn)`).
-- **Test Architecture**: 26 integration test executables in `wt-cli/tests`, 5 in `wt-store/tests`, 2 in `wt-copy/tests`.
-- **Test Performance Bottleneck Discovered**: `crates/wt-cli/tests/demo.rs` and `cli.rs` synthesize 10,000-file fixtures and run unaccelerated byte-by-byte baseline copies in unoptimized debug mode. Consolidating integration test binaries and shrinking debug test fixture sizes will reduce CI test execution time from ~5 minutes to under 20 seconds.
+1. `delete:` Unused `HydrationFilter` struct wrapper, its 8 methods, and unit tests. Free functions `load_patterns` and `collect_matches` are used directly. [`crates/wt-cli/src/hydration_filter.rs:89-160, 511-531`](crates/wt-cli/src/hydration_filter.rs) **[-94 lines]**
+2. `shrink:` Hand-rolled multi-threaded 10,000-file synthetic fixture generator in `generate_synthetic_fixture`. Replace with concise loop writing templates without manual chunked thread dispatch. [`crates/wt-cli/src/commands/demo.rs:88-241`](crates/wt-cli/src/commands/demo.rs) **[-85 lines]**
+3. `yagni:` Duplicated CLI subcommand enum variants `New`, `Isolate`, and `TestDrive` and duplicate dispatch arms. Use clap's `#[command(alias = "...")]` attributes. [`crates/wt-cli/src/cli.rs:35-49`, `crates/wt-cli/src/commands/mod.rs:60-71`](crates/wt-cli/src/cli.rs) **[-55 lines]**
+4. `native:` Hand-rolled multi-threaded scoped chunked recursive copy engine (`recursive_copy` + `copy_subtree`) in benchmark demo. Replace with standard recursive directory copy. [`crates/wt-cli/src/commands/demo.rs:18-86`](crates/wt-cli/src/commands/demo.rs) **[-45 lines]**
+5. `shrink:` Repetitive JSON envelope serialization boilerplate across 10 dispatch arms in `commands/mod.rs`. Extract `emit_json` helper. [`crates/wt-cli/src/commands/mod.rs:25-200`](crates/wt-cli/src/commands/mod.rs) **[-45 lines]**
+6. `yagni:` Manual `guard.rollback(); return Err(e)` in match blocks and redundant `CreateGuard::rollback` defeating RAII. Rely on `CreateGuard::drop` and standard `?` operator. [`crates/wt-cli/src/commands/create.rs:45-53, 116-159`](crates/wt-cli/src/commands/create.rs) **[-40 lines]**
+7. `shrink:` Four duplicated 10-line manual struct initializations of empty `CleanData`. Derive `Default` on `CleanData` and call `CleanData::default()`. [`crates/wt-cli/src/commands/clean.rs:160-301`](crates/wt-cli/src/commands/clean.rs) **[-36 lines]**
+8. `shrink:` Duplicated iteration and calculation computing blob sizes and root directories across sidecars and mirrors in `wt list`. Extract shared helper. [`crates/wt-cli/src/commands/list.rs:118-179`](crates/wt-cli/src/commands/list.rs) **[-35 lines]**
+9. `delete:` Duplicate unit test `test_is_volatile_cache` in `toolchain.rs` copied verbatim from `hydration_filter.rs`. [`crates/wt-cli/src/toolchain.rs:317-339`](crates/wt-cli/src/toolchain.rs) **[-22 lines]**
+10. `yagni:` Redundant one-line wrapper functions `pub fn run` delegating to private functions `create`, `hydrate`, and `init`. [`crates/wt-cli/src/commands/create.rs:18-26`, `crates/wt-cli/src/commands/hydrate.rs:14-21`, `crates/wt-cli/src/commands/init.rs:11-18`](crates/wt-cli/src/commands/create.rs) **[-21 lines]**
+11. `shrink:` Duplicated 15-line `ScratchData` struct construction between bare scratch and executed scratch branches. [`crates/wt-cli/src/commands/scratch.rs:204-265`](crates/wt-cli/src/commands/scratch.rs) **[-20 lines]**
+12. `shrink:` Duplicated mirror reading and commit resolution between `check_base_movement` and `check_worktree_base_movement`. [`crates/wt-cli/src/base.rs:18-33`](crates/wt-cli/src/base.rs) **[-15 lines]**
+13. `delete:` Unused dead methods `remove_worktree_lenient` and `remove_worktree` in `WorkspaceEngine`. [`crates/wt-cli/src/workspace.rs:380-394`](crates/wt-cli/src/workspace.rs) **[-15 lines]**
+14. `stdlib:` Hand-rolled byte search and replace helper `replace_bytes`. Use slice replacement. [`crates/wt-cli/src/toolchain.rs:93-109`](crates/wt-cli/src/toolchain.rs) **[-12 lines]**
+15. `shrink:` Repetitive condition `report.snapshot_dirs_scanned > 0 || !report.corrupt_snapshots.is_empty()` in `ScrubData`. Bind to `has_snapshots`. [`crates/wt-cli/src/commands/scrub.rs:70-90`](crates/wt-cli/src/commands/scrub.rs) **[-12 lines]**
+16. `delete:` Trivial function aliases `parse`, `matches`, and `collect_matched_directories` in `hydration_filter.rs`. [`crates/wt-cli/src/hydration_filter.rs:191-309`](crates/wt-cli/src/hydration_filter.rs) **[-12 lines]**
+17. `delete:` Forwarder module `crates/wt-cli/src/manifest.rs` re-exporting `hydration_filter::*`. [`crates/wt-cli/src/manifest.rs:1-11`](crates/wt-cli/src/manifest.rs) **[-11 lines]**
+18. `native:` Over-engineered scratch ID generation using external crate `sha2` on timestamp + pid. Replace with standard library formatting (`format!("{:08x}", ...)`) and drop `sha2` from `wt-cli`. [`crates/wt-cli/src/commands/scratch.rs:22-35`, `crates/wt-cli/Cargo.toml:28`](crates/wt-cli/src/commands/scratch.rs) **[-10 lines, -1 dep]**
+19. `delete:` Dead constructor `Diagnostic::info` marked `#[allow(dead_code)]`. [`crates/wt-cli/src/envelope.rs:35-42`](crates/wt-cli/src/envelope.rs) **[-8 lines]**
+20. `delete:` Unused dead fields `snapshot_hashes`, `strategy`, and `total_copied` on `HydrationReport`. [`crates/wt-cli/src/hydrate.rs:52-65`](crates/wt-cli/src/hydrate.rs) **[-8 lines]**
+21. `delete:` Trivial 3-line forwarder `is_volatile_cache` in `toolchain.rs`. Use direct `pub use`. [`crates/wt-cli/src/toolchain.rs:20-22`](crates/wt-cli/src/toolchain.rs) **[-3 lines]**
 
 ---
 
-## 6. Final Launch-Readiness Checklist (v0.1.0)
+### Crate: `crates/wt-copy` (-259 lines)
 
-### 🔴 Blockers (Must Fix Before Public Tag)
+1. `delete:` Dead `CopyEngine` batch & single-file materialization wrappers (`materialize_file`, `materialize_files`) and `BatchPlacementReceipt`. Callers use `Materializer` directly. [`crates/wt-copy/src/engine.rs:22-42, 137-184`](crates/wt-copy/src/engine.rs) **[-69 lines]**
+2. `delete:` Speculative `Safety` enum, `Error::UnsafeBackend`, `CopyBackend::safety()`, `ensure_backend_runnable()`, and test backend `PendingBackend`. Every shipped backend is safe. [`crates/wt-copy/src/lib.rs:95-196`, `crates/wt-copy/src/copy_tree.rs:76-81`](crates/wt-copy/src/lib.rs) **[-65 lines]**
+3. `shrink:` Verbose `Materializer::select` struct-construction boilerplate across target OS gates. Compute `(backend, strategy)` tuple and construct `Self` once. [`crates/wt-copy/src/materialize.rs:260-315`](crates/wt-copy/src/materialize.rs) **[-22 lines]**
+4. `delete:` Dead `FileMaterialize::name(&self)` trait method and redundant struct implementations on `HardlinkOut`, `CloneOut`, `ReflinkOut`, and `CopyFileRangeOut`. [`crates/wt-copy/src/materialize.rs:36-160`](crates/wt-copy/src/materialize.rs) **[-15 lines]**
+5. `shrink:` Strategy selection boilerplate and duplicate fallback match arms in `CopyEngine::copy_dir`. Combine identical fallback arms. [`crates/wt-copy/src/engine.rs:76-130`](crates/wt-copy/src/engine.rs) **[-15 lines]**
+6. `yagni:` Redundant `Materializer::new` delegator and unused `Materializer::custom` constructor. [`crates/wt-copy/src/materialize.rs:228-238, 318-321`](crates/wt-copy/src/materialize.rs) **[-14 lines]**
+7. `delete:` Duplicate `c_path` helper and hand-rolled `fstype_is` byte-scanner in `clonefile.rs`. Use `sys::c_path` and `sys::probe_fs_capabilities`. [`crates/wt-copy/src/clonefile.rs:59-70`](crates/wt-copy/src/clonefile.rs) **[-12 lines]**
+8. `stdlib:` Hand-rolled 128 KiB heap buffer allocation and manual read/write loop in `buffered_copy_file`. Use `std::io::copy(&mut src, &mut dest)`. [`crates/wt-copy/src/sys.rs:92-101`](crates/wt-copy/src/sys.rs) **[-10 lines]**
+9. `shrink:` Ancestor directory walk in `sys::find_existing_ancestor`. Use `while !path.exists() { path = path.parent().unwrap_or(Path::new(".")); }`. [`crates/wt-copy/src/sys.rs:112-128`](crates/wt-copy/src/sys.rs) **[-10 lines]**
+10. `shrink:` Multiline error code matcher in `materialize::placement_refused`. Format as `matches!(e.raw_os_error(), Some(libc::EPERM | ...))`. [`crates/wt-copy/src/materialize.rs:175-186`](crates/wt-copy/src/materialize.rs) **[-9 lines]**
+11. `shrink:` Verbose pattern matching in `sys::is_cross_device`. Use `let (Ok(src_dev), Ok(dest_dev)) = ... else { return false; };`. [`crates/wt-copy/src/sys.rs:147-161`](crates/wt-copy/src/sys.rs) **[-7 lines]**
+12. `delete:` Dead `Materializer::for_directories` backwards-compatibility alias. [`crates/wt-copy/src/materialize.rs:248-251`](crates/wt-copy/src/materialize.rs) **[-4 lines]**
+13. `shrink:` Double heap `String` allocation in macOS `fs_supports_hardlinks`. Match directly on `CStr` byte slice. [`crates/wt-copy/src/hardlink.rs:78-83`](crates/wt-copy/src/hardlink.rs) **[-4 lines]**
+14. `shrink:` Verbose staging path calculation in `copy_tree::staging_path`. [`crates/wt-copy/src/copy_tree.rs:101-108`](crates/wt-copy/src/copy_tree.rs) **[-3 lines]**
 
-- [ ] **Release Tarball Prefix Mismatch**. In [`.github/workflows/release.yml:72`](file:///Users/sharzilnafis/Projects/dumps/idea1/.github/workflows/release.yml#L72), `DIR="wt-${VERSION}-${{ matrix.target }}"` generates `wt-0.1.0-*.tar.gz` (without `v`). However, [`Formula/wt.rb:15`](file:///Users/sharzilnafis/Projects/dumps/idea1/Formula/wt.rb#L15), [`install.sh:58`](file:///Users/sharzilnafis/Projects/dumps/idea1/install.sh#L58), and [`scripts/gen-formula.sh:20`](file:///Users/sharzilnafis/Projects/dumps/idea1/scripts/gen-formula.sh#L20) all expect `wt-v0.1.0-*.tar.gz`. Release formula generation will fail during automated packaging.
-- [ ] **Missing Linux ARM64 Release Target**. [`.github/workflows/release.yml`](file:///Users/sharzilnafis/Projects/dumps/idea1/.github/workflows/release.yml) and [`install.sh`](file:///Users/sharzilnafis/Projects/dumps/idea1/install.sh#L20-L28) lack `aarch64-unknown-linux-gnu` target entries, breaking installation on AWS Graviton, Docker on Apple Silicon, and Asahi Linux.
-- [ ] **`install.sh` Version Normalization**. [`install.sh`](file:///Users/sharzilnafis/Projects/dumps/idea1/install.sh#L8-L35) constructs GitHub release URLs assuming an exact prefix format. Setting `WT_VERSION=0.1.0` produces a 404 error because GitHub release tags use `v0.1.0`.
+---
 
-### 🟡 Nice-to-Have (Before or Promptly After Launch)
+### Packaging, Tests & Benchmarks (-1,875 lines)
 
-- [ ] **Consolidate Integration Test Binaries**. Merge 26 test files in `crates/wt-cli/tests/` into 5 cohesive modules to reduce Cargo linking overhead and CI compile times.
-- [ ] **Execute Ponytail Cleanup Sweeps**. Apply the identified deletions to remove legacy `refs/` plumbing and the dead `HydrationFilter` struct.
-- [ ] **CI Regression Gating**. Wire [`benchmarks/eval.sh --quick`](file:///Users/sharzilnafis/Projects/dumps/idea1/benchmarks/eval.sh) into GitHub Actions to gate pull requests on performance metrics.
-- [ ] **Hardening `chaos.sh` Fault Injection**. Add process liveness checks in [`benchmarks/chaos.sh:50-62`](file:///Users/sharzilnafis/Projects/dumps/idea1/benchmarks/chaos.sh#L50-L62) to prevent sleep timers racing past short test runs on fast CPUs.
-- [ ] **Crates.io Publication Readiness**. Add explicit `version = "0.1.0"` to path dependencies in workspace member `Cargo.toml` files.
+1. `delete:` Legacy per-blob refcounting tests and refcount sweep tests in `store.rs`. Mark-and-sweep via TSV mirrors is the source of truth. [`crates/wt-store/tests/store.rs:101-509`](crates/wt-store/tests/store.rs) **[-408 lines]**
+2. `delete:` Dead legacy refcount garbage collection integration test suite `gc.rs`. Mark-and-sweep GC is fully tested in `gc_mirror.rs`, `gc_snapshot_cap.rs`, and `lease_sweep.rs`. [`crates/wt-cli/tests/gc.rs:1-277`](crates/wt-cli/tests/gc.rs) **[-277 lines]**
+3. `shrink:` 26 discrete integration test binaries in `crates/wt-cli/tests/`. Consolidate into 5 cohesive module targets (`commands.rs`, `snapshots.rs`, `gc.rs`, `storage.rs`, `presentation.rs`) to eliminate duplicate crate imports and Cargo link overhead. [`crates/wt-cli/tests/*.rs`](crates/wt-cli/tests) **[-220 lines]**
+4. `yagni:` Duplicate `V2Fixture` definition in `snapshots_v2.rs`. Reuse shared `Fixture` in `common/mod.rs`. [`crates/wt-cli/tests/snapshots_v2.rs:36-126`](crates/wt-cli/tests/snapshots_v2.rs) **[-90 lines]**
+5. `yagni:` Duplicate timing, disk usage, and stage log parsing functions in `run.sh`. Source shared functions from `eval_metrics.sh` and `eval_storage.sh`. [`benchmarks/run.sh:79-468`](benchmarks/run.sh) **[-81 lines]**
+6. `delete:` Legacy pre-fidelity gap tolerance counters and symlink/mode tolerance checks in `run.sh`. [`benchmarks/run.sh:236-675`](benchmarks/run.sh) **[-73 lines]**
+7. `yagni:` Duplicate `RichFixture` definition in `snapshots.rs`. Reuse shared `Fixture` in `common/mod.rs`. [`crates/wt-cli/tests/snapshots.rs:42-104`](crates/wt-cli/tests/snapshots.rs) **[-62 lines]**
+8. `stdlib:` Duplicate `fn git` subprocess runner independently defined across 7 integration test files. Centralize in `common::git`. [`crates/wt-cli/tests/apfs_defaults.rs:56-64`, `branch_stacking.rs:14-23`, `clean.rs:53-61`, `lockfile_fastpath.rs:61-69`, `new.rs:53-61`, `snapshots.rs:105-113`, `snapshots_v2.rs:127-135`](crates/wt-cli/tests/apfs_defaults.rs) **[-62 lines]**
+9. `yagni:` Duplicate `LockfileFixture` definition in `lockfile_fastpath.rs`. Reuse shared `Fixture`. [`crates/wt-cli/tests/lockfile_fastpath.rs:9-68`](crates/wt-cli/tests/lockfile_fastpath.rs) **[-60 lines]**
+10. `yagni:` Duplicate `store_footprint` scanner and tree assertion helpers across `store_flow.rs` and `cache_flow.rs`. Move to `common/mod.rs`. [`crates/wt-cli/tests/store_flow.rs:19-56`, `cache_flow.rs:20-78`](crates/wt-cli/tests/store_flow.rs) **[-59 lines]**
+11. `yagni:` Duplicate `TestFixture` definitions in `apfs_defaults.rs`, `clean.rs`, `new.rs`. Reuse shared `Fixture`. [`crates/wt-cli/tests/apfs_defaults.rs:13-54`, `clean.rs:11-51`, `new.rs:11-51`](crates/wt-cli/tests/apfs_defaults.rs) **[-151 lines]**
+12. `yagni:` Duplicate clocks, stage parser, and tree verification in `v2-bench.sh`. [`benchmarks/v2-bench.sh:89-158`](benchmarks/v2-bench.sh) **[-46 lines]**
+13. `delete:` Legacy sweep and store migration test cases in `json_output.rs`. [`crates/wt-cli/tests/json_output.rs:156-194`](crates/wt-cli/tests/json_output.rs) **[-39 lines]**
+14. `yagni:` Duplicate `snapshot` and `hydrated_file` verification helpers across `hardlink_safety.rs` and `cow_materialization.rs`. [`crates/wt-cli/tests/hardlink_safety.rs:26-60`, `cow_materialization.rs:24-60`](crates/wt-cli/tests/hardlink_safety.rs) **[-34 lines]**
+15. `stdlib:` Verbose hand-rolled shell completion directory search loops in `install.sh`. [`install.sh:109-154`](install.sh) **[-31 lines]**
+16. `yagni:` Redundant 10,000-file benchmark synthesis in `demo.rs` to verify Clap `test-drive` alias. [`crates/wt-cli/tests/demo.rs:99-129`](crates/wt-cli/tests/demo.rs) **[-31 lines]**
+17. `shrink:` Duplicated high-resolution clock and tree verification in `eval.sh`. [`benchmarks/eval.sh:164-191`](benchmarks/eval.sh) **[-28 lines]**
+18. `yagni:` Duplicate Ubuntu test execution and redundant `cargo build` in `ci.yml`. [`.github/workflows/ci.yml:9-45`](.github/workflows/ci.yml) **[-18 lines]**
+19. `shrink:` Repetitive target archive packaging loop in `smoke-install.sh`. [`scripts/smoke-install.sh:45-67`](scripts/smoke-install.sh) **[-12 lines]**
+20. `stdlib:` Duplicated `sha256sum` vs `shasum` platform branching across `install.sh` and `smoke-install.sh`. [`install.sh:69-73`, `scripts/smoke-install.sh:60-64`](install.sh) **[-10 lines]**
+21. `shrink:` Standalone single-step `setup-version` job in `release.yml`. [`.github/workflows/release.yml:14-23`](.github/workflows/release.yml) **[-10 lines]**
+22. `delete:` Dead shell completion generation loop in `release.yml`. [`.github/workflows/release.yml:76-78`](.github/workflows/release.yml) **[-8 lines]**
+23. `stdlib:` Hand-rolled sha256 checksum platform branching in `chaos.sh`. [`benchmarks/chaos.sh:73-77`](benchmarks/chaos.sh) **[-5 lines]**
+
+---
+
+## 5. Line Savings Summary
+
+| Area | Scope | Line Savings | Notes |
+| :--- | :--- | :--- | :--- |
+| `crates/wt-store/src` | Storage, Snapshots & GC | **-688 lines** | Ingestion deduplication, snapshot wrapper consolidation, flock/mutex unification |
+| `crates/wt-cli/src` | CLI, Commands & Presentation | **-604 lines, -1 dep** | Dead `HydrationFilter` struct, demo fixture generator, duplicate enum variants, `CleanData` derivation |
+| `crates/wt-copy/src` | Placement & Copy Backends | **-259 lines** | Dead `CopyEngine` wrappers, speculative `Safety` gates, constructor consolidation |
+| `crates/*/tests` | Integration Test Suites | **-1,570 lines** | Dead legacy refcount tests, 26 -> 5 binary consolidation, shared `Fixture` harnesses |
+| `benchmarks/*` | Benchmark Suites | **-233 lines** | Monolithic `run.sh` duplication, legacy gap checks, shared metric parsers |
+| Infrastructure & Scripts | CI, `install.sh`, `scripts` | **-72 lines** | Redundant CI steps, completion loops, checksum branches |
+| **Total Net Reduction** | | **-3,426 lines, -1 dependency** | |
+
+---
+
+## 6. Launch-Readiness Assessment (v0.1.0)
+
+### 🟢 Completed & Certified (v0.1.0 Launch Ready)
+- [x] **Release Tarball Prefix Mismatch Fixed**: Normalized `.github/workflows/release.yml`, `install.sh`, and `scripts/gen-formula.sh` to `wt-v<version>-<target>.tar.gz`.
+- [x] **`install.sh` Version Normalization**: Accepts both `0.1.0` and `v0.1.0`.
+- [x] **Destructive Cleanup Prevention**: Enforced `--force` requirement for dirty worktrees and unmerged branches.
+- [x] **Truthful Receipts & Non-Zero Exits**: Failures emit error diagnostics and exit code 1.
+- [x] **CAS Lease Sweep Refcount Deduplication**: Deduplicated blob IDs in `BTreeSet<ContentId>` before refcount decrements.
+- [x] **Lockfile Fast-Path Staleness Validation**: Bulk stat scan detects nested modifications even when lockfile is unchanged.
+- [x] **Process Signal Handling & Transactional Rollbacks**: `SIGINT`/`SIGTERM` cleanup handlers and `CreateGuard` rollback on hydration failure.
+- [x] **Python Toolchain Relocation**: Rewrote `.pth` files and binary byte-shebangs without UTF-8 crashes.
+- [x] **Standalone Hydration & Product Renaming**: Added `wt-hydrate hydrate <path>` and `wt-hydrate init`, canonical binary `wt-hydrate` with `wt` alias.
+
+### 🟡 Post-v0.1.0 Architecture Simplifications
+- [ ] **Consolidate Integration Test Binaries**: Merge 26 test files in `crates/wt-cli/tests/` into 5 cohesive modules.
+- [ ] **Remove Legacy `refs/` Directory Machinery**: Drop legacy refcount files after mark-and-sweep store migration is complete.
+- [ ] **Simplify Snapshot WAL Journal**: Replace 3-layer WAL journal with locked atomic single-file index.
+- [ ] **CI Regression Gating**: Wire `benchmarks/eval.sh --quick` into GitHub Actions.
