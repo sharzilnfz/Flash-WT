@@ -40,7 +40,7 @@ jobs:
           MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
           MACOS_IDENTITY: ${{ secrets.MACOS_IDENTITY }}
         run: |
-          BIN="target/${{ matrix.target }}/release/wt"
+          BIN="target/${{ matrix.target }}/release/flashwt"
           if [ -n "$MACOS_CERTIFICATE" ]; then
             echo "$MACOS_CERTIFICATE" | base64 --decode > cert.p12
             KEYCHAIN=$RUNNER_TEMP/signing.keychain-db
@@ -60,10 +60,12 @@ jobs:
         run: |
           DIR="wt-v${VERSION}-${{ matrix.target }}"
           mkdir "$DIR"
-          cp "target/${{ matrix.target }}/release/wt" "$DIR/"
+          cp "target/${{ matrix.target }}/release/flashwt" "$DIR/"
+          ln -s flashwt "$DIR/flash-wt"
+          ln -s flashwt "$DIR/wt"
           cp README.md "$DIR/"
           for shell in bash zsh fish; do
-            "target/${{ matrix.target }}/release/wt" completions "$shell" >"$DIR/wt.$shell"
+            "target/${{ matrix.target }}/release/flashwt" completions "$shell" >"$DIR/flashwt.$shell"
           done
           tar czf "${DIR}.tar.gz" "$DIR"
           shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"

@@ -82,16 +82,23 @@ ACTUAL=$(sha256_file "$TMP/$ARCHIVE")
 
 mkdir -p "$BIN_DIR"
 tar xzf "$TMP/$ARCHIVE" -C "$TMP"
-mv "$TMP/wt-v${VERSION_NO_V}-${TARGET}/wt" "$BIN_DIR/wt"
-chmod +x "$BIN_DIR/wt"
+EXTRACTED="$TMP/wt-v${VERSION_NO_V}-${TARGET}"
+if [ -f "$EXTRACTED/flashwt" ]; then
+  mv "$EXTRACTED/flashwt" "$BIN_DIR/flashwt"
+elif [ -f "$EXTRACTED/wt" ]; then
+  mv "$EXTRACTED/wt" "$BIN_DIR/flashwt"
+fi
+chmod +x "$BIN_DIR/flashwt"
+ln -sf flashwt "$BIN_DIR/flash-wt"
+ln -sf flashwt "$BIN_DIR/wt"
 
 # Prove the binary actually runs on this machine before claiming success.
-INSTALLED=$("$BIN_DIR/wt" --version)
+INSTALLED=$("$BIN_DIR/flashwt" --version)
 echo "$INSTALLED"
 case "$INSTALLED" in
   flashwt\ * | flash-wt\ * | wt\ * | wt-hydrate\ *) ;;
   *)
-    echo "wt: $BIN_DIR/wt did not run correctly" >&2
+    echo "flashwt: $BIN_DIR/flashwt did not run correctly" >&2
     exit 1
     ;;
 esac

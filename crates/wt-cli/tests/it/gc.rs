@@ -373,7 +373,7 @@ fn timing_env_emits_wt_stage_lines_to_stderr_and_stays_silent_without_it() {
         "no stage lines without WT_TIMING"
     );
 
-    let timed = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let timed = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["create", "loud"])
         .env("WT_STORE", &store)
         .env("WT_TIMING", "1")

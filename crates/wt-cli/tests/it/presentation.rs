@@ -412,7 +412,7 @@ fn list_active_marker_from_sub_worktree() {
     let sub_path = fx.repo.parent().unwrap().join("origin-sub-worktree");
     assert!(sub_path.exists());
 
-    let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["list", "--json"])
         .env("WT_STORE", store_dir.path())
         .current_dir(&sub_path)
@@ -496,7 +496,7 @@ fn human_bytes_zero_rendering_via_list() {
 
 #[test]
 fn human_count_grouping_via_demo_fixture_summary() {
-    let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["demo", "--json"])
         .output()
         .expect("run wt binary");

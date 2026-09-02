@@ -195,7 +195,7 @@ impl Fixture {
 
     /// Run `wt <args>` inside the fixture repository with isolated `WT_STORE`.
     pub fn wt(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_wt"))
+        Command::new(env!("CARGO_BIN_EXE_flashwt"))
             .args(args)
             .env("WT_STORE", self.store_path())
             .current_dir(&self.repo)
@@ -221,7 +221,7 @@ impl Fixture {
     /// Run `wt <args>` with `WT_STORE` pointed at an isolated store,
     /// so tests never touch the developer's machine-wide store.
     pub fn wt_with_store(&self, args: &[&str], store: &Path) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_wt"))
+        Command::new(env!("CARGO_BIN_EXE_flashwt"))
             .args(args)
             .env("WT_STORE", store)
             .current_dir(&self.repo)
@@ -236,7 +236,7 @@ impl Fixture {
         store: &Path,
         env: &[(&str, &str)],
     ) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_wt"))
+        Command::new(env!("CARGO_BIN_EXE_flashwt"))
             .args(args)
             .env("WT_STORE", store)
             .envs(env.iter().copied())
@@ -247,7 +247,7 @@ impl Fixture {
 
     /// Run `wt` with `WT_STORE` pointing at `self.store_path()` and custom env vars.
     pub fn wt_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_wt"))
+        Command::new(env!("CARGO_BIN_EXE_flashwt"))
             .args(args)
             .env("WT_STORE", self.store_path())
             .envs(env.iter().copied())

@@ -788,7 +788,7 @@ fn blob_id(blob: &Path) -> ContentId {
 }
 
 fn wt_scrub_cmd(fx: &Fixture, args: &[&str], store: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_wt"))
+    Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(args)
         .env("WT_STORE", store)
         .env("WT_SNAPSHOTS", "1")
@@ -1040,7 +1040,7 @@ fn demo_terminal_output_renders_scorecard_and_completes_successfully() {
     let store_dir = tempfile::tempdir().unwrap();
     let isolated_cwd = tempfile::tempdir().unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["demo"])
         .env("WT_STORE", store_dir.path())
         .current_dir(isolated_cwd.path())
@@ -1073,7 +1073,7 @@ fn demo_json_emits_valid_ndjson_envelope_with_complete_metrics() {
     let store_dir = tempfile::tempdir().unwrap();
     let isolated_cwd = tempfile::tempdir().unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["demo", "--json"])
         .env("WT_STORE", store_dir.path())
         .current_dir(isolated_cwd.path())
@@ -1125,7 +1125,7 @@ fn test_drive_alias_works_identically_with_json_envelope() {
     let store_dir = tempfile::tempdir().unwrap();
     let isolated_cwd = tempfile::tempdir().unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["test-drive", "--json"])
         .env("WT_STORE", store_dir.path())
         .current_dir(isolated_cwd.path())
@@ -1164,7 +1164,7 @@ fn demo_runs_outside_any_git_repository() {
         .expect("check git");
     assert!(!git_check.status.success());
 
-    let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["demo", "--json"])
         .env("WT_STORE", store_dir.path())
         .current_dir(non_git_dir.path())
@@ -1188,7 +1188,7 @@ fn demo_runs_outside_any_git_repository() {
 // =========================================================================
 
 fn completions_stdout(shell: &str) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["completions", shell])
         .output()
         .expect("run wt binary");
@@ -1251,7 +1251,7 @@ fn elvish_completions_bind_completion_calls() {
 
 #[test]
 fn unknown_shell_is_rejected() {
-    let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["completions", "csh"])
         .output()
         .expect("run wt binary");
@@ -1262,7 +1262,7 @@ fn unknown_shell_is_rejected() {
 
 #[test]
 fn completions_requires_a_shell_argument() {
-    let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["completions"])
         .output()
         .expect("run wt binary");
@@ -1271,7 +1271,7 @@ fn completions_requires_a_shell_argument() {
 
 #[test]
 fn help_lists_the_completions_subcommand() {
-    let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["--help"])
         .output()
         .expect("run wt binary");

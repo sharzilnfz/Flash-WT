@@ -646,7 +646,7 @@ fn concurrent_identical_creates_one_publish_wins_loser_consumes_winner() {
             let store = store.clone();
             let one = one.clone();
             move || {
-                Command::new(env!("CARGO_BIN_EXE_wt"))
+                Command::new(env!("CARGO_BIN_EXE_flashwt"))
                     .args(["create", "race-one"])
                     .arg("--dir")
                     .arg(&one)
@@ -658,7 +658,7 @@ fn concurrent_identical_creates_one_publish_wins_loser_consumes_winner() {
             }
         });
         let b = s.spawn(move || {
-            Command::new(env!("CARGO_BIN_EXE_wt"))
+            Command::new(env!("CARGO_BIN_EXE_flashwt"))
                 .args(["create", "race-two"])
                 .arg("--dir")
                 .arg(&two)
@@ -1191,7 +1191,7 @@ fn sigkilled_creates_never_leave_a_half_published_snapshot_behind() {
     let fx = Fixture::v2_repo(5, 50);
 
     for (i, delay_ms) in KILL_DELAYS_MS.iter().enumerate() {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_wt"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_flashwt"))
             .args(["create", &format!("killed-{i}")])
             .arg("--dir")
             .arg(fx.worktree_path(&format!("origin-killed-{i}")))

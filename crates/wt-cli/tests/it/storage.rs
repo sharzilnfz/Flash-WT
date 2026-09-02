@@ -30,7 +30,7 @@ fn file_snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 }
 
 fn wt_cow_default(fx: &Fixture, args: &[&str], store: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_wt"))
+    Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(args)
         .env("WT_STORE", store)
         .env_remove("WT_HARDLINK")
@@ -180,7 +180,7 @@ fn before_first_write_hydrated_files_share_physical_blocks_with_the_blob() {
     };
 
     let before = free_bytes();
-    let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["create", "one"])
         .env("WT_STORE", &store)
         .env_remove("WT_HARDLINK")
@@ -277,7 +277,7 @@ fn cow_unavailable_falls_back_to_byte_copies_without_user_visible_failure() {
         let store = base.path().join("store");
         let dest = volume.mount.join("origin-ramdisk");
 
-        let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+        let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
             .args(["create", "ramdisk", "--dir"])
             .arg(&dest)
             .env("WT_STORE", &store)
@@ -324,7 +324,7 @@ fn running_as_root() -> bool {
 }
 
 fn wt_hardlinked(fx: &Fixture, name: &str, store: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_wt"))
+    Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["create", name])
         .env("WT_STORE", store)
         .env("WT_HARDLINK", "1")
@@ -469,7 +469,7 @@ fn disabling_hardlinks_falls_back_to_byte_copies_with_a_message() {
     let base = tempfile::tempdir().unwrap();
     let store = base.path().join("store");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["create", "copied"])
         .env("WT_STORE", store)
         .env("WT_NO_HARDLINK", "1")
@@ -1106,7 +1106,7 @@ fn base_movement_detected_in_json_and_human_output() {
     assert_ne!(initial_main_commit, new_main_commit);
 
     let feat1_dir = fx.repo.parent().unwrap().join("origin-feat-1");
-    let out_json = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out_json = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["create", "sub-feat", "--json"])
         .env("WT_STORE", fx.store_path())
         .current_dir(&feat1_dir)
@@ -1128,7 +1128,7 @@ fn base_movement_detected_in_json_and_human_output() {
     assert!(msg.contains(&initial_main_commit));
     assert!(msg.contains(&new_main_commit));
 
-    let out_human = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out_human = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["create", "sub-feat-2"])
         .env("WT_STORE", fx.store_path())
         .current_dir(&feat1_dir)
@@ -1281,7 +1281,7 @@ export PATH
         .unwrap();
 
     let store_dir = base.path().join("store");
-    let wt_out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let wt_out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["create", "demo"])
         .env("WT_STORE", &store_dir)
         .current_dir(&repo)
@@ -1437,7 +1437,7 @@ edition = "2021"
     assert!(repo.join("target/debug/incremental").is_dir());
 
     let store_dir = base.path().join("store");
-    let wt_out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let wt_out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["create", "demo"])
         .env("WT_STORE", &store_dir)
         .current_dir(&repo)
@@ -1580,7 +1580,7 @@ fn cross_device_or_fallback_copies_emit_diagnostic_warning_in_json() {
     let fx = Fixture::heavy_repo(20);
     fs::write(fx.repo.join(".wtinclude"), "heavy/\n").unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_wt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["create", "cross-vol", "--json"])
         .env("WT_SNAPSHOTS", "0")
         .env("WT_NO_HARDLINK", "1")
@@ -1672,7 +1672,7 @@ fn wt_verify_run(
     store: &Path,
     extra_env: &[(&str, &str)],
 ) -> std::process::Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wt"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_flashwt"));
     cmd.args(args)
         .env("WT_STORE", store)
         .env("WT_SNAPSHOTS", "0")
