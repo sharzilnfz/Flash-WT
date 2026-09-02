@@ -1,6 +1,6 @@
 # Ticket 07: Shared Test Fixture & Assertion Library
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Description
 

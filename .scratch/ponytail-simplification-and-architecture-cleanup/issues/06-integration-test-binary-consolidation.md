@@ -1,6 +1,6 @@
 # Ticket 06: Integration Test Binary Consolidation
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Description
 
