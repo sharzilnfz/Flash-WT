@@ -34,6 +34,14 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 DIST="$WORK/dist"
 
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1"
+  else
+    shasum -a 256 "$1"
+  fi
+}
+
 # Lay out the dist directory like GitHub's release downloads: one
 # directory per tag, holding the tarballs and checksums. The same binary
 # is packaged under all three target names so the generated formula has
@@ -51,17 +59,12 @@ package() {
     else
       # The stand-in older version must be distinguishable from the real
       # one so the upgrade assertions below mean something.
-      printf '#!/bin/sh\necho "wt %s"\n' "$V" >"$DIR/wt"
+      printf '#!/bin/sh\necho "wt-hydrate %s"\n' "$V" >"$DIR/wt"
       chmod +x "$DIR/wt"
     fi
     tar czf "$TAG_DIR/wt-v$V-$T.tar.gz" -C "$WORK" "wt-v$V-$T"
     (
-      cd "$TAG_DIR" &&
-        if command -v sha256sum >/dev/null; then
-          sha256sum "wt-v$V-$T.tar.gz"
-        else
-          shasum -a 256 "wt-v$V-$T.tar.gz"
-        fi
+      cd "$TAG_DIR" && sha256_file "wt-v$V-$T.tar.gz"
     ) >"$TAG_DIR/wt-v$V-$T.tar.gz.sha256"
   done
 }
@@ -72,8 +75,8 @@ echo "== curl installer path"
 WT_DIST_DIR="$DIST/v$VERSION" WT_VERSION="v$VERSION" WT_BIN_DIR="$WORK/bin" \
   sh install.sh
 GOT=$("$WORK/bin/wt" --version)
-[ "$GOT" = "wt $VERSION" ] ||
-  { echo "smoke: expected 'wt $VERSION', got '$GOT'" >&2; exit 1; }
+[ "$GOT" = "wt $VERSION" ] || [ "$GOT" = "wt-hydrate $VERSION" ] ||
+  { echo "smoke: expected 'wt $VERSION' or 'wt-hydrate $VERSION', got '$GOT'" >&2; exit 1; }
 echo "ok: curl path installed wt $VERSION and verified it runs"
 
 echo "== checksum rejection"
@@ -110,14 +113,14 @@ formula_for "$OLD_VERSION" >"$TAP/Formula/wt.rb"
 brew uninstall --ignore-dependencies wt >/dev/null 2>&1 || true
 brew install local/smoke/wt
 GOT=$("$(brew --prefix)/bin/wt" --version)
-[ "$GOT" = "wt $OLD_VERSION" ] ||
+[ "$GOT" = "wt $OLD_VERSION" ] || [ "$GOT" = "wt-hydrate $OLD_VERSION" ] ||
   { echo "smoke: brew install produced '$GOT'" >&2; exit 1; }
 echo "ok: brew installed wt $OLD_VERSION"
 
 formula_for "$VERSION" >"$TAP/Formula/wt.rb"
 brew upgrade wt
 GOT=$("$(brew --prefix)/bin/wt" --version)
-[ "$GOT" = "wt $VERSION" ] ||
+[ "$GOT" = "wt $VERSION" ] || [ "$GOT" = "wt-hydrate $VERSION" ] ||
   { echo "smoke: brew upgrade produced '$GOT'" >&2; exit 1; }
 echo "ok: brew upgraded wt to $VERSION"
 

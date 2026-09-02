@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::mirror::{self, ReadMirror};
-use crate::{ContentId, DiskStore, Error, Result, Store};
+use crate::{ContentId, DiskStore, Error, Result};
 
 /// The store's collection mode, persisted as `<root>/gc-mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -722,14 +722,14 @@ pub struct RetirementReceipt {
 }
 
 /// Unified store and lease reclamation engine.
-pub struct StoreReclaimer<'a, C: WorkspaceCleaner> {
+pub struct StoreReclaimer<'a> {
     store: &'a mut DiskStore,
-    cleaner: &'a C,
+    cleaner: &'a dyn WorkspaceCleaner,
 }
 
-impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
+impl<'a> StoreReclaimer<'a> {
     /// Construct a new `StoreReclaimer` on the given store with a workspace cleaner adapter.
-    pub fn new(store: &'a mut DiskStore, cleaner: &'a C) -> Self {
+    pub fn new(store: &'a mut DiskStore, cleaner: &'a dyn WorkspaceCleaner) -> Self {
         Self { store, cleaner }
     }
 
@@ -769,6 +769,7 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
                             if ledger_path.exists() {
                                 if let Ok(text) = fs::read_to_string(&ledger_path) {
                                     if self.store.gc_mode() != GcMode::MarkSweepNoRefs {
+                                        let mut blob_ids = BTreeSet::new();
                                         for line in text.lines() {
                                             if line.is_empty() {
                                                 continue;
@@ -777,23 +778,22 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
                                             match fields.as_slice() {
                                                 [_, id_str] => {
                                                     if let Some(cid) = ContentId::from_hex(id_str) {
-                                                        match Store::release_ref(self.store, &cid) {
-                                                            Ok(()) => {}
-                                                            Err(Error::RefCountUnderflow(_)) => {}
-                                                            Err(e) => return Err(e),
-                                                        }
+                                                        blob_ids.insert(cid);
                                                     }
                                                 }
                                                 [_, kind, id_str] if *kind == "blob" => {
                                                     if let Some(cid) = ContentId::from_hex(id_str) {
-                                                        match Store::release_ref(self.store, &cid) {
-                                                            Ok(()) => {}
-                                                            Err(Error::RefCountUnderflow(_)) => {}
-                                                            Err(e) => return Err(e),
-                                                        }
+                                                        blob_ids.insert(cid);
                                                     }
                                                 }
                                                 _ => {}
+                                            }
+                                        }
+                                        for cid in blob_ids {
+                                            match self.store.release_ref(&cid) {
+                                                Ok(()) => {}
+                                                Err(Error::RefCountUnderflow(_)) => {}
+                                                Err(e) => return Err(e),
                                             }
                                         }
                                     }
@@ -952,10 +952,26 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
             );
         }
 
+        let canon_worktree = fs::canonicalize(worktree_path).ok();
+        let canon_gitdir = fs::canonicalize(gitdir).ok();
+
+        if worktree_path.exists() {
+            let _ = self.cleaner.remove_worktree(worktree_path);
+            if worktree_path.exists() {
+                fs::remove_dir_all(worktree_path).map_err(Error::Io)?;
+            }
+            if worktree_path.exists() {
+                return Err(Error::Io(std::io::Error::other(format!(
+                    "worktree {} still exists after removal",
+                    worktree_path.display()
+                ))));
+            }
+        }
+
         let mut references_released = 0;
         if !blob_ids.is_empty() && self.store.gc_mode() != GcMode::MarkSweepNoRefs {
             for cid in &blob_ids {
-                match Store::release_ref(self.store, cid) {
+                match self.store.release_ref(cid) {
                     Ok(()) => {
                         references_released += 1;
                     }
@@ -969,15 +985,14 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
             let _ = fs::remove_file(&ledger_path);
         }
 
-        let mirror_removed = self
-            .store
-            .unlink_worktree_mirror(worktree_path, gitdir)
-            .unwrap_or(false)
-            || had_ledger;
-
-        if worktree_path.exists() {
-            let _ = self.cleaner.remove_worktree(worktree_path);
-        }
+        let mirror_removed = if let (Some(cw), Some(cg)) = (canon_worktree, canon_gitdir) {
+            crate::mirror::remove(self.store.root(), &cw, &cg).unwrap_or(false) || had_ledger
+        } else {
+            self.store
+                .unlink_worktree_mirror(worktree_path, gitdir)
+                .unwrap_or(false)
+                || had_ledger
+        };
 
         Ok(RetirementReceipt {
             references_released,

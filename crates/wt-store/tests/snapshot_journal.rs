@@ -18,8 +18,8 @@ use std::thread;
 use std::time::Duration;
 
 use wt_store::{
-    ContentId, DiskStore, Manifest, PublishOutcome, SelectionIndex, SnapshotEntry, SnapshotLru,
-    Store as _, compact_journal, journal_path, lru_path, record_snapshot_hit,
+    ContentId, DiskStore, Manifest, PublishOptions, PublishOutcome, SelectionIndex, SnapshotEntry,
+    SnapshotLru, compact_journal, journal_path, lru_path, record_snapshot_hit,
     record_snapshot_lru_touch, record_snapshot_publish, select_old_snapshot,
 };
 
@@ -91,7 +91,10 @@ fn snapshot_lookup_and_selection_reads_live_journal_state() {
     let entries1 = vec![SnapshotEntry::file("bundle.js", blob1, 0o644)];
     let manifest1 = Manifest::new(entries1.clone()).unwrap();
     assert_eq!(
-        store.publish_snapshot(entries1, false).unwrap(),
+        store
+            .publish_snapshot(entries1, PublishOptions::default())
+            .unwrap()
+            .outcome,
         PublishOutcome::Published
     );
     record_snapshot_publish(store.root(), REPO, PATTERN, HEAVY, &manifest1.hash).unwrap();
@@ -111,7 +114,10 @@ fn snapshot_lookup_and_selection_reads_live_journal_state() {
     ];
     let manifest2 = Manifest::new(entries2.clone()).unwrap();
     assert_eq!(
-        store.publish_snapshot(entries2, false).unwrap(),
+        store
+            .publish_snapshot(entries2, PublishOptions::default())
+            .unwrap()
+            .outcome,
         PublishOutcome::Published
     );
     record_snapshot_publish(store.root(), REPO, PATTERN, HEAVY, &manifest2.hash).unwrap();

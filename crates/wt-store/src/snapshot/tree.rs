@@ -62,7 +62,7 @@ pub(super) fn clone_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
 
 /// Every relpath under `dir` (files, symlinks, AND directories —
 /// empty dirs matter), sorted. For the paranoid structural pass.
-fn collect_rels(dir: &Path, prefix: &str, out: &mut Vec<String>) -> io::Result<()> {
+pub(crate) fn collect_rels(dir: &Path, prefix: &str, out: &mut Vec<String>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
@@ -91,7 +91,7 @@ fn malformed_entry(entry: &SnapshotEntry, problem: &str) -> BuildError {
 /// must carry its recorded target. Covers bulk-cloned and freshly-
 /// linked content alike — see the trust model on
 /// [`DiskStore::publish_snapshot_incremental`].
-pub(super) fn paranoid_verify_tree(tree_dir: &Path, manifest: &Manifest) -> Result<(), BuildError> {
+pub(crate) fn paranoid_verify_tree(tree_dir: &Path, manifest: &Manifest) -> Result<(), BuildError> {
     let mut got = Vec::new();
     if let Err(e) = collect_rels(tree_dir, "", &mut got) {
         return Err(BuildError::Fatal(format!(
@@ -201,11 +201,7 @@ impl Drop for DirFd {
 }
 
 fn split_parent_and_filename(rel: &str) -> (&str, &str) {
-    if let Some(pos) = rel.rfind('/') {
-        (&rel[..pos], &rel[pos + 1..])
-    } else {
-        ("", rel)
-    }
+    rel.rsplit_once('/').unwrap_or(("", rel))
 }
 
 struct DirectoryGroup<'a> {
@@ -227,13 +223,9 @@ impl DiskStore {
     /// subtree batches and dispatches them across a worker pool bounded by
     /// available CPU parallelism via `std::thread::scope`.
     ///
-    /// Chmod on a hardlink retargets the SHARED inode, so the object
-    /// blob's mode becomes the snapshot's normalized mode. That is
-    /// deliberate (the plan's "blobs' stored modes preserve exec
-    /// bits") and safe here: normalization only ever sets owner-write
-    /// or adds/removes the x-bits consistently for one content id, and
-    /// chmod does not touch mtime, so verified-ledger fingerprints
-    /// stay valid.
+    /// Hardlinked files share the CAS inode; a mode mismatch is
+    /// resolved by replacing the staged entry with a private copy
+    /// before chmod so the store blob's permissions stay untouched.
     pub(super) fn build_tree(
         &self,
         dir: &Path,
@@ -251,8 +243,8 @@ impl DiskStore {
             }
             // Ensure intermediate parent directories are also included
             let mut current = entry.rel.as_str();
-            while let Some(pos) = current.rfind('/') {
-                current = &current[..pos];
+            while let Some((parent, _)) = current.rsplit_once('/') {
+                current = parent;
                 dir_modes.entry(current.to_string()).or_insert(DIR_MODE);
             }
         }
@@ -386,8 +378,8 @@ impl DiskStore {
             *link_train_ms += stage.elapsed().as_millis() as u64;
 
             for (entry, filename) in &group.entries {
-                self.place_entry_relative(
-                    dir_fd.raw(),
+                self.place_entry_internal(
+                    Some(&dir_fd),
                     &dir_path,
                     filename,
                     entry,
@@ -399,124 +391,6 @@ impl DiskStore {
             // dir_fd drops here eagerly when moving to the next parent dir.
         }
         Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn place_entry_relative(
-        &self,
-        dir_fd: libc::c_int,
-        dir_path: &Path,
-        filename: &str,
-        entry: &SnapshotEntry,
-        paranoid: bool,
-        verify_ms: &mut u64,
-        link_train_ms: &mut u64,
-    ) -> Result<(), BuildError> {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-
-        let c_filename = CString::new(filename.as_bytes())
-            .map_err(|_| malformed_entry(entry, "NUL in filename"))?;
-
-        match entry.kind {
-            EntryKind::Dir => Ok(()),
-            EntryKind::Symlink => {
-                let Some(target) = &entry.target else {
-                    return Err(malformed_entry(entry, "symlink entry lacks a target"));
-                };
-                let c_target = CString::new(target.as_bytes())
-                    .map_err(|_| malformed_entry(entry, "NUL in symlink target"))?;
-                let stage = Instant::now();
-                let rc = unsafe { libc::symlinkat(c_target.as_ptr(), dir_fd, c_filename.as_ptr()) };
-                if rc != 0 {
-                    let err = io::Error::last_os_error();
-                    return Err(BuildError::Fatal(format!(
-                        "cannot link symlink {}/{filename}: {err}",
-                        dir_path.display()
-                    )));
-                }
-                *link_train_ms += stage.elapsed().as_millis() as u64;
-                Ok(())
-            }
-            EntryKind::File => {
-                let Some(blob) = entry.blob else {
-                    return Err(malformed_entry(entry, "file entry lacks a blob ref"));
-                };
-
-                let stage = Instant::now();
-                let verdict = if paranoid {
-                    self.verify_digest(&blob)
-                } else {
-                    self.ensure_verified(&blob)
-                };
-                if let Err(e) = verdict {
-                    return Err(match e {
-                        Error::UnknownContent(_) => BuildError::MissingBlob(blob),
-                        other => BuildError::Fatal(other.to_string()),
-                    });
-                }
-                *verify_ms += stage.elapsed().as_millis() as u64;
-
-                let blob_path = self.blob_path(&blob);
-                let c_blob = CString::new(blob_path.as_os_str().as_bytes())
-                    .map_err(|_| BuildError::Fatal("NUL in blob path".into()))?;
-
-                let stage = Instant::now();
-                let rc = unsafe {
-                    libc::linkat(
-                        libc::AT_FDCWD,
-                        c_blob.as_ptr(),
-                        dir_fd,
-                        c_filename.as_ptr(),
-                        0,
-                    )
-                };
-                if rc != 0 {
-                    let err = io::Error::last_os_error();
-                    return Err(match err.kind() {
-                        io::ErrorKind::NotFound => BuildError::MissingBlob(blob),
-                        _ => BuildError::Fatal(format!(
-                            "cannot link blob {blob} to {}/{filename}: {err}",
-                            dir_path.display()
-                        )),
-                    });
-                }
-
-                let mut stat_buf = std::mem::MaybeUninit::<libc::stat>::uninit();
-                let rc = unsafe {
-                    libc::fstatat(
-                        dir_fd,
-                        c_filename.as_ptr(),
-                        stat_buf.as_mut_ptr(),
-                        libc::AT_SYMLINK_NOFOLLOW,
-                    )
-                };
-                if rc != 0 {
-                    let err = io::Error::last_os_error();
-                    return Err(BuildError::Fatal(format!(
-                        "cannot stat {}/{filename}: {err}",
-                        dir_path.display()
-                    )));
-                }
-                let stat = unsafe { stat_buf.assume_init() };
-                #[allow(clippy::unnecessary_cast)]
-                let current_mode = (stat.st_mode as u32) & 0o7777;
-                if current_mode != entry.mode {
-                    let rc = unsafe {
-                        libc::fchmodat(dir_fd, c_filename.as_ptr(), entry.mode as libc::mode_t, 0)
-                    };
-                    if rc != 0 {
-                        let err = io::Error::last_os_error();
-                        return Err(BuildError::Fatal(format!(
-                            "cannot chmod {}/{filename}: {err}",
-                            dir_path.display()
-                        )));
-                    }
-                }
-                *link_train_ms += stage.elapsed().as_millis() as u64;
-                Ok(())
-            }
-        }
     }
 
     /// Place ONE entry under `dir`. Shared by the full builder
@@ -537,61 +411,106 @@ impl DiskStore {
         paranoid: bool,
         timings: &mut TreeTimings,
     ) -> Result<(), BuildError> {
-        let dest = dir.join(&entry.rel);
+        self.place_entry_internal(
+            None,
+            dir,
+            &entry.rel,
+            entry,
+            paranoid,
+            &mut timings.verify_ms,
+            &mut timings.link_train_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn place_entry_internal(
+        &self,
+        dir_fd: Option<&DirFd>,
+        dir_path: &Path,
+        target_name: &str,
+        entry: &SnapshotEntry,
+        paranoid: bool,
+        verify_ms: &mut u64,
+        link_train_ms: &mut u64,
+    ) -> Result<(), BuildError> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dest_path = dir_path.join(target_name);
+
         match entry.kind {
             EntryKind::Dir => {
                 let stage = Instant::now();
-                fs::create_dir_all(&dest)
+                fs::create_dir_all(&dest_path)
                     .and_then(|()| {
-                        fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode))
+                        fs::set_permissions(&dest_path, fs::Permissions::from_mode(entry.mode))
                     })
                     .map_err(|e| {
-                        BuildError::Fatal(format!("cannot create {}: {e}", dest.display()))
+                        BuildError::Fatal(format!("cannot create {}: {e}", dest_path.display()))
                     })?;
-                timings.link_train_ms += stage.elapsed().as_millis() as u64;
+                *link_train_ms += stage.elapsed().as_millis() as u64;
                 Ok(())
             }
             EntryKind::Symlink => {
                 let Some(target) = &entry.target else {
                     return Err(malformed_entry(entry, "symlink entry lacks a target"));
                 };
+
                 let stage = Instant::now();
-                if let Some(parent) = dest.parent() {
-                    if !parent.exists() {
-                        fs::create_dir_all(parent).map_err(|e| {
-                            BuildError::Fatal(format!("cannot create {}: {e}", parent.display()))
-                        })?;
+                if dir_fd.is_none() {
+                    if let Some(parent) = dest_path.parent() {
+                        if !parent.exists() {
+                            fs::create_dir_all(parent).map_err(|e| {
+                                BuildError::Fatal(format!(
+                                    "cannot create {}: {e}",
+                                    parent.display()
+                                ))
+                            })?;
+                        }
                     }
                 }
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(target, &dest).map_err(|e| {
-                    BuildError::Fatal(format!("cannot link {}: {e}", dest.display()))
-                })?;
-                timings.link_train_ms += stage.elapsed().as_millis() as u64;
+
+                let c_target = CString::new(target.as_bytes())
+                    .map_err(|_| malformed_entry(entry, "NUL in symlink target"))?;
+                let c_name = if dir_fd.is_some() {
+                    CString::new(target_name.as_bytes())
+                } else {
+                    CString::new(dest_path.as_os_str().as_bytes())
+                }
+                .map_err(|_| malformed_entry(entry, "NUL in target path"))?;
+
+                let raw_fd = dir_fd.map_or(libc::AT_FDCWD, DirFd::raw);
+                let rc = unsafe { libc::symlinkat(c_target.as_ptr(), raw_fd, c_name.as_ptr()) };
+                if rc != 0 {
+                    let err = io::Error::last_os_error();
+                    return Err(BuildError::Fatal(format!(
+                        "cannot link symlink {}: {err}",
+                        dest_path.display()
+                    )));
+                }
+                *link_train_ms += stage.elapsed().as_millis() as u64;
                 Ok(())
             }
             EntryKind::File => {
                 let Some(blob) = entry.blob else {
                     return Err(malformed_entry(entry, "file entry lacks a blob ref"));
                 };
-                // Sorted order puts explicit dir entries ahead of
-                // their children, but a manifest is not obliged
-                // to name every intermediate: recreate any gap.
-                let stage = Instant::now();
-                if let Some(parent) = dest.parent() {
-                    if !parent.exists() {
-                        fs::create_dir_all(parent).map_err(|e| {
-                            BuildError::Fatal(format!("cannot create {}: {e}", parent.display()))
-                        })?;
+
+                if dir_fd.is_none() {
+                    let stage = Instant::now();
+                    if let Some(parent) = dest_path.parent() {
+                        if !parent.exists() {
+                            fs::create_dir_all(parent).map_err(|e| {
+                                BuildError::Fatal(format!(
+                                    "cannot create {}: {e}",
+                                    parent.display()
+                                ))
+                            })?;
+                        }
                     }
+                    *link_train_ms += stage.elapsed().as_millis() as u64;
                 }
-                timings.link_train_ms += stage.elapsed().as_millis() as u64;
-                // Verify first: a corrupt or missing blob never
-                // reaches placement. Both checks STREAM the bytes
-                // through a fixed-size window, so verification cost
-                // is bounded regardless of blob size; paranoid runs
-                // always re-hash, everyone else trusts the verified
-                // ledger when it can answer.
+
                 let stage = Instant::now();
                 let verdict = if paranoid {
                     self.verify_digest(&blob)
@@ -604,34 +523,74 @@ impl DiskStore {
                         other => BuildError::Fatal(other.to_string()),
                     });
                 }
-                timings.verify_ms += stage.elapsed().as_millis() as u64;
+                *verify_ms += stage.elapsed().as_millis() as u64;
+
+                let blob_path = self.blob_path(&blob);
+                let c_blob = CString::new(blob_path.as_os_str().as_bytes())
+                    .map_err(|_| BuildError::Fatal("NUL in blob path".into()))?;
+                let c_name = if dir_fd.is_some() {
+                    CString::new(target_name.as_bytes())
+                } else {
+                    CString::new(dest_path.as_os_str().as_bytes())
+                }
+                .map_err(|_| malformed_entry(entry, "NUL in target path"))?;
+
+                let raw_fd = dir_fd.map_or(libc::AT_FDCWD, DirFd::raw);
                 let stage = Instant::now();
-                if let Err(e) = fs::hard_link(self.blob_path(&blob), &dest) {
-                    return Err(match e.kind() {
+                let rc = unsafe {
+                    libc::linkat(libc::AT_FDCWD, c_blob.as_ptr(), raw_fd, c_name.as_ptr(), 0)
+                };
+                if rc != 0 {
+                    let err = io::Error::last_os_error();
+                    return Err(match err.kind() {
                         io::ErrorKind::NotFound => BuildError::MissingBlob(blob),
                         _ => BuildError::Fatal(format!(
-                            "cannot link blob {blob} to {}: {e}",
-                            dest.display()
+                            "cannot link blob {blob} to {}: {err}",
+                            dest_path.display()
                         )),
                     });
                 }
-                // Chmod on a hardlink retargets the SHARED inode, so
-                // this may rewrite the object blob's mode — but only
-                // when it actually differs. Most blobs are born 0644
-                // and most entries want 0644; skipping the no-op
-                // chmod saves a measurable slice of build time at
-                // 40k-file scale without changing any outcome.
-                let meta = dest.symlink_metadata().map_err(|e| {
-                    BuildError::Fatal(format!("cannot stat {}: {e}", dest.display()))
-                })?;
-                if meta.permissions().mode() & 0o7777 != entry.mode {
-                    fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode)).map_err(
-                        |e| BuildError::Fatal(format!("cannot chmod {}: {e}", dest.display())),
-                    )?;
+
+                let mut stat_buf = std::mem::MaybeUninit::<libc::stat>::uninit();
+                let rc = unsafe {
+                    libc::fstatat(
+                        raw_fd,
+                        c_name.as_ptr(),
+                        stat_buf.as_mut_ptr(),
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                };
+                if rc != 0 {
+                    let err = io::Error::last_os_error();
+                    return Err(BuildError::Fatal(format!(
+                        "cannot stat {}: {err}",
+                        dest_path.display()
+                    )));
                 }
-                timings.link_train_ms += stage.elapsed().as_millis() as u64;
+                let stat = unsafe { stat_buf.assume_init() };
+                #[allow(clippy::unnecessary_cast)]
+                let current_mode = (stat.st_mode as u32) & 0o7777;
+                if current_mode != entry.mode {
+                    replace_with_blob_copy(&blob_path, &dest_path, entry.mode)?;
+                }
+                *link_train_ms += stage.elapsed().as_millis() as u64;
                 Ok(())
             }
         }
     }
+}
+
+fn replace_with_blob_copy(blob_path: &Path, dest: &Path, mode: u32) -> Result<(), BuildError> {
+    fs::remove_file(dest)
+        .map_err(|e| BuildError::Fatal(format!("cannot unlink {}: {e}", dest.display())))?;
+    wt_copy::buffered_copy_file(blob_path, dest).map_err(|e| {
+        BuildError::Fatal(format!(
+            "cannot copy blob {} to {}: {e}",
+            blob_path.display(),
+            dest.display()
+        ))
+    })?;
+    fs::set_permissions(dest, fs::Permissions::from_mode(mode))
+        .map_err(|e| BuildError::Fatal(format!("cannot chmod {}: {e}", dest.display())))?;
+    Ok(())
 }

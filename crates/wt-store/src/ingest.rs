@@ -33,7 +33,7 @@ use std::time::{Duration, UNIX_EPOCH};
 #[cfg(target_os = "macos")]
 use crate::bulkwalk;
 use crate::validation::{Entry, ValidationCache};
-use crate::{ContentId, DiskStore, Error, Result, Store};
+use crate::{ContentId, DiskStore, Error, Result};
 
 /// Everything one ingested tree contributed to the store.
 pub struct Ingested {
@@ -131,11 +131,7 @@ impl DiskStore {
                     }
                     let path = src.join(&entry.rel_path);
                     if entry.is_symlink {
-                        let target =
-                            fs::read_link(&path).map_err(|e| io_ctx("read symlink", &path, e))?;
-                        ingested
-                            .symlinks
-                            .insert(rel, target.to_string_lossy().into_owned());
+                        ingest_symlink(&mut ingested, rel, &path)?;
                         continue;
                     }
                     if entry.is_dir {
@@ -155,28 +151,17 @@ impl DiskStore {
                         }
                         continue;
                     }
-                    if options.snapshots {
-                        ingested.modes.insert(rel.clone(), entry.mode & 0o7777);
-                    }
                     let mtime = UNIX_EPOCH + Duration::new(entry.mtime_secs, entry.mtime_nanos);
-                    let id = match cache.lookup(&rel, entry.size, mtime) {
-                        Some(id) if self.contains(&id) => id,
-                        _ => {
-                            let bytes = fs::read(&path).map_err(|e| io_ctx("read", &path, e))?;
-                            let id = self.put(&bytes)?;
-                            cache.record(
-                                rel.clone(),
-                                Entry {
-                                    size: entry.size,
-                                    mtime,
-                                    id,
-                                },
-                            );
-                            id
-                        }
-                    };
-                    ingested.file_sizes.insert(rel.clone(), entry.size);
-                    ingested.files.insert(rel, id);
+                    ingest_file(
+                        self,
+                        &mut cache,
+                        &mut ingested,
+                        rel,
+                        &path,
+                        entry.size,
+                        mtime,
+                        entry.mode,
+                    )?;
                 }
             }
             None => ingest_tree_walk(self, &mut cache, &mut ingested, src_root, src, options)?,
@@ -228,11 +213,7 @@ fn ingest_tree_walk(
                 // not: placement recreates it verbatim via symlink(2),
                 // which never resolves the target. (With snapshots on
                 // the manifest consumes the same record.)
-                let target = fs::read_link(&path).map_err(|e| io_ctx("read symlink", &path, e))?;
-                ingested.symlinks.insert(
-                    rel_text(src_root, &path)?,
-                    target.to_string_lossy().into_owned(),
-                );
+                ingest_symlink(ingested, rel, &path)?;
                 continue;
             }
             if file_type.is_dir() {
@@ -254,32 +235,55 @@ fn ingest_tree_walk(
                 }
                 continue;
             }
-            let rel = rel_text(src_root, &path)?;
             let meta = fs::metadata(&path).map_err(|e| io_ctx("stat", &path, e))?;
-            ingested.modes.insert(rel.clone(), meta.mode() & 0o7777);
             let size = meta.len();
             let mtime = meta.modified().map_err(|e| io_ctx("stat", &path, e))?;
-            let id = match cache.lookup(&rel, size, mtime) {
-                // Cache hit: same size and same mtime as last time.
-                // Trust it only while the blob is actually still here.
-                Some(id) if store.contains(&id) => id,
-                _ => {
-                    // Miss (or a swept blob): pay for read and hash.
-                    let bytes = fs::read(&path).map_err(|e| io_ctx("read", &path, e))?;
-                    let id = store.put(&bytes)?;
-                    // An mtime before the epoch cannot round-trip
-                    // through the cache format; skip caching rather
-                    // than fail, so such a file just stays cold.
-                    if mtime >= std::time::UNIX_EPOCH {
-                        cache.record(rel.clone(), Entry { size, mtime, id });
-                    }
-                    id
-                }
-            };
-            ingested.file_sizes.insert(rel.clone(), size);
-            ingested.files.insert(rel, id);
+            let mode = meta.mode();
+            ingest_file(store, cache, ingested, rel, &path, size, mtime, mode)?;
         }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_file(
+    store: &mut DiskStore,
+    cache: &mut ValidationCache,
+    ingested: &mut Ingested,
+    rel: String,
+    path: &Path,
+    size: u64,
+    mtime: std::time::SystemTime,
+    mode: u32,
+) -> Result<()> {
+    ingested.modes.insert(rel.clone(), mode & 0o7777);
+    let id = match cache.lookup(&rel, size, mtime) {
+        // Cache hit: same size and same mtime as last time.
+        // Trust it only while the blob is actually still here.
+        Some(id) if store.contains(&id) => id,
+        _ => {
+            // Miss (or a swept blob): pay for read and hash.
+            let bytes = fs::read(path).map_err(|e| io_ctx("read", path, e))?;
+            let id = store.put(&bytes)?;
+            // An mtime before the epoch cannot round-trip
+            // through the cache format; skip caching rather
+            // than fail, so such a file just stays cold.
+            if mtime >= std::time::UNIX_EPOCH {
+                cache.record(rel.clone(), Entry { size, mtime, id });
+            }
+            id
+        }
+    };
+    ingested.file_sizes.insert(rel.clone(), size);
+    ingested.files.insert(rel, id);
+    Ok(())
+}
+
+fn ingest_symlink(ingested: &mut Ingested, rel: String, path: &Path) -> Result<()> {
+    let target = fs::read_link(path).map_err(|e| io_ctx("read symlink", path, e))?;
+    ingested
+        .symlinks
+        .insert(rel, target.to_string_lossy().into_owned());
     Ok(())
 }
 

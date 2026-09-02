@@ -9,7 +9,7 @@ use std::fs;
 use std::time::Instant;
 
 use tempfile::TempDir;
-use wt_store::{ContentId, DiskStore, Error, Store};
+use wt_store::{ContentId, DiskStore, Error};
 
 fn temp_root() -> TempDir {
     TempDir::new().expect("temp dir")

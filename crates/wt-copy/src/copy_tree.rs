@@ -20,7 +20,7 @@ use std::io;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
-use crate::{Error, Result, Safety, ensure_backend_runnable};
+use crate::{Error, Result};
 
 /// Copy the tree at `src` into the not-yet-existing directory `dest`,
 /// creating it exclusively.
@@ -52,10 +52,12 @@ fn walk(
         } else if file_type.is_dir() {
             fs::create_dir(&to)?;
             walk(&from, &to, copy_file)?;
-        } else {
+        } else if file_type.is_file() {
             #[cfg(test)]
             test_hooks::maybe_fail_injected()?;
             copy_file(&from, &to)?;
+        } else {
+            continue;
         }
     }
     Ok(())
@@ -71,12 +73,8 @@ fn walk(
 /// absent.
 pub(crate) fn staged_copy(
     dest: &Path,
-    safety: Safety,
     fill: &mut dyn FnMut(&Path) -> Result<()>,
 ) -> Result<()> {
-    // UnsafePending backends are refused before touching the
-    // filesystem at all.
-    ensure_backend_runnable(safety)?;
     // Fast fail for the common case. The authoritative guard is the
     // final rename: a dest created between this check and the rename
     // can only be replaced atomically or make the rename fail — the
@@ -158,7 +156,6 @@ pub(crate) mod test_hooks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CopyBackend;
     use crate::{BackendKind, candidates};
     use std::fs;
 
@@ -175,7 +172,7 @@ mod tests {
     fn runnable(base: &Path) -> Vec<Box<dyn crate::CopyBackend>> {
         candidates()
             .into_iter()
-            .filter(|b| b.safety() == Safety::Safe && b.supports(base))
+            .filter(|b| b.supports(base))
             .collect()
     }
 
@@ -231,37 +228,5 @@ mod tests {
                 let n = e.file_name().to_string_lossy().into_owned();
                 n.starts_with("dest-") && n.ends_with(".tmp")
             })
-    }
-
-    /// An UnsafePending backend must be refused before anything is
-    /// written, exercising the guard inside `staged_copy` itself.
-    #[test]
-    fn unsafe_pending_backend_is_refused_and_writes_nothing() {
-        struct PendingBackend;
-
-        impl CopyBackend for PendingBackend {
-            fn kind(&self) -> BackendKind {
-                BackendKind::DeepCopy
-            }
-            fn safety(&self) -> Safety {
-                Safety::UnsafePending
-            }
-            fn supports(&self, _dir: &Path) -> bool {
-                true
-            }
-            fn copy_dir(&self, _src: &Path, dest: &Path) -> Result<()> {
-                staged_copy(dest, self.safety(), &mut |_staging| Ok(()))
-            }
-        }
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let src = fixture(dir.path());
-        let dest = dir.path().join("dest");
-
-        assert!(matches!(
-            PendingBackend.copy_dir(&src, &dest),
-            Err(crate::Error::UnsafeBackend)
-        ));
-        assert!(!dest.exists(), "refusal must not create dest");
     }
 }

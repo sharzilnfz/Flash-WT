@@ -23,139 +23,26 @@
 //! the delete gets the file or `NotFound`, never torn bytes.
 
 use std::fs;
-use std::io;
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use crate::snapshot::{EntryKind, Manifest};
+use crate::snapshot::{paranoid_verify_tree, read_published as read_published_snapshot};
 use crate::{ContentId, DiskStore, Error, Result};
-
-/// Held `flock(2)` on the store's `refs/` directory for the lifetime
-/// of the guard; released on drop. Same exclusion semantics as the
-/// refcount lock in [`crate::disk`] — locks are per open file
-/// description, so separate processes genuinely contend — reimplemented
-/// here rather than exported, keeping the disk module's surface
-/// untouched.
-struct RefsDirLock {
-    _file: fs::File,
-}
-
-impl Drop for RefsDirLock {
-    fn drop(&mut self) {
-        // SAFETY: the fd is valid for as long as `_file` is alive,
-        // i.e. through the end of this drop.
-        unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
-    }
-}
-
-/// Exclusive-lock the `refs/` directory, serializing this pass's
-/// refcount-affecting deletions against every other wt process.
-fn lock_refs(root: &Path) -> io::Result<RefsDirLock> {
-    let dir = fs::File::open(root.join("refs"))?;
-    // SAFETY: flock(2) takes only an fd and constants; the fd is
-    // valid for as long as `dir` is alive.
-    if unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(RefsDirLock { _file: dir })
-}
-
-/// Recursively collect relative paths under `dir` (files, symlinks, and directories).
-fn collect_tree_rels(dir: &Path, prefix: &str, out: &mut Vec<String>) -> io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let rel = format!("{prefix}{name}");
-        out.push(rel.clone());
-        if file_type.is_dir() {
-            collect_tree_rels(&entry.path(), &format!("{rel}/"), out)?;
-        }
-    }
-    Ok(())
-}
 
 /// Verify published snapshot directory: manifest validity, .complete marker, and file tree.
 fn verify_snapshot_dir(dir: &Path, name: &str) -> std::result::Result<(), String> {
     let Some(hash) = ContentId::from_hex(name) else {
         return Err("directory name is not a valid 64-hex content hash".to_string());
     };
-
-    let manifest_path = dir.join("manifest.tsv");
-    let manifest_text =
-        fs::read_to_string(&manifest_path).map_err(|e| format!("cannot read manifest.tsv: {e}"))?;
-    let manifest = Manifest::parse(&manifest_text)
-        .map_err(|reason| format!("unparseable manifest: {reason}"))?;
-    if manifest.hash != hash {
-        return Err("manifest hash does not match directory name".to_string());
-    }
-
-    let complete_path = dir.join(".complete");
-    let complete_text = fs::read_to_string(&complete_path)
-        .map_err(|e| format!("missing or unreadable .complete marker: {e}"))?;
-    let mut parts = complete_text.trim_end_matches('\n').split('\t');
-    if parts.next() != Some("v1") {
-        return Err("wrong schema version in .complete".to_string());
-    }
-    let expected_hash = hash.to_string();
-    if parts.next() != Some(expected_hash.as_str()) || parts.next().is_some() {
-        return Err(".complete does not match manifest hash".to_string());
-    }
-
+    let root = dir
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| "missing store root for snapshot directory".to_string())?;
+    let manifest = read_published_snapshot(root, &hash)
+        .ok_or_else(|| "invalid published snapshot metadata or marker".to_string())?;
     let tree_dir = dir.join("tree");
-    if !tree_dir.is_dir() {
-        return Err("missing tree directory".to_string());
-    }
-
-    let mut got_rels = Vec::new();
-    collect_tree_rels(&tree_dir, "", &mut got_rels)
-        .map_err(|e| format!("cannot walk tree directory: {e}"))?;
-    got_rels.sort();
-
-    let mut want_rels: Vec<String> = manifest.entries.iter().map(|e| e.rel.clone()).collect();
-    want_rels.sort();
-    if got_rels != want_rels {
-        return Err("tree paths differ from manifest".to_string());
-    }
-
-    for entry in &manifest.entries {
-        let entry_path = tree_dir.join(&entry.rel);
-        match entry.kind {
-            EntryKind::Dir => {
-                if !entry_path.is_dir() {
-                    return Err(format!("missing tree directory {}", entry.rel));
-                }
-            }
-            EntryKind::Symlink => {
-                let Some(target) = &entry.target else {
-                    return Err(format!("symlink entry {} lacks target", entry.rel));
-                };
-                let actual = fs::read_link(&entry_path)
-                    .map_err(|e| format!("cannot read symlink {}: {e}", entry.rel))?;
-                if actual.to_string_lossy() != target.as_str() {
-                    return Err(format!(
-                        "symlink {} points to {:?}, manifest says {:?}",
-                        entry.rel, actual, target
-                    ));
-                }
-            }
-            EntryKind::File => {
-                let Some(blob) = entry.blob else {
-                    return Err(format!("file entry {} lacks blob reference", entry.rel));
-                };
-                if !entry_path.is_file() {
-                    return Err(format!("missing tree file {}", entry.rel));
-                }
-                if let Err(e) = DiskStore::verify_file(&entry_path, &blob) {
-                    return Err(format!("tree file {} failed verification: {e}", entry.rel));
-                }
-            }
-        }
-    }
-
-    Ok(())
+    paranoid_verify_tree(&tree_dir, &manifest).map_err(|e| e.to_string())
 }
 
 /// What one scrub pass observed.
@@ -353,7 +240,7 @@ impl DiskStore {
 
         let mut deleted = 0u64;
         if !dry_run && !corrupt.is_empty() {
-            let _lock = lock_refs(self.root())?;
+            let _lock = self.lock_refs()?;
             for id in &corrupt {
                 self.delete(id)?;
                 deleted += 1;
@@ -387,8 +274,9 @@ impl DiskStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Manifest;
     use crate::SnapshotEntry;
-    use crate::Store;
+    use crate::snapshot::PublishOptions;
 
     #[test]
     fn sharded_parallel_scrub_verifies_blobs_across_multiple_shards() {
@@ -461,7 +349,9 @@ mod tests {
 
         let manifest = Manifest::new(entries.clone()).unwrap();
         let snap_hash = manifest.hash;
-        store.publish_snapshot(entries, false).unwrap();
+        store
+            .publish_snapshot(entries, PublishOptions::default())
+            .unwrap();
         let snap_dir = store.root().join("snapshots").join(snap_hash.to_string());
         assert!(snap_dir.is_dir());
 
@@ -497,7 +387,9 @@ mod tests {
 
         let manifest = Manifest::new(entries.clone()).unwrap();
         let snap_hash = manifest.hash;
-        store.publish_snapshot(entries, false).unwrap();
+        store
+            .publish_snapshot(entries, PublishOptions::default())
+            .unwrap();
         let snap_dir = store.root().join("snapshots").join(snap_hash.to_string());
         assert!(snap_dir.is_dir());
 

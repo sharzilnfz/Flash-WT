@@ -23,6 +23,7 @@ pub mod hydrate;
 pub mod lockfile;
 pub mod mirror;
 pub use disk::{DiskStore, FsCapabilities, probe_fs};
+pub use fsutil::FlockGuard;
 pub use gc::{
     GcMode, MarkReport, MarkSwept, NoopWorkspaceCleaner, RetirementReceipt, StoreReclaimer,
     SweepPolicy, SweepSummary, WorkspaceCleaner,
@@ -47,10 +48,10 @@ pub use snapindex::{
     record_publish as record_snapshot_publish, record_snapshot_lru_touch, select_old_snapshot,
 };
 pub use snapshot::{
-    BuildError, EntryKind, Manifest, PublishOutcome, PublishReceipt, SnapshotBuildTiming,
-    SnapshotEntry, SnapshotHydration, SnapshotOutcome, SnapshotProjectionEngine,
-    SnapshotProjectionRequest, read_published as read_published_snapshot, snapshot_path,
-    snapshot_tree_path,
+    BuildError, EntryKind, Manifest, PublishOptions, PublishOutcome, PublishReceipt,
+    SnapshotBuildTiming, SnapshotEntry, SnapshotHydration, SnapshotOutcome,
+    SnapshotProjectionEngine, SnapshotProjectionRequest, read_published as read_published_snapshot,
+    snapshot_path, snapshot_tree_path,
 };
 pub use validation::{Entry, ValidationCache};
 pub use verified::{Fingerprint, VerifiedLedger};
@@ -74,6 +75,13 @@ impl fmt::Display for ContentId {
 }
 
 impl ContentId {
+    /// Compute the content id for raw byte content.
+    #[must_use]
+    pub fn for_bytes(content: &[u8]) -> ContentId {
+        use sha2::{Digest, Sha256};
+        ContentId(Sha256::digest(content).into())
+    }
+
     /// Parse the lowercase hex form produced by [`Display`]. Returns
     /// `None` for anything that is not exactly 64 hex digits.
     #[must_use]
@@ -136,45 +144,3 @@ impl std::error::Error for Error {}
 
 /// Store result: [`Error`] on failure.
 pub type Result<T> = std::result::Result<T, Error>;
-
-/// Hash-addressed content store with reference counting.
-///
-/// Contract for implementors (ticket 04):
-///
-/// - **Deduplication**: `put` with identical bytes always returns the
-///   same [`ContentId`] and stores the data once on disk. Two puts of
-///   the same content occupy disk space for exactly one copy.
-/// - **References are explicit**: `put` does NOT take a reference. A
-///   caller that wants to keep content alive across GC calls
-///   [`Store::add_ref`]; it must pair every `add_ref` with exactly one
-///   [`Store::release_ref`]. Releasing below zero is
-///   [`Error::RefCountUnderflow`].
-/// - **Integrity on read**: `get` recomputes the hash and returns
-///   [`Error::Corrupted`] instead of returning mismatched bytes.
-/// - **Durability**: implementations persist to a root directory they
-///   own (constructor argument). Nothing outside that directory may be
-///   written. Multiple `Store` handles on the same root within one
-///   process must see each other's writes; cross-process locking can
-///   wait for ticket 06.
-pub trait Store {
-    /// Store bytes, deduplicated by content. Returns the content's
-    /// [`ContentId`]. Does not change any reference count.
-    fn put(&mut self, content: &[u8]) -> Result<ContentId>;
-
-    /// Fetch bytes by id, verifying the hash before returning.
-    fn get(&self, id: &ContentId) -> Result<Vec<u8>>;
-
-    /// True if the store holds this content. Does not verify the hash.
-    fn contains(&self, id: &ContentId) -> bool;
-
-    /// Increment the reference count. Errors with
-    /// [`Error::UnknownContent`] if the id was never put.
-    fn add_ref(&mut self, id: &ContentId) -> Result<()>;
-
-    /// Decrement the reference count. Errors with
-    /// [`Error::RefCountUnderflow`] if already at zero or absent.
-    fn release_ref(&mut self, id: &ContentId) -> Result<()>;
-
-    /// Current reference count (0 if stored but never referenced).
-    fn ref_count(&self, id: &ContentId) -> Result<u64>;
-}

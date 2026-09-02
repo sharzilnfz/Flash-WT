@@ -15,22 +15,25 @@ use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, ScratchData};
 use crate::error::{Error, Result};
 use crate::hydrate::open_store;
+use crate::signal;
 use crate::workspace;
 
 /// Generate a unique 8-character hex id for scratch worktrees.
 fn generate_scratch_id() -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
-    hasher.update(now.as_nanos().to_le_bytes());
-    hasher.update(std::process::id().to_le_bytes());
+    now.as_nanos().hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    hasher.update(count.to_le_bytes());
-    let res = hasher.finalize();
-    format!("{:02x}{:02x}{:02x}{:02x}", res[0], res[1], res[2], res[3])
+    count.hash(&mut hasher);
+    let hash = hasher.finish();
+    format!("{:08x}", hash as u32)
 }
 
 /// RAII cleanup guard for ephemeral worktrees.
@@ -49,6 +52,7 @@ impl ScratchGuard {
             return Ok(());
         }
         self.active = false;
+        signal::clear_scratch();
 
         // 1. Remove the lease file
         let _ = remove_lease(&self.store_root, &self.lease_id);
@@ -69,6 +73,7 @@ impl ScratchGuard {
 
     pub fn disarm(&mut self) {
         self.active = false;
+        signal::clear_scratch();
     }
 }
 
@@ -168,10 +173,23 @@ pub fn run(
         name: branch_name.clone(),
         worktree_path: dest.clone(),
         lease_id: lease_id.clone(),
-        store_root,
-        repo_root: root,
+        store_root: store_root.clone(),
+        repo_root: root.clone(),
         active: run_cmd.is_some(),
     };
+
+    // Register active scratch for SIGINT/SIGTERM cleanup if a command
+    // will run. Bare scratch is disarmed immediately and persists, so
+    // no signal registration is needed.
+    if guard.active {
+        signal::register_scratch(signal::ActiveScratch {
+            name: branch_name.clone(),
+            worktree_path: dest.clone(),
+            lease_id: lease_id.clone(),
+            store_root: store_root.clone(),
+            repo_root: root.clone(),
+        });
+    }
 
     match run_cmd {
         None => {
@@ -196,9 +214,8 @@ pub fn run(
                 bytes_shared_cow: create_data.bytes_shared_cow,
                 bytes_copied: create_data.bytes_copied,
                 duration_ms: started.elapsed().as_millis() as u64,
-                command: None,
-                exit_code: None,
                 cleaned_up: Some(false),
+                ..ScratchData::default()
             };
             Ok((data, diags, None))
         }

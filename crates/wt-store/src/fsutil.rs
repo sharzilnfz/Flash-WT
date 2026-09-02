@@ -55,3 +55,50 @@ pub(crate) fn sync_parent_dir(path: &Path) -> io::Result<()> {
     let dir = fs::File::open(path.parent().unwrap_or_else(|| Path::new(".")))?;
     dir.sync_all()
 }
+
+use std::fs::File;
+use std::os::unix::io::AsRawFd;
+
+/// RAII wrapper for an advisory `flock(2)` held on an open file descriptor.
+#[derive(Debug)]
+pub struct FlockGuard {
+    file: File,
+}
+
+impl FlockGuard {
+    /// Acquire an exclusive advisory `flock(2)` on an open file or directory.
+    pub fn lock_exclusive(file: File) -> io::Result<Self> {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { file })
+    }
+
+    /// Acquire a shared advisory `flock(2)` on an open file or directory.
+    pub fn lock_shared(file: File) -> io::Result<Self> {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { file })
+    }
+
+    /// Open or create `path` and acquire an exclusive advisory lock.
+    pub fn lock_file_exclusive(path: &Path) -> io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        Self::lock_exclusive(file)
+    }
+}
+
+impl Drop for FlockGuard {
+    fn drop(&mut self) {
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}

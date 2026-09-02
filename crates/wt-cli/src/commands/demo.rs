@@ -4,8 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
-use sha2::{Digest, Sha256};
-use wt_store::{ContentId, DiskStore, Store};
+use wt_store::{ContentId, DiskStore};
 
 use crate::config::RunConfig;
 use crate::envelope::{DemoData, Diagnostic};
@@ -290,9 +289,7 @@ fn verify_mutation_isolation(
     }
 
     // Verify store blob integrity (content-addressed store contains the original blob unharmed)
-    let mut hasher = Sha256::new();
-    hasher.update(&original_donor_bytes);
-    let original_hash = ContentId(hasher.finalize().into());
+    let original_hash = ContentId::for_bytes(&original_donor_bytes);
 
     if store.contains(&original_hash) {
         let store_blob = store

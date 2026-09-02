@@ -89,21 +89,12 @@ pub fn buffered_copy_file(from: &Path, to: &Path) -> io::Result<u64> {
         );
     }
 
-    let mut buf = vec![0u8; 128 * 1024];
-    let mut copied = 0u64;
-    loop {
-        let n = io::Read::read(&mut src, &mut buf)?;
-        if n == 0 {
-            break;
-        }
-        io::Write::write_all(&mut dest, &buf[..n])?;
-        copied += n as u64;
-    }
+    let copied = io::copy(&mut src, &mut dest)?;
     fs::set_permissions(to, fs::Permissions::from_mode(mode))?;
     Ok(copied)
 }
 
-fn c_path(path: &Path) -> io::Result<CString> {
+pub(crate) fn c_path(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL byte"))
 }
@@ -146,8 +137,26 @@ pub(crate) fn probe_device_id(path: &Path) -> io::Result<u64> {
 /// True if `src` and `dest` reside on different filesystem devices.
 pub(crate) fn is_cross_device(src: &Path, dest: &Path) -> bool {
     match (probe_device_id(src), probe_device_id(dest)) {
-        (Ok(src_dev), Ok(dest_dev)) => src_dev != dest_dev,
+        (Ok(src_dev), Ok(dest_dev)) if src_dev != dest_dev => {
+            #[cfg(target_os = "linux")]
+            {
+                if is_btrfs_filesystem(src) && is_btrfs_filesystem(dest) {
+                    return false;
+                }
+            }
+            true
+        }
+        (Ok(_src_dev), Ok(_dest_dev)) => false,
         _ => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_btrfs_filesystem(path: &Path) -> bool {
+    let existing = find_existing_ancestor(path);
+    match statfs_of(existing) {
+        Ok(st) => (st.f_type as libc::c_long) == (libc::BTRFS_SUPER_MAGIC as libc::c_long),
+        Err(_) => false,
     }
 }
 

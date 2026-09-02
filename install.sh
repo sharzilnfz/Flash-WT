@@ -54,18 +54,27 @@ if [ -z "${WT_VERSION:-}" ] && [ -z "${WT_DIST_DIR:-}" ]; then
 fi
 VERSION_NO_V=${WT_VERSION#v}
 [ -n "$VERSION_NO_V" ] || VERSION_NO_V=unknown
+# Normalize bare versions (0.1.0 -> v0.1.0) so both forms resolve to the
+# same GitHub release asset; VERSION_NO_V stays bare for archive names.
+if [ -n "${WT_VERSION:-}" ]; then
+  WT_VERSION="v${VERSION_NO_V}"
+fi
 
 ARCHIVE="wt-v${VERSION_NO_V}-${TARGET}.tar.gz"
 fetch "$ARCHIVE" >/dev/null
 fetch "$ARCHIVE.sha256" >/dev/null
 
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
 # Verify the checksum before extracting anything.
 EXPECTED=$(cut -d' ' -f1 <"$TMP/$ARCHIVE.sha256" | tr -d ' \n')
-if command -v sha256sum >/dev/null; then
-  ACTUAL=$(sha256sum "$TMP/$ARCHIVE" | cut -d' ' -f1)
-else
-  ACTUAL=$(shasum -a 256 "$TMP/$ARCHIVE" | cut -d' ' -f1)
-fi
+ACTUAL=$(sha256_file "$TMP/$ARCHIVE")
 [ "$ACTUAL" = "$EXPECTED" ] || {
   echo "wt: checksum mismatch for $ARCHIVE (expected $EXPECTED, got $ACTUAL)" >&2
   exit 1
@@ -80,7 +89,7 @@ chmod +x "$BIN_DIR/wt"
 INSTALLED=$("$BIN_DIR/wt" --version)
 echo "$INSTALLED"
 case "$INSTALLED" in
-  wt\ *) ;;
+  wt\ * | wt-hydrate\ *) ;;
   *)
     echo "wt: $BIN_DIR/wt did not run correctly" >&2
     exit 1
@@ -124,12 +133,13 @@ try_completion() {
 
 install_completions() {
   shell=$1
-  user_dir=$2
-  shift 2
-  if [ "$(basename "${SHELL:-}")" = "$shell" ]; then
-    try_completion "$shell" "$user_dir" && return 0
-  fi
+  shift
   for dir in "$@"; do
+    case "$dir" in
+      "$HOME"/*)
+        [ "$(basename "${SHELL:-}")" = "$shell" ] || continue
+        ;;
+    esac
     try_completion "$shell" "$dir" && return 0
   done
   return 0

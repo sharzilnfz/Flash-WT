@@ -23,7 +23,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use crate::copy_tree::copy_tree;
-use crate::{BackendKind, CopyBackend, Error, Result, Safety};
+use crate::{BackendKind, CopyBackend, Error, Result};
 
 /// Plain hardlink backend: shared inodes are made read-only.
 #[derive(Debug, Default)]
@@ -32,12 +32,6 @@ pub struct HardlinkBackend;
 impl CopyBackend for HardlinkBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::Hardlink
-    }
-
-    /// Safe as of ticket 07: shared inodes are made read-only, so an
-    /// in-place rewrite cannot reach sibling trees or the source.
-    fn safety(&self) -> Safety {
-        Safety::Safe
     }
 
     /// Hardlinks work on almost every POSIX filesystem, within one
@@ -49,7 +43,7 @@ impl CopyBackend for HardlinkBackend {
     }
 
     fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()> {
-        crate::copy_tree::staged_copy(dest, self.safety(), &mut |staging| {
+        crate::copy_tree::staged_copy(dest, &mut |staging| {
             let mut link_file = |from: &Path, to: &Path| {
                 fs::hard_link(from, to)?;
                 // Strip write bits from the shared inode; keep exec so

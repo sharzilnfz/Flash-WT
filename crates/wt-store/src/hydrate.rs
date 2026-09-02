@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::snapshot::{SnapshotOutcome, SnapshotProjectionEngine, SnapshotProjectionRequest};
-use crate::{ContentId, DiskStore, GcMode, Result, Store};
+use crate::{ContentId, DiskStore, GcMode, Result};
 
 /// Request parameters for whole-worktree and heavy-directory hydration.
 #[derive(Debug, Clone)]

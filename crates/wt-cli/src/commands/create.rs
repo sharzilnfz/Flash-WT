@@ -2,29 +2,45 @@
 //! (tickets 02 + 05), decomposed from main.rs by arch-hardening
 //! ticket 03.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::config::RunConfig;
 use crate::envelope::{CreateData, Diagnostic};
 use crate::error::{Error, Result};
 use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
-use crate::manifest::{self, LoadedPatterns, load_patterns};
+use crate::hydration_filter::{self, LoadedPatterns, load_patterns};
 use crate::output::{HumanBytes, HumanCount};
+use crate::signal;
 use crate::timing::StageTimings;
 use crate::workspace::WorkspaceEngine;
 
-pub fn run(
-    name: &str,
-    base: Option<&str>,
-    manifest: Option<&Path>,
-    dir: Option<&Path>,
-    cfg: &RunConfig,
-) -> Result<(CreateData, Vec<Diagnostic>)> {
-    create(name, base, manifest, dir, cfg)
+/// RAII guard that rolls back a newly created worktree+branch if
+/// hydration fails. Defuse on success.
+struct CreateGuard {
+    name: String,
+    dest: PathBuf,
+    repo_root: PathBuf,
+    defused: bool,
 }
 
-fn create(
+impl CreateGuard {
+    fn defuse(&mut self) {
+        self.defused = true;
+        signal::clear_create();
+    }
+}
+
+impl Drop for CreateGuard {
+    fn drop(&mut self) {
+        if !self.defused {
+            signal::rollback_create(&self.name, &self.dest, &self.repo_root);
+            signal::clear_create();
+        }
+    }
+}
+
+pub fn run(
     name: &str,
     base: Option<&str>,
     manifest: Option<&Path>,
@@ -54,6 +70,20 @@ fn create(
     engine.create_worktree(name, &dest, start_point)?;
     timings.git_worktree_ms = started.elapsed().as_millis();
 
+    // Register for signal-driven cleanup and arm RAII guard for
+    // transactional rollback on any subsequent failure.
+    signal::register_create(signal::ActiveCreate {
+        name: name.to_string(),
+        dest: dest.clone(),
+        repo_root: root.clone(),
+    });
+    let mut guard = CreateGuard {
+        name: name.to_string(),
+        dest: dest.clone(),
+        repo_root: root.clone(),
+        defused: false,
+    };
+
     if !cfg.json {
         println!(
             "created worktree {} from {}",
@@ -62,23 +92,23 @@ fn create(
         );
     }
 
-    let patterns = match load_patterns(&root, manifest)? {
-        LoadedPatterns::CreatedStarter { path, patterns } => {
+    let lp = load_patterns(&root, manifest)?;
+    let patterns = match lp {
+        LoadedPatterns::Defaults { patterns } => {
             if !cfg.json {
                 println!(
                     "no .wtinclude in {}; using defaults ({})",
                     root.display(),
-                    manifest::DEFAULT_PATTERNS.join(" ")
+                    hydration_filter::DEFAULT_PATTERNS.join(" ")
                 );
-                println!("wrote starter manifest {}", path.display());
             }
             patterns
         }
-        LoadedPatterns::Loaded { patterns } => patterns,
+        LoadedPatterns::Loaded { patterns, .. } => patterns,
     };
 
     let mut store = open_store()?;
-    let mut engine = HydrationEngine::new(&mut store);
+    let mut h_engine = HydrationEngine::new(&mut store);
     let req = HydrationRequest {
         root: &root,
         dest: &dest,
@@ -88,8 +118,11 @@ fn create(
         cfg,
     };
 
-    let mut report = engine.hydrate(req)?;
+    let mut report = h_engine.hydrate(req)?;
     report.timings.git_worktree_ms = timings.git_worktree_ms;
+
+    // Success: defuse guard so Drop does not delete the worktree.
+    guard.defuse();
 
     if !cfg.json {
         report.timings.emit(started, timing_enabled);

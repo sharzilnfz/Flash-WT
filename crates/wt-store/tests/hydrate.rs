@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use tempfile::TempDir;
-use wt_store::{DiskStore, HydrationRequest, Store};
+use wt_store::{DiskStore, HydrationRequest};
 
 #[test]
 fn fallback_materialization_creates_files_dirs_and_metadata() {
