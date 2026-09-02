@@ -21,21 +21,32 @@ pub enum StrategyPolicy {
     ForceByteCopy,
 }
 
+fn parse_bool_env(value: &std::ffi::OsStr) -> Option<bool> {
+    let s = value.to_string_lossy();
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "0" | "false" | "no" | "off" => Some(false),
+        "1" | "true" | "yes" | "on" => Some(true),
+        _ => Some(true),
+    }
+}
+
 /// Uniform tri-state flag semantics for boolean `wt_*` env vars with default value:
-/// if unset, returns `default`; `"0"` means off (false); ANY other value
-/// (including `"1"` and empty) means on (true).
+/// if unset or empty, returns `default`; `"0"`, `"false"`, `"no"`, `"off"`
+/// (case-insensitive) mean off (false); any other non-empty value means on (true).
 fn flag_with_default(name: &str, default: bool) -> bool {
     match env::var_os(name) {
         None => default,
-        Some(value) => value != "0",
+        Some(value) => parse_bool_env(&value).unwrap_or(default),
     }
 }
 
 /// Uniform tri-state flag semantics for every boolean `wt_*` env var:
-/// unset means off, `"0"` means off, and ANY other value — including
-/// `"1"` and empty — means on. This replaces three different activation
-/// semantics under which, notably, `WT_HARDLINK=0` turned hardlink
-/// mode ON.
+/// unset or empty means off, `"0"`, `"false"`, `"no"`, `"off"` (case-insensitive)
+/// mean off, and any other non-empty value means on.
 fn flag(name: &str) -> bool {
     flag_with_default(name, false)
 }
@@ -109,5 +120,81 @@ impl RunConfig {
             timing: flag("WT_TIMING"),
             json: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    fn set(name: &str, val: Option<&str>) {
+        match val {
+            Some(v) => unsafe { env::set_var(name, v) },
+            None => unsafe { env::remove_var(name) },
+        }
+    }
+
+    #[test]
+    fn flag_parsing_recognizes_false_variants_and_empty() {
+        // false variants
+        for v in ["0", "false", "FALSE", "False", "no", "NO", "off", "OFF", "Off"] {
+            set("WT_SNAPSHOTS", Some(v));
+            assert!(
+                !flag_with_default("WT_SNAPSHOTS", true),
+                "value {v:?} should be false"
+            );
+            assert!(
+                !flag("WT_SNAPSHOTS"),
+                "flag {v:?} should be false"
+            );
+        }
+        // true variants
+        for v in ["1", "true", "TRUE", "yes", "YES", "on", "ON", "anything", "2"] {
+            set("WT_SNAPSHOTS", Some(v));
+            assert!(
+                flag_with_default("WT_SNAPSHOTS", false),
+                "value {v:?} should be true"
+            );
+            assert!(flag("WT_SNAPSHOTS"), "flag {v:?} should be true");
+        }
+        // empty treated as omitted/default
+        set("WT_SNAPSHOTS", Some(""));
+        assert!(flag_with_default("WT_SNAPSHOTS", true));
+        assert!(!flag_with_default("WT_SNAPSHOTS", false));
+        assert!(!flag("WT_SNAPSHOTS"), "empty should be false for flag (default false)");
+        set("WT_SNAPSHOTS", Some("   "));
+        assert!(flag_with_default("WT_SNAPSHOTS", true));
+        // unset
+        set("WT_SNAPSHOTS", None);
+        assert!(flag_with_default("WT_SNAPSHOTS", true));
+        assert!(!flag_with_default("WT_SNAPSHOTS", false));
+        assert!(!flag("WT_SNAPSHOTS"));
+    }
+
+    #[test]
+    fn snapshots_false_disables() {
+        set("WT_SNAPSHOTS", Some("false"));
+        set("WT_SNAPSHOTS_V2", None);
+        let cfg = RunConfig::from_env();
+        assert!(!cfg.snapshots, "WT_SNAPSHOTS=false should disable");
+        set("WT_SNAPSHOTS", Some("no"));
+        let cfg = RunConfig::from_env();
+        assert!(!cfg.snapshots);
+        set("WT_SNAPSHOTS", Some("off"));
+        let cfg = RunConfig::from_env();
+        assert!(!cfg.snapshots);
+        set("WT_SNAPSHOTS", Some("0"));
+        let cfg = RunConfig::from_env();
+        assert!(!cfg.snapshots);
+        set("WT_SNAPSHOTS", Some(""));
+        let cfg = RunConfig::from_env();
+        // empty => default (which on linux is false)
+        assert!(!cfg.snapshots);
+        set("WT_SNAPSHOTS", None);
+        let cfg = RunConfig::from_env();
+        assert!(!cfg.snapshots);
+        // cleanup
+        set("WT_SNAPSHOTS", None);
     }
 }
