@@ -12,8 +12,8 @@ env:
 
 jobs:
   setup-version:
-    # Tag v0.1.0 -> version 0.1.0; every artifact name below uses the
-    # bare version number.
+    # Tag v0.1.0 -> version 0.1.0; artifacts use the canonical
+    # wt-v<version>-<target>.tar.gz naming (v-prefixed).
     runs-on: ubuntu-latest
     outputs:
       VERSION: ${{ steps.strip.outputs.VERSION }}
@@ -69,7 +69,7 @@ jobs:
           fi
       - name: Package
         run: |
-          DIR="wt-${VERSION}-${{ matrix.target }}"
+          DIR="wt-v${VERSION}-${{ matrix.target }}"
           mkdir "$DIR"
           cp "target/${{ matrix.target }}/release/wt" "$DIR/"
           cp README.md "$DIR/"
@@ -82,8 +82,8 @@ jobs:
         with:
           name: dist-${{ matrix.target }}
           path: |
-            wt-${{ env.VERSION }}-*.tar.gz
-            wt-${{ env.VERSION }}-*.tar.gz.sha256
+            wt-v${{ env.VERSION }}-*.tar.gz
+            wt-v${{ env.VERSION }}-*.tar.gz.sha256
 
   release:
     needs: [setup-version, build]
