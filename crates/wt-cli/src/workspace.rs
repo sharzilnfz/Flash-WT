@@ -311,6 +311,18 @@ impl WorkspaceEngine {
                 .is_ok()
     }
 
+    /// Whether `worktree` has uncommitted changes, including untracked files.
+    /// Uses `git status --porcelain` inside the worktree; empty output means clean.
+    pub fn is_worktree_dirty(&self, worktree: &Path) -> bool {
+        if !worktree.exists() {
+            return false;
+        }
+        match run(worktree, &["status", "--porcelain"]) {
+            Ok(out) => !out.trim().is_empty(),
+            Err(_) => false,
+        }
+    }
+
     /// Whether the current working directory sits inside `worktree`.
     pub fn is_active(&self, worktree: &Path) -> bool {
         let Some(cwd) = std::env::current_dir()
@@ -365,6 +377,7 @@ impl WorkspaceEngine {
     /// Remove a worktree, with a forced retry when the plain removal
     /// refuses. Best-effort: errors are swallowed so cleanup flows can
     /// continue past half-removed directories.
+    #[allow(dead_code)]
     pub fn remove_worktree_lenient(&self, dest: &Path) {
         let dest_text = dest.to_string_lossy().into_owned();
         let _ = self
@@ -373,8 +386,15 @@ impl WorkspaceEngine {
     }
 
     /// Remove a worktree, surfacing git's refusal as an error.
+    #[allow(dead_code)]
     pub fn remove_worktree(&self, dest: &Path) -> Result<()> {
         self.git(&["worktree", "remove", &dest.to_string_lossy()])
+            .map(|_| ())
+    }
+
+    /// Remove a worktree with `--force`, surfacing errors.
+    pub fn remove_worktree_force(&self, dest: &Path) -> Result<()> {
+        self.git(&["worktree", "remove", "--force", &dest.to_string_lossy()])
             .map(|_| ())
     }
 

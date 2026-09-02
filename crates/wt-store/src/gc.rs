@@ -952,6 +952,22 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
             );
         }
 
+        let canon_worktree = fs::canonicalize(worktree_path).ok();
+        let canon_gitdir = fs::canonicalize(gitdir).ok();
+
+        if worktree_path.exists() {
+            let _ = self.cleaner.remove_worktree(worktree_path);
+            if worktree_path.exists() {
+                fs::remove_dir_all(worktree_path).map_err(Error::Io)?;
+            }
+            if worktree_path.exists() {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("worktree {} still exists after removal", worktree_path.display()),
+                )));
+            }
+        }
+
         let mut references_released = 0;
         if !blob_ids.is_empty() && self.store.gc_mode() != GcMode::MarkSweepNoRefs {
             for cid in &blob_ids {
@@ -969,15 +985,14 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
             let _ = fs::remove_file(&ledger_path);
         }
 
-        let mirror_removed = self
-            .store
-            .unlink_worktree_mirror(worktree_path, gitdir)
-            .unwrap_or(false)
-            || had_ledger;
-
-        if worktree_path.exists() {
-            let _ = self.cleaner.remove_worktree(worktree_path);
-        }
+        let mirror_removed = if let (Some(cw), Some(cg)) = (canon_worktree, canon_gitdir) {
+            crate::mirror::remove(self.store.root(), &cw, &cg).unwrap_or(false) || had_ledger
+        } else {
+            self.store
+                .unlink_worktree_mirror(worktree_path, gitdir)
+                .unwrap_or(false)
+                || had_ledger
+        };
 
         Ok(RetirementReceipt {
             references_released,
