@@ -1,89 +1,122 @@
-# Spec: Market Launch Readiness, Presentation Consolidation, and Deep Architecture
+# Spec: Market Launch Readiness, Deep Architecture & Ponytail Consolidation
 
 Status: ready-for-agent
 
 ## Problem Statement
 
-As `wt` prepares for public product launch, several friction points in user experience, presentation consistency, and module depth prevent it from delivering a flawless day-one developer experience:
+As `wt` approaches its v0.1.0 public release, several friction points in distribution packaging, developer experience, architecture depth, accumulated migration baggage, and test performance must be addressed before launch:
 
-- **Missing Shell Autocompletions**: Developers using modern shells (Bash, Zsh, Fish) expect tab-completions for subcommands, flags, and branch names out of the box. Currently, typing `wt <TAB>` offers no completion candidates, increasing command-line friction.
-- **Fragmented Presentation and Formatting Logic**: Terminal output, byte scaling, duration formatting, number grouping, and aligned receipt tables are independently re-implemented across four distinct command handlers with subtle mathematical differences and duplicated formatting code.
-- **Shallow Worktree Discovery and Git Lifecycle Seams**: Worktree enumeration, gitdir resolution, porcelain parsing, and merge-base ancestor checks are scattered across command handlers rather than encapsulated behind a cohesive workspace module.
-- **Leaked Ingestion Invariants**: Ingesting directory trees, executing bulk walker syscalls, and maintaining validation cache metadata reside in the CLI crate rather than within the content-addressed storage engine where storage invariants belong.
-- **Outdated Launch Documentation**: The primary README documents legacy manual snapshot flags (`WT_SNAPSHOTS=1`) as prerequisites rather than highlighting automated macOS APFS defaults and the modern 3-verb workflow (`wt new`, `wt clean`, `wt list`, `wt demo`).
+1. **Release Packaging Blockers and Platform Support**: Release archive naming in CI workflows (`wt-0.1.0-` vs `wt-v0.1.0-`), absence of native Linux ARM64 (`aarch64-unknown-linux-gnu`) release binaries, and strict version tag handling in `install.sh` will cause automated release pipelines and Homebrew installation to fail upon tagging.
+2. **Missing Shell Autocompletions**: Developers using modern shells (Bash, Zsh, Fish, Elvish, PowerShell) expect tab-completions for subcommands, flags, and branch names out of the box. Currently, typing `wt <TAB>` offers no completion candidates.
+3. **Fragmented Presentation and Formatting Logic**: Terminal output, byte scaling, duration formatting, number grouping, and aligned receipt tables are independently re-implemented across four distinct command handlers (`create.rs`, `clean.rs`, `list.rs`, `demo.rs`) with subtle mathematical discrepancies.
+4. **Shallow Worktree Discovery and Git Lifecycle Seams**: Worktree enumeration, gitdir resolution, porcelain parsing, and merge-base ancestor checks are scattered across command handlers rather than encapsulated behind a cohesive workspace module.
+5. **Leaked Ingestion Invariants**: Ingesting directory trees, executing bulk walker syscalls, and maintaining validation cache metadata reside in the CLI crate (`crates/wt-cli/src/hydrate.rs`) rather than within the content-addressed storage engine (`wt-store`) where storage invariants belong.
+6. **Accumulated Migration Baggage and Over-Engineering**: The codebase retains over 2,000 lines of obsolete migration scaffolding, including dual-write per-blob refcounting machinery, multi-file WAL journal index compaction, single-implementation traits, dead forwarder shims, speculative backend safety contracts, and hand-rolled byte codecs.
+7. **CLI Boilerplate and Unnecessary Dependencies**: Duplicate subcommand enum variants (`New`, `Isolate`, `TestDrive`) duplicate handler code, repetitive JSON serialization blocks clutter command dispatch, and `wt-cli` pulls in direct cryptographic hashing dependencies when the storage engine already encapsulates hashing.
+8. **Outdated Launch Documentation**: The primary README documents legacy manual snapshot flags (`WT_SNAPSHOTS=1`) as prerequisites rather than highlighting automated macOS APFS defaults and the modern 3-verb workflow (`wt new`, `wt clean`, `wt list`, `wt demo`).
+9. **Integration Test Suite Link Overhead and Execution Drag**: Twenty-six separate integration test binaries in the CLI crate cause excessive Cargo link times, and unoptimized debug-mode benchmark tests synthesize tens of thousands of real files on disk, causing local and CI test runs to drag on for minutes.
 
 ## Solution
 
-Deliver the final launch polish and architectural deepening across four unified pillars:
+A targeted, zero-breaking-change consolidation program delivering complete launch readiness across six architectural pillars:
 
-1. **Shell Autocompletion Engine (`wt completions <shell>`)**: Integrate shell completion generation via command-line argument parsing definitions, enabling instant tab-completion for subcommands and flags across Bash, Zsh, and Fish, with auto-installation support in the install script.
-2. **Deep Presentation and Formatting Module**: Consolidate human-friendly unit conversion (bytes, durations, numbers), terminal receipt banners, and aligned tables behind a single presentation module, guaranteeing uniform visual typography across all commands.
-3. **Deep Workspace Module**: Consolidate worktree lifecycle management, porcelain metadata parsing, active checkout detection, gitdir resolution, and ancestor merge verification behind a single workspace interface.
-4. **Deep Store Ingestion Module**: Relocate directory walking, macOS bulk walker dispatch, and validation cache synchronization into the store package behind an ingest tree interface.
-5. **Documentation and Release Realignment**: Update the primary documentation, quickstart guides, Homebrew formulas, and install scripts to reflect automated platform defaults and modern workflow verbs.
+1. **Release Packaging, Multi-Platform Distribution & Documentation**: Standardize release archive naming in CI workflows, add native Linux ARM64 support, normalize version tags in installer scripts, bundle shell completions in Homebrew formulas, and realign the README to the modern 3-verb workflow and automated APFS defaults.
+2. **Storage Engine Simplification & Tree Ingestion Deepening**: Purge legacy per-blob refcounting and `GcMode` transitions from `wt-store`, simplify snapshot metadata persistence to atomic TSV manifests via tempfile-rename, replace hand-rolled codecs with standard library equivalents, and relocate directory tree ingestion and bulk walking from `wt-cli` into `wt-store::ingest`.
+3. **Copy Engine & Backend Simplification**: Delete speculative backend safety states (`Safety::UnsafePending`), eliminate redundant file materialization delegators and dead methods, replace manual copy loops with `std::io::copy`, and adopt `Path::ancestors()`.
+4. **Deep CLI Architecture & Presentation Module**: Establish a dedicated presentation module (`crates/wt-cli/src/output.rs`) for uniform byte, duration, count, and table formatting. Deepen `gitops` into a cohesive `workspace` module encapsulating repository detection, gitdir resolution, porcelain parsing, and merge-ancestor validation.
+5. **Shell Autocompletions & Developer Experience**: Add `clap_complete` to `wt-cli` to provide `wt completions <shell>` for Bash, Elvish, Fish, PowerShell, and Zsh. Update `install.sh` to auto-detect active shells and install completion scripts automatically. Convert duplicate subcommand variants to native Clap aliases on `Create`, `Scratch`, and `Demo`. Drop direct `sha2` crate dependency from `wt-cli`.
+6. **Test Suite Consolidation & Benchmark Hardening**: Group the 26 fragmented CLI integration test executables into ~5 logical test suites to slash Cargo link times. Centralize fixture creation into `tests/common/mod.rs`. Scale debug-mode test fixtures for sub-30-second test runs. Unify benchmark parsing and verification under `benchmarks/eval.sh`, and add process liveness checks to chaos fault injection tests.
 
 ## User Stories
 
-1. As a developer installing `wt` on launch day, I want `wt completions zsh` to generate shell completion scripts, so that I can tab-complete commands and flags in my terminal.
-2. As a developer running the install script (`install.sh`), I want my shell completions to be detected and installed automatically, so that autocompletion works without manual configuration.
-3. As a developer creating a worktree with `wt new`, I want byte counts and duration numbers formatted with clean, standard unit scaling, so that receipts are immediately readable.
-4. As a developer inspecting active worktrees with `wt list`, I want the output table to use the same unit conversion precision and alignment rules as other commands, so that disk savings and hydration metrics are consistent.
-5. As a maintainer, I want all byte and duration formatting logic to reside in one presentation module, so that unit conversion bugs and rounding discrepancies are eliminated.
-6. As a maintainer, I want git worktree porcelain parsing and path resolution encapsulated in a deep workspace module, so that command handlers do not duplicate raw git command invocations.
-7. As a maintainer, I want worktree merge-base status checks centralized in the workspace module, so that cleanup commands can reliably detect merged branches across repositories.
-8. As a non-CLI consumer or background worker, I want to ingest directory trees directly through the store interface, so that content ingestion does not depend on CLI modules.
-9. As a developer evaluating `wt` from the README, I want the quickstart to feature modern verbs (`wt new`, `wt clean`, `wt list`, `wt demo`), so that I learn the recommended workflow first.
-10. As a macOS developer reading the README, I want the documentation to state that directory snapshots and diff rebuilds are active by default on APFS, so that I do not needlessly configure redundant environment variables.
-11. As an automated test harness, I want to verify shell completion generation across all supported shells, so that syntax errors in completion scripts are caught before release.
-12. As a package maintainer, I want the release workflow to package shell completions alongside binaries, so that Homebrew and archive distributions include completions automatically.
+1. As a macOS developer installing `wt` via Homebrew, I want `brew install wt` to download valid binary tarballs from GitHub Releases, so that installation succeeds seamlessly without checksum mismatch errors.
+2. As a Linux developer on an ARM64 cloud instance (e.g. AWS Graviton), I want `install.sh` to download a native `aarch64-unknown-linux-gnu` binary, so that I can run `wt` without cross-architecture emulation.
+3. As a developer running the standalone installer with `WT_VERSION=0.1.0` (with or without the leading `v`), I want the installer to normalize the tag, so that I never encounter a 404 download error.
+4. As a developer evaluating `wt` from the README, I want the quickstart to feature modern verbs (`wt new`, `wt clean`, `wt list`, `wt demo`), so that I learn the recommended workflow first.
+5. As a macOS developer reading the README, I want the documentation to state that directory snapshots and diff rebuilds are active by default on APFS, so that I do not needlessly configure redundant environment variables.
+6. As a developer installing `wt` on launch day, I want `wt completions zsh` to generate shell completion scripts, so that I can tab-complete commands, flags, and branches in my terminal.
+7. As a developer running `install.sh`, I want my shell completions to be detected and installed automatically, so that autocompletion works without manual configuration.
+8. As a CLI user running `wt new`, `wt isolate`, or `wt test-drive`, I want subcommand aliases to be handled natively by Clap, so that documentation, shell completions, and help messages are unified without boilerplate code.
+9. As a developer creating a worktree with `wt new`, I want byte counts and duration numbers formatted with clean, standard unit scaling, so that receipts are immediately readable.
+10. As a developer inspecting active worktrees with `wt list`, I want the output table to use the same unit conversion precision and alignment rules as other commands, so that disk savings and hydration metrics are consistent.
+11. As a maintainer, I want git worktree porcelain parsing and path resolution encapsulated in a deep workspace module, so that command handlers do not duplicate raw git command invocations.
+12. As a maintainer, I want worktree merge-base status checks centralized in the workspace module, so that cleanup commands can reliably detect merged branches across repositories.
+13. As an open-source contributor exploring `wt-store`, I want the storage engine to exclusively use the atomic store mirror mark-and-sweep GC model, so that I do not have to navigate obsolete per-blob refcounting code or dual-mode migration states.
+14. As an agent orchestrator launching parallel worktrees, I want the snapshot index to use atomic single-file manifest persistence without complex WAL journal file locking, so that lockfile cache lookups remain fast, simple, and crash-resilient.
+15. As a non-CLI consumer or background worker, I want to ingest directory trees directly through the store interface, so that content ingestion does not depend on CLI modules.
+16. As a developer running `cargo test`, I want integration tests to compile and link in seconds across consolidated test suites, so that my local feedback loop is fast.
 
 ## Implementation Decisions
 
-### Decision 1: Shell Autocompletions Engine
-- Add a `completions` subcommand taking a shell argument (Bash, Elvish, Fish, PowerShell, Zsh).
-- Implement completion generation by passing the CLI parser definition into the completion generation machinery.
-- Update the shell installer script to detect active shell directories and place completion scripts in standard locations (`~/.zsh/completion`, `/usr/local/share/zsh/site-functions`, `~/.bash_completion.d/`, or fish completion directories).
+### Decision 1: Release Packaging & Multi-Platform Distribution
+- Standardize all release archive naming in CI workflows to `wt-v<VERSION>-<TARGET>.tar.gz` to ensure strict alignment with Homebrew formula generation and installer scripts.
+- Add `aarch64-unknown-linux-gnu` target matrices across GitHub Actions release workflows, Homebrew formula templates, and installer scripts.
+- Implement version normalization in installer scripts to strip and restore `v` prefixes cleanly when constructing GitHub release download URLs.
+- Update `Formula/wt.rb` and `scripts/gen-formula.sh` to package and install shell completions.
 
-### Decision 2: Deep Presentation and Terminal Receipt Module
-- Create a dedicated presentation module inside the CLI crate that exports:
-  - Formatted byte representation with unified unit scaling (B, KB, MB, GB).
-  - Formatted duration representation (seconds, minutes, hours, days).
-  - Formatted number grouping with standard digit grouping separators.
-  - Formatted table alignment and scorecard layout helpers.
-- Replace duplicate formatting helpers across creation, cleanup, listing, and test-drive command handlers with calls to the presentation module.
+### Decision 2: Store GC & Index Simplification
+- Purge all legacy per-blob refcount file operations, directory locks, and dual-mode migration markers from `wt-store`, establishing mark-and-sweep via store mirrors as the sole GC implementation.
+- Simplify snapshot metadata persistence (`SelectionIndex`) to write an atomic TSV manifest via temporary file rename, eliminating multi-file WAL journal appending (`journal.tsv`), compaction passes, and compaction locking.
+- Replace hand-rolled byte decoding loops in batch walking with standard library `u32::from_le_bytes` slice conversions.
+- Unify timestamp serialization and parsing (`format_mtime`, `parse_mtime`) between `ValidationCache` and `VerifiedLedger`.
 
-### Decision 3: Deep Workspace Lifecycle Module
-- Deepen the workspace module to encapsulate:
+### Decision 3: Relocate Tree Ingestion into Store Package
+- Move directory tree scanning, bulk walker dispatch, and validation cache synchronization from `crates/wt-cli/src/hydrate.rs` into `crates/wt-store/src/ingest.rs`.
+- Expose a clean `DiskStore::ingest_tree` method accepting an ingestion path, exclusion patterns, and configuration options, returning an `IngestedTree` summary.
+- Update `HydrationEngine` in `wt-cli` to call `DiskStore::ingest_tree`, simplifying `hydrate.rs` by several hundred lines.
+
+### Decision 4: Copy Engine & Backend Cleanup
+- Remove obsolete backend safety enum variants (`Safety::UnsafePending`, `Error::UnsafeBackend`) and validation assertions since all shipped backends are proven safe.
+- Eliminate redundant file materialization delegators from the high-level copy engine and remove dead method aliases from `Materializer`.
+- Replace manual buffer copy loops in `sys::buffered_copy_file` with `std::io::copy`.
+- Replace hand-rolled ancestor directory traversal loops with `Path::ancestors()`.
+- Deduplicate hardlink creation and readonly permission stripping into `hardlink_readonly`.
+
+### Decision 5: CLI Streamlining, Clap Aliases & Presentation Module
+- Delete dead `HydrationFilter` struct and forwarder shim module `manifest.rs`.
+- Convert duplicated subcommand enum variants (`New`, `Isolate`, `TestDrive`) to native Clap aliases on canonical commands (`Create`, `Scratch`, `Demo`).
+- Extract a unified JSON envelope emission helper (`emit_json`) to remove repetitive serialization blocks across command dispatch branches.
+- Derive `Default` on `CleanData` in `envelope.rs` to eliminate zeroed struct literals in `clean.rs`.
+- Simplify scratch worktree ID generation to timestamp-PID bit mixing and use `wt_store` content hashing in `demo.rs`, dropping the direct `sha2` crate dependency from `wt-cli`.
+- Create a dedicated presentation module (`crates/wt-cli/src/output.rs`) exporting `HumanBytes`, `HumanDuration`, `HumanCount`, and aligned table rendering helpers.
+- Replace duplicate formatting helpers across `create.rs`, `clean.rs`, `list.rs`, and `demo.rs` with calls to the presentation module.
+
+### Decision 6: Deep Workspace Lifecycle Module
+- Deepen the `workspace` module in `wt-cli` to encapsulate:
   - Repository root detection and gitdir resolution.
-  - Worktree creation, checkout, and default destination path derivation.
-  - Porcelain worktree record parsing and metadata mapping.
+  - Worktree creation, checkout, and destination path derivation.
+  - Porcelain worktree record parsing and metadata mapping (`RawGitWorktree`).
   - Merge-base ancestor inspection for identifying merged branches.
   - Worktree and branch removal execution.
 - Command handlers for listing, cleanup, creation, and scratch isolation interact exclusively with the workspace module interface.
 
-### Decision 4: Relocate Tree Ingestion into the Store Package
-- Move directory tree scanning, bulk walker dispatch, and validation cache synchronization from the CLI hydration module into the store package.
-- Provide a unified ingestion method on the store interface that accepts an ingestion path, exclusion patterns, and configuration options, returning an ingested tree record.
-- Update the hydration engine to invoke the store's ingestion method, reducing hydration module complexity by several hundred lines.
+### Decision 7: Shell Autocompletions & Documentation Realignment
+- Add `clap_complete` to `wt-cli` dependencies and implement `wt completions <shell>` supporting Bash, Elvish, Fish, PowerShell, and Zsh.
+- Update `install.sh` to auto-detect active shell directories and install completion scripts automatically.
+- Realign `README.md` to highlight the modern 3-verb workflow (`wt new`, `wt clean`, `wt list`) and zero-setup test drive (`wt demo`).
+- Correct the snapshot configuration table in `README.md` to reflect automatic APFS defaults on macOS.
 
-### Decision 5: Documentation and Release Realignment
-- Realign the primary README to highlight the modern 3-verb workflow (`wt new`, `wt clean`, `wt list`) and zero-setup test drive (`wt demo`).
-- Correct the snapshot configuration table to reflect automatic APFS defaults on macOS.
-- Update Homebrew formula templates and release packaging workflows to bundle shell completions.
+### Decision 8: Test Suite Consolidation & Benchmark Unification
+- Group fragmented integration test files in `crates/wt-cli/tests/` into ~5 logical test suites to slash Cargo link times.
+- Centralize fixture creation and git helper routines into `crates/wt-cli/tests/common/mod.rs`.
+- Adjust debug-mode test fixture sizes to prevent multi-minute disk copy stalls while preserving mutation isolation and scorecard verification.
+- Consolidate duplicate stage-timing parsing and tree verification routines into `benchmarks/eval.sh`.
+- Add process liveness checks in `benchmarks/chaos.sh` for SIGKILL fault injection tests.
 
 ## Testing Decisions
 
-- **Testing High Seams**: Test CLI completions and command outputs end-to-end through CLI binary integration tests, asserting stdout contents and return codes.
-- **Presentation Unit Verification**: Test byte, duration, and number formatting against comprehensive edge cases (zero values, boundary transitions, large numbers) in a dedicated presentation test suite.
-- **Workspace Lifecycle Verification**: Test workspace enumeration, porcelain parsing, and merge-ancestor detection against synthetic multi-worktree fixtures.
-- **Store Ingestion Verification**: Test tree ingestion and cache validation directly against the store interface.
-- **Prior Art**: Follows existing integration test patterns in `crates/wt-cli/tests/cli.rs`, `crates/wt-cli/tests/list.rs`, and `crates/wt-store/tests/store.rs`.
+- Only external command behaviors, file contents, JSON envelopes, and exit codes will be asserted; internal helper structures and traits will not be tested directly.
+- Existing integration test assertions (verifying APFS clonefile speedups, CoW mutation isolation, base branch tracking, garbage collection, and shell completions) must remain 100% green without regressions.
+- Automated release formula generation and installer script smoke tests will be validated against simulated release directories.
+- Presentation unit tests will cover boundary transitions, zero values, and decimal scaling precision.
 
 ## Out of Scope
 
 - Graphical User Interface (GUI) or desktop menu bar apps.
 - Background daemon processes or systemd / launchd services.
 - Windows file system clone optimizations.
+- Changing the on-disk storage layout for objects (`objects/xx/yyyy...`), mirrors (`worktrees/*.tsv`), or snapshots (`snapshots/<hash>/`).
+- Modifying the public CLI interface, flags, or version 1 JSON envelope schemas.
 
 ## Further Notes
 
