@@ -15,6 +15,7 @@ use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, ScratchData};
 use crate::error::{Error, Result};
 use crate::hydrate::open_store;
+use crate::signal;
 use crate::workspace;
 
 /// Generate a unique 8-character hex id for scratch worktrees.
@@ -49,6 +50,7 @@ impl ScratchGuard {
             return Ok(());
         }
         self.active = false;
+        signal::clear_scratch();
 
         // 1. Remove the lease file
         let _ = remove_lease(&self.store_root, &self.lease_id);
@@ -69,6 +71,7 @@ impl ScratchGuard {
 
     pub fn disarm(&mut self) {
         self.active = false;
+        signal::clear_scratch();
     }
 }
 
@@ -168,10 +171,23 @@ pub fn run(
         name: branch_name.clone(),
         worktree_path: dest.clone(),
         lease_id: lease_id.clone(),
-        store_root,
-        repo_root: root,
+        store_root: store_root.clone(),
+        repo_root: root.clone(),
         active: run_cmd.is_some(),
     };
+
+    // Register active scratch for SIGINT/SIGTERM cleanup if a command
+    // will run. Bare scratch is disarmed immediately and persists, so
+    // no signal registration is needed.
+    if guard.active {
+        signal::register_scratch(signal::ActiveScratch {
+            name: branch_name.clone(),
+            worktree_path: dest.clone(),
+            lease_id: lease_id.clone(),
+            store_root: store_root.clone(),
+            repo_root: root.clone(),
+        });
+    }
 
     match run_cmd {
         None => {
