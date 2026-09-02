@@ -218,12 +218,10 @@ impl WorkspaceCleaner for GitWorkspaceCleaner {
         if let Some(ref r_root) = repo_root {
             let engine = WorkspaceEngine::from_root(r_root.clone());
             if worktree.exists() {
-                let res = engine.git(&["worktree", "remove", "--force", &worktree.to_string_lossy()]);
-                if res.is_err() && worktree.exists() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        res.unwrap_err().to_string(),
-                    ));
+                if let Err(e) = engine.git(&["worktree", "remove", "--force", &worktree.to_string_lossy()]) {
+                    if worktree.exists() {
+                        return Err(std::io::Error::other(e.to_string()));
+                    }
                 }
             }
             let _ = engine.git(&["worktree", "prune"]);
@@ -239,10 +237,10 @@ impl WorkspaceCleaner for GitWorkspaceCleaner {
         }
 
         if worktree.exists() || gitdir.exists() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("worktree {} still exists after cleanup", worktree.display()),
-            ));
+            return Err(std::io::Error::other(format!(
+                "worktree {} still exists after cleanup",
+                worktree.display()
+            )));
         }
 
         Ok(())
@@ -269,13 +267,13 @@ impl WorkspaceCleaner for GitWorkspaceCleaner {
             if let Some(root) = repo_root_from_gitdir(&gitdir) {
                 let engine = WorkspaceEngine::from_root(root);
                 if let Err(e) = engine.remove_worktree_force(worktree) {
-                    git_err = Some(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                    git_err = Some(std::io::Error::other(e.to_string()));
                 }
             }
         } else if let Some(parent) = worktree.parent() {
             let engine = WorkspaceEngine::from_root(parent.to_path_buf());
             if let Err(e) = engine.remove_worktree_force(worktree) {
-                git_err = Some(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                git_err = Some(std::io::Error::other(e.to_string()));
             }
         }
         if worktree.exists() {
@@ -285,10 +283,10 @@ impl WorkspaceCleaner for GitWorkspaceCleaner {
             if let Some(e) = git_err {
                 return Err(e);
             }
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("worktree {} still exists after removal", worktree.display()),
-            ));
+            return Err(std::io::Error::other(format!(
+                "worktree {} still exists after removal",
+                worktree.display()
+            )));
         }
         if let Some(e) = git_err {
             // Git reported error but filesystem is gone — treat as success for GC path,

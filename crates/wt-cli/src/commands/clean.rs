@@ -234,9 +234,7 @@ fn clean_batch_worktrees(
             ));
         }
 
-        if trimmed.is_empty() {
-            eligible
-        } else if trimmed == "all" {
+        if trimmed.is_empty() || trimmed == "all" {
             eligible
         } else {
             let mut indices = HashSet::new();

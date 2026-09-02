@@ -961,10 +961,10 @@ impl<'a, C: WorkspaceCleaner> StoreReclaimer<'a, C> {
                 fs::remove_dir_all(worktree_path).map_err(Error::Io)?;
             }
             if worktree_path.exists() {
-                return Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("worktree {} still exists after removal", worktree_path.display()),
-                )));
+                return Err(Error::Io(std::io::Error::other(format!(
+                    "worktree {} still exists after removal",
+                    worktree_path.display()
+                ))));
             }
         }
 

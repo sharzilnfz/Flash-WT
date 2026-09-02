@@ -107,7 +107,7 @@ pub fn init_signal_handlers() {
     };
 
     thread::spawn(move || {
-        for sig in signals.forever() {
+        if let Some(sig) = signals.forever().next() {
             eprintln!("wt: received signal {sig}, cleaning up...");
             // Drain active guards. Use try_lock to avoid deadlock if
             // the signal arrived while the main thread holds the lock.
