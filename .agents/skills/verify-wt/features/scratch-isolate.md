@@ -8,7 +8,7 @@ This serves as the primary entry point for isolated agent execution.
 
 - `scratch-run` runs a command inside a hydrated sandbox and cleans up after.
 - `scratch-lease` persists a TTL lease for sandboxes left behind.
-- `isolate-alias` behaves identically to scratch for agent execution with command name `isolate`.
+- `isolate-alias` behaves identically to scratch for agent execution with command name `scratch`.
 - `scratch-auto-name` generates a `scratch-<id>` branch when no name is given.
 - `scratch-manifest` honors custom `--manifest` overrides.
 ## How to get to it (user POV)
@@ -28,7 +28,7 @@ Preconditions:
   contains strictly single-line NDJSON. Envelope `data.exit_code` is `0`,
   `data.cleaned_up` is `true`, `data.lease_id` and `data.expires_at` are present.
 - **Leave one behind.** `wt --json isolate --dir "$WT_FIXTURE/iso1" --ttl 1h`.
-  Envelope `data.cleaned_up` is `false`; `$WT_FIXTURE/iso1/heavy` exists.
+  Envelope `command` is `scratch`; `data.cleaned_up` is `false`; `$WT_FIXTURE/iso1/heavy` exists.
 - **Verify lease.** `test -f "$WT_STORE/worktrees/scratch-<id>.lease"` using
   `data.lease_file` from the envelope.
 - **Remove the leftover.** `wt --json remove <data.branch> --dir "$WT_FIXTURE/iso1"`

@@ -10,7 +10,7 @@ already materialized from the content-addressed store.
 - `create-hydrate` materializes manifest directories as private writable files.
 - `create-manifest` honors `--manifest` overrides of the default `.wtinclude`.
 - `create-base` honors `--base` for the starting ref.
-- `create-modern-verb` supports `wt new` as the primary verb with `"command": "new"`.
+- `create-modern-verb` supports `wt new` as an alias to `wt create`, with `"command": "create"` in the JSON envelope.
 ## How to get to it (user POV)
 
 - Run `wt new <name>` (modern verb) or `wt create <name>` (classic verb) inside a git repo that has a `.wtinclude`.
@@ -25,7 +25,7 @@ Preconditions:
 - Fixture ships `.wtinclude` containing `heavy/` and 40 files under `heavy/`.
 
 - **Create.** `wt --json new demo --dir "$WT_FIXTURE/demo"`. Envelope
-  `status` is `ok`; `command` is `new`; `data.branch` is `demo`;
+  `status` is `ok`; `command` is `create`; `data.branch` is `demo`;
   `data.files_hydrated` is `40`; `data.hydration_method` is present;
   `data.duration_ms` is present.
 - **Verify branch.** `git -C "$WT_FIXTURE/demo" branch --show-current` prints
@@ -45,8 +45,8 @@ Preconditions:
 
 ## Gotchas
 
-- An absent `.wtinclude` does not fail. Instead, `wt` generates a starter
-  `.wtinclude` template with default rules and hydrates any matching paths.
+- An absent `.wtinclude` does not fail. Instead, `wt` applies default rules in memory
+  without writing to disk and hydrates any matching paths. (Use `wt init` to write a starter manifest file).
   Pass `--manifest /dev/null` to enforce zero hydration.
 - `hydration_method` is filesystem-dependent: `byte_copy` plus a
   `CROSS_DEVICE_COPY_DEGRADATION` diagnostic on tmpfs; CoW/hardlink
