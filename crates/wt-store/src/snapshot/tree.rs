@@ -227,13 +227,9 @@ impl DiskStore {
     /// subtree batches and dispatches them across a worker pool bounded by
     /// available CPU parallelism via `std::thread::scope`.
     ///
-    /// Chmod on a hardlink retargets the SHARED inode, so the object
-    /// blob's mode becomes the snapshot's normalized mode. That is
-    /// deliberate (the plan's "blobs' stored modes preserve exec
-    /// bits") and safe here: normalization only ever sets owner-write
-    /// or adds/removes the x-bits consistently for one content id, and
-    /// chmod does not touch mtime, so verified-ledger fingerprints
-    /// stay valid.
+    /// Hardlinked files share the CAS inode; a mode mismatch is
+    /// resolved by replacing the staged entry with a private copy
+    /// before chmod so the store blob's permissions stay untouched.
     pub(super) fn build_tree(
         &self,
         dir: &Path,
@@ -502,16 +498,24 @@ impl DiskStore {
                 #[allow(clippy::unnecessary_cast)]
                 let current_mode = (stat.st_mode as u32) & 0o7777;
                 if current_mode != entry.mode {
-                    let rc = unsafe {
-                        libc::fchmodat(dir_fd, c_filename.as_ptr(), entry.mode as libc::mode_t, 0)
-                    };
-                    if rc != 0 {
-                        let err = io::Error::last_os_error();
-                        return Err(BuildError::Fatal(format!(
-                            "cannot chmod {}/{filename}: {err}",
+                    let dest = dir_path.join(filename);
+                    fs::remove_file(&dest).map_err(|e| {
+                        BuildError::Fatal(format!("cannot unlink {}/{filename}: {e}", dir_path.display()))
+                    })?;
+                    wt_copy::buffered_copy_file(&blob_path, &dest).map_err(|e| {
+                        BuildError::Fatal(format!(
+                            "cannot copy blob {blob} to {}/{filename}: {e}",
                             dir_path.display()
-                        )));
-                    }
+                        ))
+                    })?;
+                    fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode)).map_err(
+                        |e| {
+                            BuildError::Fatal(format!(
+                                "cannot chmod {}/{filename}: {e}",
+                                dir_path.display()
+                            ))
+                        },
+                    )?;
                 }
                 *link_train_ms += stage.elapsed().as_millis() as u64;
                 Ok(())
@@ -615,16 +619,19 @@ impl DiskStore {
                         )),
                     });
                 }
-                // Chmod on a hardlink retargets the SHARED inode, so
-                // this may rewrite the object blob's mode — but only
-                // when it actually differs. Most blobs are born 0644
-                // and most entries want 0644; skipping the no-op
-                // chmod saves a measurable slice of build time at
-                // 40k-file scale without changing any outcome.
                 let meta = dest.symlink_metadata().map_err(|e| {
                     BuildError::Fatal(format!("cannot stat {}: {e}", dest.display()))
                 })?;
                 if meta.permissions().mode() & 0o7777 != entry.mode {
+                    fs::remove_file(&dest).map_err(|e| {
+                        BuildError::Fatal(format!("cannot unlink {}: {e}", dest.display()))
+                    })?;
+                    wt_copy::buffered_copy_file(&self.blob_path(&blob), &dest).map_err(|e| {
+                        BuildError::Fatal(format!(
+                            "cannot copy blob {blob} to {}: {e}",
+                            dest.display()
+                        ))
+                    })?;
                     fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode)).map_err(
                         |e| BuildError::Fatal(format!("cannot chmod {}: {e}", dest.display())),
                     )?;
