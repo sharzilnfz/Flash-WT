@@ -277,7 +277,7 @@ fn is_nested_stale(heavy_src: &Path, snapshot_secs: u64) -> bool {
     }
     if let Ok(entries) = crate::bulkwalk::walk(heavy_src) {
         for e in entries {
-            if e.mtime_secs > snapshot_secs + 1 {
+            if e.mtime_secs > snapshot_secs {
                 return true;
             }
         }
@@ -319,7 +319,7 @@ fn portable_nested_stale(heavy_src: &Path, snapshot_secs: u64) -> bool {
                 .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            if mtime_secs > snapshot_secs + 1 {
+            if mtime_secs > snapshot_secs {
                 return true;
             }
             if meta.is_dir() && !meta.file_type().is_symlink() {

@@ -499,23 +499,7 @@ impl DiskStore {
                 let current_mode = (stat.st_mode as u32) & 0o7777;
                 if current_mode != entry.mode {
                     let dest = dir_path.join(filename);
-                    fs::remove_file(&dest).map_err(|e| {
-                        BuildError::Fatal(format!("cannot unlink {}/{filename}: {e}", dir_path.display()))
-                    })?;
-                    wt_copy::buffered_copy_file(&blob_path, &dest).map_err(|e| {
-                        BuildError::Fatal(format!(
-                            "cannot copy blob {blob} to {}/{filename}: {e}",
-                            dir_path.display()
-                        ))
-                    })?;
-                    fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode)).map_err(
-                        |e| {
-                            BuildError::Fatal(format!(
-                                "cannot chmod {}/{filename}: {e}",
-                                dir_path.display()
-                            ))
-                        },
-                    )?;
+                    replace_with_blob_copy(&blob_path, &dest, entry.mode)?;
                 }
                 *link_train_ms += stage.elapsed().as_millis() as u64;
                 Ok(())
@@ -623,22 +607,28 @@ impl DiskStore {
                     BuildError::Fatal(format!("cannot stat {}: {e}", dest.display()))
                 })?;
                 if meta.permissions().mode() & 0o7777 != entry.mode {
-                    fs::remove_file(&dest).map_err(|e| {
-                        BuildError::Fatal(format!("cannot unlink {}: {e}", dest.display()))
-                    })?;
-                    wt_copy::buffered_copy_file(&self.blob_path(&blob), &dest).map_err(|e| {
-                        BuildError::Fatal(format!(
-                            "cannot copy blob {blob} to {}: {e}",
-                            dest.display()
-                        ))
-                    })?;
-                    fs::set_permissions(&dest, fs::Permissions::from_mode(entry.mode)).map_err(
-                        |e| BuildError::Fatal(format!("cannot chmod {}: {e}", dest.display())),
-                    )?;
+                    replace_with_blob_copy(&self.blob_path(&blob), &dest, entry.mode)?;
                 }
                 timings.link_train_ms += stage.elapsed().as_millis() as u64;
                 Ok(())
             }
         }
     }
+}
+
+fn replace_with_blob_copy(blob_path: &Path, dest: &Path, mode: u32) -> Result<(), BuildError> {
+    fs::remove_file(dest).map_err(|e| {
+        BuildError::Fatal(format!("cannot unlink {}: {e}", dest.display()))
+    })?;
+    wt_copy::buffered_copy_file(blob_path, dest).map_err(|e| {
+        BuildError::Fatal(format!(
+            "cannot copy blob {} to {}: {e}",
+            blob_path.display(),
+            dest.display()
+        ))
+    })?;
+    fs::set_permissions(dest, fs::Permissions::from_mode(mode)).map_err(|e| {
+        BuildError::Fatal(format!("cannot chmod {}: {e}", dest.display()))
+    })?;
+    Ok(())
 }

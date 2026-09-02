@@ -133,23 +133,8 @@ fn cleanup_scratch() {
     // Remove lease file.
     let _ = wt_store::remove_lease(&a.store_root, &a.lease_id);
 
-    // Remove worktree via git if it exists.
-    let dest_str = a.worktree_path.to_string_lossy().into_owned();
-    let _ = Command::new("git")
-        .current_dir(&a.repo_root)
-        .args(["worktree", "remove", "--force", &dest_str])
-        .output();
-    let _ = Command::new("git")
-        .current_dir(&a.repo_root)
-        .args(["worktree", "prune"])
-        .output();
-    let _ = Command::new("git")
-        .current_dir(&a.repo_root)
-        .args(["branch", "-D", &a.name])
-        .output();
-    if a.worktree_path.exists() {
-        let _ = fs::remove_dir_all(&a.worktree_path);
-    }
+    // Roll back worktree + branch.
+    rollback_create(&a.name, &a.worktree_path, &a.repo_root);
     // Also remove gitdir under .git/worktrees/<name> if still present.
     let git_worktree_dir = a.repo_root.join(".git").join("worktrees").join(&a.name);
     if git_worktree_dir.exists() {

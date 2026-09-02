@@ -328,7 +328,7 @@ fn print_human_table(entries: &[WorktreeEntry], total_disk_saved: u64) {
     println!();
     if total_files > 0 {
         println!(
-            "Total disk saved: {} across {} worktree{} ({} files deduplicated)",
+            "Total disk saved: {} across {} worktree{} ({} files deduplicated, estimated logical reuse)",
             HumanBytes(total_disk_saved),
             worktree_count,
             if worktree_count == 1 { "" } else { "s" },
@@ -336,7 +336,7 @@ fn print_human_table(entries: &[WorktreeEntry], total_disk_saved: u64) {
         );
     } else {
         println!(
-            "Total disk saved: {} across {} worktree{}",
+            "Total disk saved: {} across {} worktree{} (estimated logical reuse)",
             HumanBytes(total_disk_saved),
             worktree_count,
             if worktree_count == 1 { "" } else { "s" }
