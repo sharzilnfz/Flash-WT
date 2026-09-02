@@ -127,6 +127,9 @@ impl RunConfig {
 mod tests {
     use super::*;
     use std::env;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn set(name: &str, val: Option<&str>) {
         match val {
@@ -137,6 +140,7 @@ mod tests {
 
     #[test]
     fn flag_parsing_recognizes_false_variants_and_empty() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // false variants
         for v in ["0", "false", "FALSE", "False", "no", "NO", "off", "OFF", "Off"] {
             set("WT_SNAPSHOTS", Some(v));
@@ -174,6 +178,7 @@ mod tests {
 
     #[test]
     fn snapshots_false_disables() {
+        let _guard = ENV_LOCK.lock().unwrap();
         set("WT_SNAPSHOTS", Some("false"));
         set("WT_SNAPSHOTS_V2", None);
         let cfg = RunConfig::from_env();
@@ -189,11 +194,11 @@ mod tests {
         assert!(!cfg.snapshots);
         set("WT_SNAPSHOTS", Some(""));
         let cfg = RunConfig::from_env();
-        // empty => default (which on linux is false)
-        assert!(!cfg.snapshots);
+        // empty => default (probe_apfs_default())
+        assert_eq!(cfg.snapshots, probe_apfs_default());
         set("WT_SNAPSHOTS", None);
         let cfg = RunConfig::from_env();
-        assert!(!cfg.snapshots);
+        assert_eq!(cfg.snapshots, probe_apfs_default());
         // cleanup
         set("WT_SNAPSHOTS", None);
     }
