@@ -9,8 +9,12 @@ readme.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "wt"
+name = "wt-hydrate"
 path = "src/main.rs"
+
+[[bin]]
+name = "wt"
+path = "src/bin/wt.rs"
 
 [lints]
 workspace = true

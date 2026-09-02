@@ -79,7 +79,10 @@ impl<'a> HydrationEngine<'a> {
     pub fn hydrate(&mut self, req: HydrationRequest<'_>) -> Result<HydrationReport> {
         let mut timings = StageTimings::new();
         let dirs = collect_matches(req.root, req.patterns)?;
-        let git_dir = workspace::git_dir(req.dest)?;
+        let git_dir = workspace::resolve_git_dir(req.dest);
+        if !git_dir.exists() {
+            let _ = std::fs::create_dir_all(&git_dir);
+        }
 
         if dirs.is_empty() {
             self.store

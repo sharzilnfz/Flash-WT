@@ -145,11 +145,11 @@ impl HydrationFilter {
 
     /// Load patterns from an explicit path or `<root>/.wtinclude`.
     /// If no explicit manifest is given and `.wtinclude` does not exist,
-    /// writes a starter manifest with defaults and returns a filter with default patterns.
+    /// returns a filter with in-memory default patterns (does not write to disk).
     pub fn load_or_create(manifest_path: Option<&Path>, root: &Path) -> Result<Self> {
         match load_patterns(root, manifest_path)? {
-            LoadedPatterns::Loaded { patterns } => Ok(Self::new(patterns)),
-            LoadedPatterns::CreatedStarter { patterns, .. } => Ok(Self::new(patterns)),
+            LoadedPatterns::Loaded { patterns, .. } => Ok(Self::new(patterns)),
+            LoadedPatterns::Defaults { patterns } => Ok(Self::new(patterns)),
         }
     }
 
@@ -162,19 +162,18 @@ impl HydrationFilter {
 /// What [`load_patterns`] decided. Splitting the decision from the
 /// printing keeps this module side-effect-free above the filesystem:
 /// the caller owns user-visible output.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadedPatterns {
     /// An existing manifest was read.
     Loaded {
+        /// Path to the loaded manifest.
+        path: PathBuf,
         /// Patterns parsed from existing manifest.
         patterns: Vec<String>,
     },
-    /// No default-path manifest existed; defaults were chosen and a
-    /// starter manifest written to `path`.
-    CreatedStarter {
-        /// Path to the written starter manifest.
-        path: PathBuf,
-        /// Default patterns written.
+    /// No manifest file existed; in-memory defaults are used without writing to disk.
+    Defaults {
+        /// Default patterns.
         patterns: Vec<String>,
     },
 }
@@ -311,39 +310,39 @@ pub fn collect_matched_directories(root: &Path, patterns: &[String]) -> Result<V
 
 /// Decide which patterns hydrate from: the manifest at `manifest`
 /// when given, else `<root>/.wtinclude`. A missing default-path
-/// manifest is not an error — defaults apply and a starter manifest
-/// is written atomically (temp file beside the destination, one
-/// rename); the caller prints the announcements.
+/// manifest is not an error — defaults apply in-memory without
+/// auto-writing to disk.
 pub fn load_patterns(root: &Path, manifest: Option<&Path>) -> Result<LoadedPatterns> {
-    let path = match manifest {
-        Some(m) => m.to_path_buf(),
-        None => root.join(".wtinclude"),
-    };
-    match fs::read_to_string(&path) {
-        Ok(text) => Ok(LoadedPatterns::Loaded {
-            patterns: parse_patterns(&text),
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if manifest.is_some() {
-                return Err(Error::Usage(format!(
-                    "manifest {} not found",
-                    path.display()
-                )));
+    if let Some(m) = manifest {
+        match fs::read_to_string(m) {
+            Ok(text) => Ok(LoadedPatterns::Loaded {
+                path: m.to_path_buf(),
+                patterns: parse_patterns(&text),
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(Error::Usage(format!("manifest {} not found", m.display())))
             }
-            write_starter_manifest(&path)?;
-            Ok(LoadedPatterns::CreatedStarter {
-                path,
-                patterns: DEFAULT_PATTERNS.iter().map(|s| s.to_string()).collect(),
-            })
+            Err(e) => Err(Error::io("read manifest", m, e)),
         }
-        Err(e) => Err(Error::io("read manifest", &path, e)),
+    } else {
+        let default_path = root.join(".wtinclude");
+        match fs::read_to_string(&default_path) {
+            Ok(text) => Ok(LoadedPatterns::Loaded {
+                path: default_path,
+                patterns: parse_patterns(&text),
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LoadedPatterns::Defaults {
+                patterns: DEFAULT_PATTERNS.iter().map(|s| s.to_string()).collect(),
+            }),
+            Err(e) => Err(Error::io("read manifest", &default_path, e)),
+        }
     }
 }
 
 /// Write the starter manifest house-style: temp file beside the
 /// destination, then one atomic rename, so a crash never leaves a
 /// half-written manifest behind.
-fn write_starter_manifest(path: &Path) -> Result<()> {
+pub fn write_starter_manifest(path: &Path) -> Result<()> {
     let refuse =
         |source: std::io::Error| Error::io_unanchored("write starter manifest", path, source);
     let parent = path.parent().ok_or_else(|| {
@@ -448,15 +447,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_explicit_manifest_is_an_error_but_default_creates_starter() {
+    fn missing_explicit_manifest_is_an_error_and_default_uses_in_memory_defaults() {
         let base = tempfile::tempdir().unwrap();
         let root = base.path();
 
         let err = load_patterns(root, Some(&root.join("nope.wtinclude"))).unwrap_err();
         assert!(err.to_string().contains("not found"), "{err}");
 
-        let starter_path = match load_patterns(root, None).unwrap() {
-            LoadedPatterns::CreatedStarter { path, patterns } => {
+        let defaults = match load_patterns(root, None).unwrap() {
+            LoadedPatterns::Defaults { patterns } => {
                 assert_eq!(
                     patterns,
                     DEFAULT_PATTERNS
@@ -464,14 +463,25 @@ mod tests {
                         .map(|s| s.to_string())
                         .collect::<Vec<_>>()
                 );
-                path
+                patterns
             }
-            LoadedPatterns::Loaded { .. } => panic!("expected starter creation"),
+            LoadedPatterns::Loaded { .. } => panic!("expected in-memory defaults"),
         };
-        assert_eq!(starter_path, root.join(".wtinclude"));
-        // The written starter parses back to the default patterns.
-        let again = load_patterns(root, None).unwrap();
-        assert!(matches!(again, LoadedPatterns::Loaded { .. }));
+        // Manifest must NOT be written automatically
+        assert!(!root.join(".wtinclude").exists());
+
+        // Explicit starter manifest writing
+        write_starter_manifest(&root.join(".wtinclude")).unwrap();
+        assert!(root.join(".wtinclude").is_file());
+
+        let loaded = load_patterns(root, None).unwrap();
+        match loaded {
+            LoadedPatterns::Loaded { patterns, path } => {
+                assert_eq!(path, root.join(".wtinclude"));
+                assert_eq!(patterns, defaults);
+            }
+            LoadedPatterns::Defaults { .. } => panic!("expected loaded manifest"),
+        }
     }
 
     #[test]

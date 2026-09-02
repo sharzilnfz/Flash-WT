@@ -5,6 +5,8 @@ pub mod clean;
 pub mod completions;
 pub mod create;
 pub mod demo;
+pub mod hydrate;
+pub mod init;
 pub mod list;
 pub mod scratch;
 pub mod scrub;
@@ -20,6 +22,32 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
     match command {
         WtCommand::List => {
             let (data, diags) = list::run(cfg)?;
+            if cfg.json {
+                let env = Envelope::ok(command_name, data, diags);
+                println!(
+                    "{}",
+                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
+                );
+            }
+            Ok(None)
+        }
+        WtCommand::Hydrate {
+            path,
+            source,
+            manifest,
+        } => {
+            let (data, diags) = hydrate::run(&path, source.as_deref(), manifest.as_deref(), cfg)?;
+            if cfg.json {
+                let env = Envelope::ok(command_name, data, diags);
+                println!(
+                    "{}",
+                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
+                );
+            }
+            Ok(None)
+        }
+        WtCommand::Init { dir, force } => {
+            let (data, diags) = init::run(dir.as_deref(), force, cfg)?;
             if cfg.json {
                 let env = Envelope::ok(command_name, data, diags);
                 println!(

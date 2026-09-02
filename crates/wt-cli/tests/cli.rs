@@ -113,7 +113,7 @@ fn create_hydrates_manifest_dirs_byte_identical() {
 }
 
 #[test]
-fn create_without_manifest_uses_defaults_and_writes_starter() {
+fn create_without_manifest_uses_defaults_and_does_not_write_starter() {
     let fx = Fixture::heavy_repo(50);
     // node_modules is one of the documented defaults.
     fs::rename(fx.repo.join("heavy"), fx.repo.join("node_modules")).unwrap();
@@ -128,10 +128,8 @@ fn create_without_manifest_uses_defaults_and_writes_starter() {
     let dest = fx.repo.parent().unwrap().join("origin-demo");
     assert_same_tree(&fx.repo.join("node_modules"), &dest.join("node_modules"));
 
-    // A suggested starter manifest lands in the source repo root.
-    let starter = fs::read_to_string(fx.repo.join(".wtinclude")).unwrap();
-    assert!(starter.contains("node_modules"));
-    assert!(String::from_utf8_lossy(&out.stdout).contains(".wtinclude"));
+    // In-memory defaults must NOT auto-create .wtinclude in the source checkout.
+    assert!(!fx.repo.join(".wtinclude").exists());
 }
 
 #[test]
