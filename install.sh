@@ -54,6 +54,11 @@ if [ -z "${WT_VERSION:-}" ] && [ -z "${WT_DIST_DIR:-}" ]; then
 fi
 VERSION_NO_V=${WT_VERSION#v}
 [ -n "$VERSION_NO_V" ] || VERSION_NO_V=unknown
+# Normalize bare versions (0.1.0 -> v0.1.0) so both forms resolve to the
+# same GitHub release asset; VERSION_NO_V stays bare for archive names.
+if [ -n "${WT_VERSION:-}" ]; then
+  WT_VERSION="v${VERSION_NO_V}"
+fi
 
 ARCHIVE="wt-v${VERSION_NO_V}-${TARGET}.tar.gz"
 fetch "$ARCHIVE" >/dev/null

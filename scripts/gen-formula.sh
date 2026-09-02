@@ -13,6 +13,7 @@
 set -eu
 
 VERSION=${1:?usage: gen-formula.sh <version> <dist-dir>}
+VERSION=${VERSION#v}
 DIST=${2:-.}
 TEMPLATE="$(dirname "$0")/../Formula/wt.rb"
 
@@ -24,6 +25,8 @@ sha_for() {
 # without a real release; scripts/smoke-install.sh does exactly that.
 DOWNLOAD_BASE=${WT_DOWNLOAD_BASE:-https://github.com/$WT_REPO/releases/download}
 
+TMP_OUT=$(mktemp)
+trap 'rm -f "$TMP_OUT"' EXIT
 sed \
   -e "s|__REPO__|${WT_REPO:?WT_REPO must be set to owner/repo}|g" \
   -e "s|__VERSION__|$VERSION|g" \
@@ -31,4 +34,10 @@ sed \
   -e "s|__SHA256_AARCH64_APPLE_DARWIN__|$(sha_for aarch64-apple-darwin)|" \
   -e "s|__SHA256_X86_64_APPLE_DARWIN__|$(sha_for x86_64-apple-darwin)|" \
   -e "s|__SHA256_X86_64_UNKNOWN_LINUX_GNU__|$(sha_for x86_64-unknown-linux-gnu)|" \
-  "$TEMPLATE"
+  "$TEMPLATE" >"$TMP_OUT"
+
+if command -v ruby >/dev/null 2>&1; then
+  ruby -c "$TMP_OUT" >/dev/null
+fi
+
+cat "$TMP_OUT"
