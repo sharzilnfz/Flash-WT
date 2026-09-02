@@ -156,18 +156,7 @@ fn clean_batch_worktrees(
         if !cfg.json {
             println!("No linked worktrees found to clean.");
         }
-        return Ok((
-            CleanData {
-                removed_worktrees: Vec::new(),
-                branches_removed: Vec::new(),
-                references_released: 0,
-                mirrors_removed: 0,
-                reclaimed_bytes: 0,
-                sweep_examined: 0,
-                sweep_reclaimed: 0,
-            },
-            Vec::new(),
-        ));
+        return Ok((CleanData::default(), Vec::new()));
     }
 
     let eligible: Vec<CleanCandidate> = if force {
@@ -220,18 +209,7 @@ fn clean_batch_worktrees(
 
         if trimmed == "q" || trimmed == "quit" || trimmed == "n" || trimmed == "no" {
             println!("Cleanup cancelled.");
-            return Ok((
-                CleanData {
-                    removed_worktrees: Vec::new(),
-                    branches_removed: Vec::new(),
-                    references_released: 0,
-                    mirrors_removed: 0,
-                    reclaimed_bytes: 0,
-                    sweep_examined: 0,
-                    sweep_reclaimed: 0,
-                },
-                Vec::new(),
-            ));
+            return Ok((CleanData::default(), Vec::new()));
         }
 
         if trimmed.is_empty() || trimmed == "all" {
@@ -267,18 +245,7 @@ fn clean_batch_worktrees(
                     "No merged worktrees found to clean. Use 'wt clean <name>' or 'wt clean --all --force' to include unmerged/dirty."
                 );
             }
-            return Ok((
-                CleanData {
-                    removed_worktrees: Vec::new(),
-                    branches_removed: Vec::new(),
-                    references_released: 0,
-                    mirrors_removed: 0,
-                    reclaimed_bytes: 0,
-                    sweep_examined: 0,
-                    sweep_reclaimed: 0,
-                },
-                Vec::new(),
-            ));
+            return Ok((CleanData::default(), Vec::new()));
         }
         eligible
     };
@@ -287,18 +254,7 @@ fn clean_batch_worktrees(
         if !cfg.json {
             println!("No worktrees selected for removal.");
         }
-        return Ok((
-            CleanData {
-                removed_worktrees: Vec::new(),
-                branches_removed: Vec::new(),
-                references_released: 0,
-                mirrors_removed: 0,
-                reclaimed_bytes: 0,
-                sweep_examined: 0,
-                sweep_reclaimed: 0,
-            },
-            Vec::new(),
-        ));
+        return Ok((CleanData::default(), Vec::new()));
     }
 
     let mut diagnostics = Vec::new();

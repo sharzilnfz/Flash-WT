@@ -16,9 +16,7 @@ use crate::timing::StageTimings;
 use crate::workspace::WorkspaceEngine;
 
 /// RAII guard that rolls back a newly created worktree+branch if
-/// hydration fails. Defuse on success. Drop is a safety net for
-/// panics; explicit rollback on `Err` also fires immediately so the
-/// caller sees the cleanup before returning.
+/// hydration fails. Defuse on success.
 struct CreateGuard {
     name: String,
     dest: PathBuf,
@@ -29,15 +27,6 @@ struct CreateGuard {
 impl CreateGuard {
     fn defuse(&mut self) {
         self.defused = true;
-        signal::clear_create();
-    }
-
-    fn rollback(&mut self) {
-        if self.defused {
-            return;
-        }
-        self.defused = true;
-        signal::rollback_create(&self.name, &self.dest, &self.repo_root);
         signal::clear_create();
     }
 }
@@ -103,33 +92,22 @@ pub fn run(
         );
     }
 
-    let patterns = match load_patterns(&root, manifest) {
-        Ok(lp) => match lp {
-            LoadedPatterns::Defaults { patterns } => {
-                if !cfg.json {
-                    println!(
-                        "no .wtinclude in {}; using defaults ({})",
-                        root.display(),
-                        hydration_filter::DEFAULT_PATTERNS.join(" ")
-                    );
-                }
-                patterns
+    let lp = load_patterns(&root, manifest)?;
+    let patterns = match lp {
+        LoadedPatterns::Defaults { patterns } => {
+            if !cfg.json {
+                println!(
+                    "no .wtinclude in {}; using defaults ({})",
+                    root.display(),
+                    hydration_filter::DEFAULT_PATTERNS.join(" ")
+                );
             }
-            LoadedPatterns::Loaded { patterns, .. } => patterns,
-        },
-        Err(e) => {
-            guard.rollback();
-            return Err(e);
+            patterns
         }
+        LoadedPatterns::Loaded { patterns, .. } => patterns,
     };
 
-    let mut store = match open_store() {
-        Ok(s) => s,
-        Err(e) => {
-            guard.rollback();
-            return Err(e);
-        }
-    };
+    let mut store = open_store()?;
     let mut h_engine = HydrationEngine::new(&mut store);
     let req = HydrationRequest {
         root: &root,
@@ -140,13 +118,7 @@ pub fn run(
         cfg,
     };
 
-    let mut report = match h_engine.hydrate(req) {
-        Ok(r) => r,
-        Err(e) => {
-            guard.rollback();
-            return Err(e);
-        }
-    };
+    let mut report = h_engine.hydrate(req)?;
     report.timings.git_worktree_ms = timings.git_worktree_ms;
 
     // Success: defuse guard so Drop does not delete the worktree.

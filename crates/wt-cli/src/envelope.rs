@@ -31,15 +31,6 @@ impl Diagnostic {
             level: Some("warning".into()),
         }
     }
-
-    #[allow(dead_code)]
-    pub fn info(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            level: Some("info".into()),
-        }
-    }
 }
 
 /// Generic versioned JSON response envelope.
@@ -208,7 +199,7 @@ pub struct LeaseEntry {
 }
 
 /// Payload for `wt scratch --json` / `wt isolate --json` (ticket 03).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScratchData {
     pub worktree_path: String,
     pub branch: String,
@@ -247,7 +238,7 @@ pub struct DemoData {
 }
 
 /// Payload for `wt clean --json` (ticket 03 / ticket 05).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CleanData {
     pub removed_worktrees: Vec<String>,
     pub branches_removed: Vec<String>,

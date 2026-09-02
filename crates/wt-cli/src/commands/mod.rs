@@ -17,17 +17,26 @@ use crate::envelope::Envelope;
 use crate::error::{Error, Result};
 use crate::gc;
 
+fn emit_json<T: serde::Serialize>(
+    command_name: &str,
+    data: T,
+    diags: Vec<crate::envelope::Diagnostic>,
+) -> Result<()> {
+    let env = Envelope::ok(command_name, data, diags);
+    println!(
+        "{}",
+        serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
+    );
+    Ok(())
+}
+
 pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
     let command_name = command.name();
     match command {
         WtCommand::List => {
             let (data, diags) = list::run(cfg)?;
             if cfg.json {
-                let env = Envelope::ok(command_name, data, diags);
-                println!(
-                    "{}",
-                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
-                );
+                emit_json(command_name, data, diags)?;
             }
             Ok(None)
         }
@@ -38,22 +47,14 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
         } => {
             let (data, diags) = hydrate::run(&path, source.as_deref(), manifest.as_deref(), cfg)?;
             if cfg.json {
-                let env = Envelope::ok(command_name, data, diags);
-                println!(
-                    "{}",
-                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
-                );
+                emit_json(command_name, data, diags)?;
             }
             Ok(None)
         }
         WtCommand::Init { dir, force } => {
             let (data, diags) = init::run(dir.as_deref(), force, cfg)?;
             if cfg.json {
-                let env = Envelope::ok(command_name, data, diags);
-                println!(
-                    "{}",
-                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
-                );
+                emit_json(command_name, data, diags)?;
             }
             Ok(None)
         }
@@ -71,11 +72,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
                 cfg,
             )?;
             if cfg.json {
-                let env = Envelope::ok(command_name, data, diags);
-                println!(
-                    "{}",
-                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
-                );
+                emit_json(command_name, data, diags)?;
             }
             Ok(None)
         }
@@ -91,11 +88,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
                 .iter()
                 .any(|d| d.level.as_deref() == Some("error"));
             if cfg.json {
-                let env = Envelope::ok(command_name, data, diags);
-                println!(
-                    "{}",
-                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
-                );
+                emit_json(command_name, data, diags)?;
             }
             if has_errors {
                 Ok(Some(1))
@@ -106,33 +99,21 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
         WtCommand::Remove { name, dir } => {
             let (data, diags) = gc::remove(&name, dir.as_deref(), cfg)?;
             if cfg.json {
-                let env = Envelope::ok(command_name, data, diags);
-                println!(
-                    "{}",
-                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
-                );
+                emit_json(command_name, data, diags)?;
             }
             Ok(None)
         }
         WtCommand::Sweep { age } => {
             let (data, diags) = gc::sweep(age, cfg)?;
             if cfg.json {
-                let env = Envelope::ok(command_name, data, diags);
-                println!(
-                    "{}",
-                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
-                );
+                emit_json(command_name, data, diags)?;
             }
             Ok(None)
         }
         WtCommand::Scrub { dry_run } => {
             let (data, diags) = scrub::run(dry_run, cfg)?;
             if cfg.json {
-                let env = Envelope::ok(command_name, data, diags);
-                println!(
-                    "{}",
-                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
-                );
+                emit_json(command_name, data, diags)?;
             }
             Ok(None)
         }
@@ -143,11 +124,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
             } => {
                 let (data, diags) = gc::migrate(activate_mark_sweep, drop_legacy_refs, cfg)?;
                 if cfg.json {
-                    let env = Envelope::ok(command_name, data, diags);
-                    println!(
-                        "{}",
-                        serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
-                    );
+                    emit_json(command_name, data, diags)?;
                 }
                 Ok(None)
             }
@@ -168,22 +145,14 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
                 cfg,
             )?;
             if cfg.json {
-                let env = Envelope::ok(command_name, data, diags);
-                println!(
-                    "{}",
-                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
-                );
+                emit_json(command_name, data, diags)?;
             }
             Ok(exit_code)
         }
         WtCommand::Demo => {
             let (data, diags) = demo::run(cfg)?;
             if cfg.json {
-                let env = Envelope::ok(command_name, data, diags);
-                println!(
-                    "{}",
-                    serde_json::to_string(&env).map_err(|e| Error::Store(e.to_string()))?
-                );
+                emit_json(command_name, data, diags)?;
             }
             Ok(None)
         }

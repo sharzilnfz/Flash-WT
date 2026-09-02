@@ -1,6 +1,6 @@
 # Ticket 02: Envelope Emission & RAII Rollback Simplification
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Description
 

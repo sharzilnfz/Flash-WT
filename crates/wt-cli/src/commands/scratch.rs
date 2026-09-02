@@ -214,9 +214,8 @@ pub fn run(
                 bytes_shared_cow: create_data.bytes_shared_cow,
                 bytes_copied: create_data.bytes_copied,
                 duration_ms: started.elapsed().as_millis() as u64,
-                command: None,
-                exit_code: None,
                 cleaned_up: Some(false),
+                ..ScratchData::default()
             };
             Ok((data, diags, None))
         }
