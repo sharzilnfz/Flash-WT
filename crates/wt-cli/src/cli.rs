@@ -16,7 +16,7 @@ fn parse_age_value(text: &str) -> Result<Duration, String> {
 
 #[derive(Parser)]
 #[command(
-    name = "wt-hydrate",
+    name = "flashwt",
     version,
     about = "Instant git worktrees with heavy directories already hydrated"
 )]

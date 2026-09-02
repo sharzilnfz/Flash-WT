@@ -21,7 +21,7 @@ use clap::Parser;
 use cli::Cli;
 use config::RunConfig;
 
-/// CLI entrypoint logic shared across `wt-hydrate` and `wt` binaries.
+/// CLI entrypoint logic shared across `flashwt`, `flash-wt`, and `wt` binaries.
 pub fn run_cli() {
     signal::init_signal_handlers();
     let cli = Cli::parse();

@@ -9,8 +9,12 @@ readme.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "wt-hydrate"
+name = "flashwt"
 path = "src/main.rs"
+
+[[bin]]
+name = "flash-wt"
+path = "src/bin/flash_wt.rs"
 
 [[bin]]
 name = "wt"

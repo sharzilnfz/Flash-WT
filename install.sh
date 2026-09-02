@@ -89,7 +89,7 @@ chmod +x "$BIN_DIR/wt"
 INSTALLED=$("$BIN_DIR/wt" --version)
 echo "$INSTALLED"
 case "$INSTALLED" in
-  wt\ * | wt-hydrate\ *) ;;
+  flashwt\ * | flash-wt\ * | wt\ * | wt-hydrate\ *) ;;
   *)
     echo "wt: $BIN_DIR/wt did not run correctly" >&2
     exit 1

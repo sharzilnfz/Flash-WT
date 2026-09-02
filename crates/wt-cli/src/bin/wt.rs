@@ -1,4 +1,4 @@
-//! `wt` — alias for `wt-hydrate`.
+//! `wt` — short alias for `flashwt`.
 
 fn main() {
     wt_cli::run_cli();

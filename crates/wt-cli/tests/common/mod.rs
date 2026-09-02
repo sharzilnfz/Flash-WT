@@ -203,14 +203,19 @@ impl Fixture {
             .expect("run wt binary")
     }
 
-    /// Run `wt-hydrate <args>` inside the fixture repository with isolated `WT_STORE`.
-    pub fn wt_hydrate(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_wt-hydrate"))
+    /// Run `flashwt <args>` inside the fixture repository with isolated `WT_STORE`.
+    pub fn flashwt(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_flashwt"))
             .args(args)
             .env("WT_STORE", self.store_path())
             .current_dir(&self.repo)
             .output()
-            .expect("run wt-hydrate binary")
+            .expect("run flashwt binary")
+    }
+
+    /// Alias for [`Self::flashwt`].
+    pub fn wt_hydrate(&self, args: &[&str]) -> Output {
+        self.flashwt(args)
     }
 
     /// Run `wt <args>` with `WT_STORE` pointed at an isolated store,

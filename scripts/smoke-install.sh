@@ -113,14 +113,14 @@ formula_for "$OLD_VERSION" >"$TAP/Formula/wt.rb"
 brew uninstall --ignore-dependencies wt >/dev/null 2>&1 || true
 brew install local/smoke/wt
 GOT=$("$(brew --prefix)/bin/wt" --version)
-[ "$GOT" = "wt $OLD_VERSION" ] || [ "$GOT" = "wt-hydrate $OLD_VERSION" ] ||
+[ "$GOT" = "flashwt $OLD_VERSION" ] || [ "$GOT" = "wt $OLD_VERSION" ] || [ "$GOT" = "wt-hydrate $OLD_VERSION" ] ||
   { echo "smoke: brew install produced '$GOT'" >&2; exit 1; }
 echo "ok: brew installed wt $OLD_VERSION"
 
 formula_for "$VERSION" >"$TAP/Formula/wt.rb"
 brew upgrade wt
 GOT=$("$(brew --prefix)/bin/wt" --version)
-[ "$GOT" = "wt $VERSION" ] || [ "$GOT" = "wt-hydrate $VERSION" ] ||
+[ "$GOT" = "flashwt $VERSION" ] || [ "$GOT" = "wt $VERSION" ] || [ "$GOT" = "wt-hydrate $VERSION" ] ||
   { echo "smoke: brew upgrade produced '$GOT'" >&2; exit 1; }
 echo "ok: brew upgraded wt to $VERSION"
 
