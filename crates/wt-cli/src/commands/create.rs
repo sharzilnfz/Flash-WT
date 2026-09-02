@@ -9,21 +9,11 @@ use crate::config::RunConfig;
 use crate::envelope::{CreateData, Diagnostic};
 use crate::error::{Error, Result};
 use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
-use crate::manifest::{self, LoadedPatterns, load_patterns};
+use crate::hydration_filter::{self, LoadedPatterns, load_patterns};
 use crate::output::{HumanBytes, HumanCount};
 use crate::signal;
 use crate::timing::StageTimings;
 use crate::workspace::WorkspaceEngine;
-
-pub fn run(
-    name: &str,
-    base: Option<&str>,
-    manifest: Option<&Path>,
-    dir: Option<&Path>,
-    cfg: &RunConfig,
-) -> Result<(CreateData, Vec<Diagnostic>)> {
-    create(name, base, manifest, dir, cfg)
-}
 
 /// RAII guard that rolls back a newly created worktree+branch if
 /// hydration fails. Defuse on success. Drop is a safety net for
@@ -61,7 +51,7 @@ impl Drop for CreateGuard {
     }
 }
 
-fn create(
+pub fn run(
     name: &str,
     base: Option<&str>,
     manifest: Option<&Path>,
@@ -120,7 +110,7 @@ fn create(
                     println!(
                         "no .wtinclude in {}; using defaults ({})",
                         root.display(),
-                        manifest::DEFAULT_PATTERNS.join(" ")
+                        hydration_filter::DEFAULT_PATTERNS.join(" ")
                     );
                 }
                 patterns

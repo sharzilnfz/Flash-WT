@@ -99,7 +99,7 @@ fn wt_new_json_emits_valid_ndjson_envelope() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let val: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON envelope");
-    assert_eq!(val["command"], "new");
+    assert_eq!(val["command"], "create");
     assert_eq!(val["status"], "ok");
     assert_eq!(val["data"]["branch"], "feat-json");
     assert_eq!(val["data"]["files_hydrated"], 1);
@@ -113,7 +113,7 @@ fn wt_isolate_aliases_scratch_worktree_execution() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let val: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON envelope");
-    assert_eq!(val["command"], "isolate");
+    assert_eq!(val["command"], "scratch");
     assert_eq!(val["status"], "ok");
     assert_eq!(val["data"]["command"], "echo isolate-ok");
     assert_eq!(val["data"]["cleaned_up"], true);

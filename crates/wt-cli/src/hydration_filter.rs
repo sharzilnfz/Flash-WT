@@ -84,81 +84,6 @@ pub fn is_volatile_cache(rel_path: &str) -> bool {
     false
 }
 
-/// A filter that determines which directories should be hydrated into a worktree
-/// based on configured inclusion and exclusion patterns.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HydrationFilter {
-    patterns: Vec<String>,
-}
-
-impl HydrationFilter {
-    /// Construct a new hydration filter from pattern lines.
-    pub fn new(patterns: Vec<String>) -> Self {
-        Self { patterns }
-    }
-
-    /// Access the underlying pattern rules.
-    pub fn patterns(&self) -> &[String] {
-        &self.patterns
-    }
-
-    /// Consume the filter and return its patterns.
-    pub fn into_patterns(self) -> Vec<String> {
-        self.patterns
-    }
-
-    /// Returns the default starter `.wtinclude` manifest template.
-    pub fn default_starter() -> &'static str {
-        STARTER_MANIFEST
-    }
-
-    /// Returns the default patterns used when no manifest is present.
-    pub fn default_patterns() -> &'static [&'static str] {
-        DEFAULT_PATTERNS
-    }
-
-    /// Returns `true` if `path` is excluded by volatile compiler cache rules
-    /// or by an explicit negative pattern (e.g. `!node_modules/.vite/`).
-    pub fn is_excluded(&self, path: &str) -> bool {
-        if is_volatile_cache(path) {
-            return true;
-        }
-        let p = Path::new(path);
-        self.patterns
-            .iter()
-            .filter(|pat| pat.starts_with('!'))
-            .any(|pat| pattern_matches(pat.trim_start_matches('!'), p))
-    }
-
-    /// Returns `true` if `path` should be hydrated according to this filter:
-    /// it must match at least one positive pattern and NOT be excluded.
-    pub fn should_hydrate(&self, path: &str) -> bool {
-        if self.is_excluded(path) {
-            return false;
-        }
-        let p = Path::new(path);
-        self.patterns
-            .iter()
-            .filter(|pat| !pat.starts_with('!'))
-            .any(|pat| pattern_matches(pat, p))
-    }
-
-    /// Load patterns from an explicit path or `<root>/.wtinclude`.
-    /// If no explicit manifest is given and `.wtinclude` does not exist,
-    /// returns a filter with in-memory default patterns (does not write to disk).
-    pub fn load_or_create(manifest_path: Option<&Path>, root: &Path) -> Result<Self> {
-        match load_patterns(root, manifest_path)? {
-            LoadedPatterns::Loaded { patterns, .. } => Ok(Self::new(patterns)),
-            LoadedPatterns::Defaults { patterns } => Ok(Self::new(patterns)),
-        }
-    }
-
-    /// Collect all matching directory paths under `root` according to this filter.
-    pub fn collect_matched_directories(&self, root: &Path) -> Result<Vec<PathBuf>> {
-        collect_matches(root, &self.patterns)
-    }
-}
-
 /// What [`load_patterns`] decided. Splitting the decision from the
 /// printing keeps this module side-effect-free above the filesystem:
 /// the caller owns user-visible output.
@@ -188,11 +113,6 @@ pub fn parse_patterns(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Alias for [`parse_patterns`].
-pub fn parse(text: &str) -> Vec<String> {
-    parse_patterns(text)
-}
-
 /// Gitignore-style match of one pattern against a repo-relative
 /// directory path. Patterns without an interior `/` match a single
 /// path segment at any depth; anchored patterns must match from the
@@ -214,11 +134,6 @@ pub fn pattern_matches(pattern: &str, rel: &Path) -> bool {
     } else {
         path_segs.iter().any(|seg| segment_match(pat, seg))
     }
-}
-
-/// Alias for [`pattern_matches`].
-pub fn matches(pattern: &str, rel: &Path) -> bool {
-    pattern_matches(pattern, rel)
 }
 
 fn glob_match(pat: &[&str], path: &[&str]) -> bool {
@@ -301,11 +216,6 @@ pub fn collect_matches(root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>>
         })
         .flatten()
         .collect())
-}
-
-/// Alias for [`collect_matches`].
-pub fn collect_matched_directories(root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>> {
-    collect_matches(root, patterns)
 }
 
 /// Decide which patterns hydrate from: the manifest at `manifest`
@@ -411,7 +321,6 @@ mod tests {
     fn parse_skips_comments_blanks_and_preserves_negations() {
         let text = "# comment\n\nheavy/\n!keep/\n   \n  target/  \n";
         assert_eq!(parse_patterns(text), vec!["heavy/", "!keep/", "target/"]);
-        assert_eq!(parse(text), vec!["heavy/", "!keep/", "target/"]);
     }
 
     #[test]
@@ -505,27 +414,5 @@ mod tests {
         assert!(!is_volatile_cache("node_modules/vite/bin/vite.js"));
         assert!(!is_volatile_cache(".next/server/pages/index.js"));
         assert!(!is_volatile_cache(".venv/bin/python"));
-    }
-
-    #[test]
-    fn test_hydration_filter_methods() {
-        let filter = HydrationFilter::new(vec![
-            "node_modules/".to_string(),
-            "!node_modules/.vite/".to_string(),
-            "target/".to_string(),
-        ]);
-
-        assert!(filter.should_hydrate("node_modules/react/index.js"));
-        assert!(filter.should_hydrate("target/debug/lib.rlib"));
-        assert!(!filter.should_hydrate("node_modules/.vite/deps/chunk.js"));
-        assert!(!filter.should_hydrate("target/debug/incremental/cache.db"));
-        assert!(!filter.should_hydrate("other/path.txt"));
-
-        assert!(filter.is_excluded("node_modules/.vite/deps/chunk.js"));
-        assert!(filter.is_excluded("target/debug/incremental/cache.db"));
-        assert!(!filter.is_excluded("node_modules/react/index.js"));
-
-        assert_eq!(HydrationFilter::default_starter(), STARTER_MANIFEST);
-        assert_eq!(HydrationFilter::default_patterns(), DEFAULT_PATTERNS);
     }
 }

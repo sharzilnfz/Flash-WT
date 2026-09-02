@@ -142,7 +142,7 @@ fn isolate_command_alias_works_identically() {
     assert_eq!(lines.len(), 1);
 
     let json: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(json["command"], "isolate");
+    assert_eq!(json["command"], "scratch");
     assert_eq!(json["status"], "ok");
     assert_eq!(json["data"]["command"], "test -d heavy");
     assert_eq!(json["data"]["exit_code"], 0);

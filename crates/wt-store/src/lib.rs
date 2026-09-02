@@ -74,6 +74,13 @@ impl fmt::Display for ContentId {
 }
 
 impl ContentId {
+    /// Compute the content id for raw byte content.
+    #[must_use]
+    pub fn for_bytes(content: &[u8]) -> ContentId {
+        use sha2::{Digest, Sha256};
+        ContentId(Sha256::digest(content).into())
+    }
+
     /// Parse the lowercase hex form produced by [`Display`]. Returns
     /// `None` for anything that is not exactly 64 hex digits.
     #[must_use]

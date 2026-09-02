@@ -10,7 +10,7 @@ use wt_store::{ContentId, DiskStore, IngestOptions};
 use crate::config::{RunConfig, StrategyPolicy};
 use crate::envelope::Diagnostic;
 use crate::error::{Error, Result};
-use crate::manifest::{collect_matches, pattern_matches};
+use crate::hydration_filter::{collect_matches, pattern_matches};
 use crate::timing::StageTimings;
 use crate::workspace;
 

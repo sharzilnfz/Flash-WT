@@ -7,20 +7,11 @@ use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, HydrateData};
 use crate::error::{Error, Result};
 use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
-use crate::manifest::{self, LoadedPatterns, load_patterns};
+use crate::hydration_filter::{self, LoadedPatterns, load_patterns};
 use crate::output::{HumanBytes, HumanCount};
 use crate::workspace::{self, WorkspaceEngine};
 
 pub fn run(
-    path: &Path,
-    source: Option<&Path>,
-    manifest: Option<&Path>,
-    cfg: &RunConfig,
-) -> Result<(HydrateData, Vec<Diagnostic>)> {
-    hydrate(path, source, manifest, cfg)
-}
-
-fn hydrate(
     path: &Path,
     source: Option<&Path>,
     manifest: Option<&Path>,
@@ -75,7 +66,7 @@ fn hydrate(
                 println!(
                     "no .wtinclude in {}; using defaults ({})",
                     source_root.display(),
-                    manifest::DEFAULT_PATTERNS.join(" ")
+                    hydration_filter::DEFAULT_PATTERNS.join(" ")
                 );
             }
             patterns

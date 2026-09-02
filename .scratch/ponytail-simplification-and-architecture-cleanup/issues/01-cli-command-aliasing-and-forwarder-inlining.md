@@ -1,6 +1,6 @@
 # Ticket 01: CLI Command Aliasing & Forwarder Inlining
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Description
 

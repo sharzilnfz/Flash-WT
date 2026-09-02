@@ -118,7 +118,7 @@ fn test_drive_alias_works_identically_with_json_envelope() {
     assert_eq!(lines.len(), 1);
 
     let json: serde_json::Value = serde_json::from_str(lines[0]).expect("parse json");
-    assert_eq!(json["command"], "test-drive");
+    assert_eq!(json["command"], "demo");
     assert_eq!(json["status"], "ok");
 
     let data = &json["data"];

@@ -31,22 +31,6 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum WtCommand {
-    /// Create a worktree for NAME and hydrate heavy directories (modern primary verb).
-    New {
-        /// Branch name; also names the new worktree directory.
-        name: String,
-        /// Base branch or ref to create the worktree from (records symbolic tracking).
-        #[arg(long)]
-        base: Option<String>,
-        /// Manifest listing heavy directories (gitignore syntax).
-        /// Defaults to `.wtinclude` in the repository root.
-        #[arg(long)]
-        manifest: Option<PathBuf>,
-        /// Destination for the new worktree. Defaults to a sibling of
-        /// the current repository named `<repo>-<name>`.
-        #[arg(long)]
-        dir: Option<PathBuf>,
-    },
     /// Hydrate heavy directories into an existing directory or worktree.
     Hydrate {
         /// Destination directory or worktree to hydrate.
@@ -89,7 +73,7 @@ pub enum WtCommand {
     },
     /// Create a worktree for NAME (used as the git branch name) and
     /// hydrate the heavy directories listed in the .wtinclude manifest.
-    #[command(long_about = "Create a worktree for NAME (used as the git branch \
+    #[command(alias = "new", long_about = "Create a worktree for NAME (used as the git branch \
 name) and hydrate the heavy directories listed in the .wtinclude manifest.
 
 Hydrated files are private, fully writable copy-on-write clones of store
@@ -172,24 +156,8 @@ snapshot hits entirely and rebuilds from freshly hashed blobs.")]
     },
     /// Create an ephemeral scratch worktree with lease persistence.
     /// Optionally execute a command inside the sandbox and clean up on exit.
+    #[command(alias = "isolate")]
     Scratch {
-        /// Optional branch/worktree name (defaults to auto-generated scratch-<id>).
-        name: Option<String>,
-        /// Manifest listing heavy directories (.wtinclude).
-        #[arg(long)]
-        manifest: Option<PathBuf>,
-        /// Destination for the worktree.
-        #[arg(long)]
-        dir: Option<PathBuf>,
-        /// Command to execute inside the sandbox.
-        #[arg(long)]
-        run: Option<String>,
-        /// Lease time-to-live duration (e.g. 15m, 1h, 24h).
-        #[arg(long, value_parser = parse_age_value)]
-        ttl: Option<Duration>,
-    },
-    /// Alias for `wt scratch` for isolated agent execution.
-    Isolate {
         /// Optional branch/worktree name (defaults to auto-generated scratch-<id>).
         name: Option<String>,
         /// Manifest listing heavy directories (.wtinclude).
@@ -211,9 +179,8 @@ snapshot hits entirely and rebuilds from freshly hashed blobs.")]
     /// Run an end-to-end zero-setup demonstration and benchmark:
     /// creates a synthetic 10,000-file project fixture, measures baseline copy
     /// vs. wt CoW hydration, validates mutation isolation, and cleans up.
+    #[command(alias = "test-drive")]
     Demo,
-    /// Alias for `wt demo`.
-    TestDrive,
     /// Generate a shell completion script for the given shell.
     /// Source the output (or drop it in a completion directory) to
     /// enable tab-completion of subcommands and flags.
@@ -228,7 +195,6 @@ impl WtCommand {
     /// Return the canonical command name for JSON envelopes and logs.
     pub fn name(&self) -> &'static str {
         match self {
-            WtCommand::New { .. } => "new",
             WtCommand::Hydrate { .. } => "hydrate",
             WtCommand::Init { .. } => "init",
             WtCommand::Clean { .. } => "clean",
@@ -238,10 +204,8 @@ impl WtCommand {
             WtCommand::Scrub { .. } => "scrub",
             WtCommand::Store { .. } => "store",
             WtCommand::Scratch { .. } => "scratch",
-            WtCommand::Isolate { .. } => "isolate",
             WtCommand::List => "list",
             WtCommand::Demo => "demo",
-            WtCommand::TestDrive => "test-drive",
             WtCommand::Completions { .. } => "completions",
         }
     }

@@ -5,18 +5,10 @@ use std::path::Path;
 use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, InitData};
 use crate::error::{Error, Result};
-use crate::manifest::write_starter_manifest;
+use crate::hydration_filter::write_starter_manifest;
 use crate::workspace::WorkspaceEngine;
 
 pub fn run(
-    dir: Option<&Path>,
-    force: bool,
-    cfg: &RunConfig,
-) -> Result<(InitData, Vec<Diagnostic>)> {
-    init(dir, force, cfg)
-}
-
-fn init(
     dir: Option<&Path>,
     force: bool,
     cfg: &RunConfig,

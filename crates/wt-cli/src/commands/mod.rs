@@ -57,13 +57,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
             }
             Ok(None)
         }
-        WtCommand::New {
-            name,
-            base,
-            manifest,
-            dir,
-        }
-        | WtCommand::Create {
+        WtCommand::Create {
             name,
             base,
             manifest,
@@ -95,7 +89,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
             let (data, diags) = clean::run(name.as_deref(), dir.as_deref(), all, force, age, cfg)?;
             let has_errors = diags
                 .iter()
-                .any(|d| d.severity == crate::envelope::Severity::Error);
+                .any(|d| d.level.as_deref() == Some("error"));
             if cfg.json {
                 let env = Envelope::ok(command_name, data, diags);
                 println!(
@@ -164,13 +158,6 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
             dir,
             run: run_cmd,
             ttl,
-        }
-        | WtCommand::Isolate {
-            name,
-            manifest,
-            dir,
-            run: run_cmd,
-            ttl,
         } => {
             let (data, diags, exit_code) = scratch::run(
                 name.as_deref(),
@@ -189,7 +176,7 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
             }
             Ok(exit_code)
         }
-        WtCommand::Demo | WtCommand::TestDrive => {
+        WtCommand::Demo => {
             let (data, diags) = demo::run(cfg)?;
             if cfg.json {
                 let env = Envelope::ok(command_name, data, diags);

@@ -20,18 +20,20 @@ use crate::workspace;
 
 /// Generate a unique 8-character hex id for scratch worktrees.
 fn generate_scratch_id() -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
-    hasher.update(now.as_nanos().to_le_bytes());
-    hasher.update(std::process::id().to_le_bytes());
+    now.as_nanos().hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    hasher.update(count.to_le_bytes());
-    let res = hasher.finalize();
-    format!("{:02x}{:02x}{:02x}{:02x}", res[0], res[1], res[2], res[3])
+    count.hash(&mut hasher);
+    let hash = hasher.finish();
+    format!("{:08x}", hash as u32)
 }
 
 /// RAII cleanup guard for ephemeral worktrees.

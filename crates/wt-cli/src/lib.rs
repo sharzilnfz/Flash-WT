@@ -11,7 +11,6 @@ pub mod error;
 pub mod gc;
 pub mod hydrate;
 pub mod hydration_filter;
-pub mod manifest;
 pub mod output;
 pub mod signal;
 pub mod timing;
