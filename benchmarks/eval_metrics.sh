@@ -4,6 +4,63 @@
 
 set -euo pipefail
 
+# Millisecond-resolution clock without compile step.
+now() {
+    perl -MTime::HiRes=time -e 'printf "%.6f\n", time'
+}
+
+# Elapsed seconds between two timestamps (3 decimal places).
+elapsed() { # start end -> seconds, 3 decimals
+    awk -v a="$1" -v b="$2" 'BEGIN { printf "%.3f", b - a }'
+}
+
+# Elapsed milliseconds between two timestamps (integer ms).
+elapsed_ms() { # start end -> ms integer
+    awk -v a="$1" -v b="$2" 'BEGIN { printf "%.0f", (b - a) * 1000 }'
+}
+
+# Median of numeric arguments on argv formatted to 3 decimal places.
+median() { # numbers on argv -> median, 3 decimals
+    printf '%s\n' "$@" | sort -g | awk '
+        { v[NR] = $1 }
+        END {
+            if (NR % 2) { printf "%.3f", v[(NR + 1) / 2] }
+            else { printf "%.3f", (v[NR / 2] + v[NR / 2 + 1]) / 2 }
+        }'
+}
+
+# Format median or "-" if string/list is empty.
+median_or_dash() { # possibly-empty number string -> median or "-"
+    # shellcheck disable=SC2086
+    set -- $1
+    if [ "$#" -eq 0 ]; then
+        echo "-"
+    else
+        median "$@"
+    fi
+}
+
+# Cell median alias for sample lists.
+cell_median() {
+    # shellcheck disable=SC2086
+    set -- $1
+    median "$@"
+}
+
+# First N lines of stdin without closing the pipe early.
+first_lines() { # n
+    awk -v n="$1" 'NR <= n { buf = buf (NR > 1 ? "\n" : "") $0 } END { if (NR) printf "%s\n", buf }'
+}
+
+# Unified SHA256 checksum calculation across Darwin (shasum) and Linux (sha256sum).
+sha256_hash() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
 # Compute comprehensive statistical distributions (count, min, max, mean, median, p95, stdev, iqr).
 # Input: numbers on stdin or argv. Output: JSON fragment string.
 stats_to_json() {

@@ -11,6 +11,8 @@ REPO_ROOT="$(cd "$BENCH_DIR/.." && pwd)"
 . "$BENCH_DIR/fixture.sh"
 # shellcheck disable=SC1091
 . "$BENCH_DIR/fixture_matrix.sh"
+# shellcheck disable=SC1091
+. "$BENCH_DIR/eval_metrics.sh"
 
 run_chaos_test() {
     local raw_bin=${1:-"$REPO_ROOT/target/release/wt"}
@@ -70,11 +72,7 @@ run_chaos_test() {
                 prefix=$(basename "$(dirname "$obj")")
                 fname=$(basename "$obj")
                 expected_hash="${prefix}${fname}"
-                if [ "$(uname -s)" = "Darwin" ]; then
-                    actual_hash=$(shasum -a 256 "$obj" | awk '{print $1}')
-                else
-                    actual_hash=$(sha256sum "$obj" | awk '{print $1}')
-                fi
+                actual_hash=$(sha256_hash "$obj")
                 if [ "$expected_hash" != "$actual_hash" ]; then
                     echo "chaos: corrupt blob found in store: $obj ($expected_hash vs $actual_hash)" >&2
                     rm -rf "$work"

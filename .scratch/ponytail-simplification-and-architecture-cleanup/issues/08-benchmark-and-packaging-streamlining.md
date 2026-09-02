@@ -1,6 +1,6 @@
 # Ticket 08: Benchmark and Packaging Streamlining
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Description
 

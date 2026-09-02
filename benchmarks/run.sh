@@ -58,6 +58,10 @@ BENCH_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$BENCH_DIR/.." && pwd)"
 # shellcheck disable=SC1091  # sourced at runtime, same directory
 . "$BENCH_DIR/fixture.sh"
+# shellcheck disable=SC1091
+. "$BENCH_DIR/eval_metrics.sh"
+# shellcheck disable=SC1091
+. "$BENCH_DIR/eval_storage.sh"
 
 FILES_DEFAULT=4000
 RUNS_DEFAULT=3
@@ -70,15 +74,6 @@ d_files=$D_FILES_DEFAULT
 quick=0
 verify=0
 scenarios="a,b,c,d"
-
-# First N lines of stdin without closing the pipe early. `head -n`
-# makes the upstream producer die of SIGPIPE once its output exceeds
-# the pipe buffer, and `set -o pipefail` turns that into a spurious
-# script failure — which is exactly what happened at 40k-file scale.
-# Consuming the whole input costs nothing that matters here.
-first_lines() { # n
-    awk -v n="$1" 'NR <= n { buf = buf (NR > 1 ? "\n" : "") $0 } END { if (NR) printf "%s\n", buf }'
-}
 
 die() {
     echo "benchmarks: $*" >&2
@@ -148,33 +143,6 @@ if [ -z "$BIN" ]; then
 fi
 [ -x "$BIN" ] || die "binary not runnable at $BIN"
 
-# Millisecond-resolution clocks without a compile step: perl ships
-# with both macOS and Linux.
-now() {
-    perl -MTime::HiRes=time -e 'printf "%.6f\n", time'
-}
-elapsed() { # start end -> seconds, 3 decimals
-    awk -v a="$1" -v b="$2" 'BEGIN { printf "%.3f", b - a }'
-}
-
-median() { # numbers on argv -> median, 3 decimals
-    printf '%s\n' "$@" | sort -g | awk '
-        { v[NR] = $1 }
-        END {
-            if (NR % 2) { printf "%.3f", v[(NR + 1) / 2] }
-            else { printf "%.3f", (v[NR / 2] + v[NR / 2 + 1]) / 2 }
-        }'
-}
-
-median_or_dash() { # possibly-empty number string -> median or "-"
-    # shellcheck disable=SC2086  # deliberate word split over the samples
-    set -- $1
-    if [ "$#" -eq 0 ]; then
-        echo "-"
-    else
-        median "$@"
-    fi
-}
 
 # Direct-CoW scenario mechanism (ticket 01). Exactly one command per
 # platform, chosen up front; no fallback chains that could silently
@@ -213,65 +181,14 @@ esac
 # shared from private storage needs volume-level free-space deltas,
 # which no per-tree syscall exposes. Both numbers are reported raw;
 # the signal lives in comparing them within and across scenarios.
-disk_usage() { # tree -> "<apparent_bytes> <allocated_bytes>" on stdout
-    local stat_args
-    case "$(uname -s)" in
-        Darwin) stat_args=(-f '%z %b') ;;
-        *) stat_args=(-c '%s %b') ;;
-    esac
-    find "$1" -type f -exec stat "${stat_args[@]}" {} + | awk '
-        { app += $1; alloc += $2 * 512 }
-        END { printf "%.0f %.0f\n", app, alloc }'
-}
-
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/wt-bench.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 # ---------------------------------------------------------------------------
-# Verification
+# Verification: deep-verify regular files, directory/file modes, and symlinks.
 # ---------------------------------------------------------------------------
-
-# Which runner is verifying, set fresh before each timed call: baseline,
-# cow, or wt. Only wt runs get the documented tolerance below.
-run_kind=wt
-
-# Fidelity-gap counters for the suite currently executing, reported in
-# its results section. Reset per suite.
-gap_links=0
-gap_modes=0
-gap_link_example=""
-gap_mode_example=""
-
-# After each timed run the hydrated or installed tree must match the
-# source fixture — a fast benchmark that copies wrong is worthless,
-# and unattended CI has no human to eyeball it.
-#
-# Without --verify: file-count check only (the historical smoke check).
-#
-# With --verify, three axes, all measured with the helpers from
-# fixture.sh:
-#
-#   1. Regular-file bytes and presence, via `diff -rq`. Also catches
-#      missing or unexpected empty directories ("Only in" lines).
-#   2. Directory/file modes, via the sorted stat listing. Plain diff
-#      cannot see an exec-bit flip, so this axis exists separately.
-#   3. Symlink targets, via the sorted readlink listing.
-#
-# baseline and cow runs must match on all three axes; any mismatch is
-# fatal. wt runs are held to the same standard today: ingest records
-# symlinks and per-file/directory modes, so hydration restores them
-# exactly (see crates/wt-cli/src/hydrate.rs). The tolerated-gap
-# accounting below survives only as a LEGACY FALLBACK for trees
-# hydrated by binaries or stores predating that fidelity work; if it
-# fires on a current build, something regressed. Anything beyond those
-# two axes — wrong bytes, missing or extra regular files, missing
-# empty directories, unexpected symlinks — fails a wt run either way.
 verify_tree() { # src dest
     local src=$1 dest=$2
-    # Per-run symlink-gap tally: the suite-level counter accumulates,
-    # but the symlink-pass consistency check below must compare within
-    # a single run.
-    local run_links=0
     if [ "$verify" -eq 0 ]; then
         local a b
         a=$(count_files "$src")
@@ -281,66 +198,9 @@ verify_tree() { # src dest
         return
     fi
 
-    local raw line dir name miss
-    raw=$(diff -rq "$src" "$dest") || true
-    if [ -n "$raw" ]; then
-        while IFS= read -r line; do
-            case $line in
-                "Only in "*": "*)
-                    dir=${line#Only in }
-                    dir=${dir%%: *}
-                    name=${line##*: }
-                    miss="$dir/$name"
-                    # Tolerated only when the missing entry is a
-                    # symlink that lived on the SOURCE side and the
-                    # run was wt's: wt ingest skips symlinks.
-                    if [ "$run_kind" = wt ] &&
-                        [ "${miss#"$src"/}" != "$miss" ] &&
-                        [ -L "$miss" ]; then
-                        run_links=$((run_links + 1))
-                        [ -z "$gap_link_example" ] &&
-                            gap_link_example=${miss#"$src"/}
-                    else
-                        die "tree under $dest differs from source $src: $line"
-                    fi
-                    ;;
-                *)
-                    die "tree under $dest differs from source $src: $line"
-                    ;;
-            esac
-        done <<<"$raw"
-    fi
-
-    # Modes: exclude symlinks (stat through a dangling or replaced link
-    # is meaningless; links are covered by the next pass).
-    local mdiff mcount
-    mdiff=$(diff <(list_modes "$src") <(list_modes "$dest")) || true
-    if [ -n "$mdiff" ]; then
-        mcount=$(printf '%s\n' "$mdiff" | grep -c '^<') || true
-        if [ "$run_kind" = wt ] && [ "$mcount" -eq "$(printf '%s\n' "$mdiff" | grep -c '^>')" ]; then
-            gap_modes=$((gap_modes + mcount))
-            if [ -z "$gap_mode_example" ]; then
-                gap_mode_example=$(printf '%s\n' "$mdiff" | sed -n 's/^< //p' | first_lines 1)
-            fi
-        else
-            die "mode mismatch under $dest vs source $src: $(printf '%s\n' "$mdiff" | first_lines 3 | tr '\n' '; ')"
-        fi
-    fi
-
-    # Symlink targets: any surviving difference must be src-side
-    # absence (tallied in run_links above). A changed target or a
-    # symlink appearing only in the destination is fatal everywhere.
-    local ldiff lcount rcount
-    ldiff=$(diff <(list_symlinks "$src") <(list_symlinks "$dest")) || true
-    if [ -n "$ldiff" ]; then
-        lcount=$(printf '%s\n' "$ldiff" | grep -c '^<') || true
-        rcount=$(printf '%s\n' "$ldiff" | grep -c '^>') || true
-        if [ "$rcount" -ne 0 ] || [ "$lcount" -ne "$run_links" ]; then
-            die "symlink mismatch under $dest vs source $src: $(printf '%s\n' "$ldiff" | first_lines 3 | tr '\n' '; ')"
-        fi
-    fi
-
-    gap_links=$((gap_links + run_links))
+    diff -rq "$src" "$dest" >/dev/null || die "tree under $dest differs from source $src"
+    diff <(list_modes "$src") <(list_modes "$dest") >/dev/null || die "mode mismatch under $dest vs source $src"
+    diff <(list_symlinks "$src") <(list_symlinks "$dest") >/dev/null || die "symlink mismatch under $dest vs source $src"
 }
 
 drop_worktree() {
@@ -362,7 +222,6 @@ baseline_run() { # name
     git -C "$SRC" worktree add --detach -q "$dest" HEAD
     "$gen_fn" "$dest/node_modules" "$suite_files"
     t1=$(now)
-    run_kind=baseline
     verify_tree "$SRC/node_modules" "$dest/node_modules"
     read -r run_app run_allocated <<<"$(disk_usage "$dest/node_modules")"
     drop_worktree "$dest"
@@ -389,7 +248,6 @@ wt_run() { # name store phase
     }
     t1=$(now)
     record_stages "$phase" "$WORK/$name.log"
-    run_kind=wt
     verify_tree "$SRC/node_modules" "$dest/node_modules"
     read -r run_app run_allocated <<<"$(disk_usage "$dest/node_modules")"
     drop_worktree "$dest"
@@ -409,7 +267,6 @@ cow_run() { # name
     "${COW_CP[@]}" "$SRC/node_modules" "$dest/node_modules" ||
         die "direct-CoW clone failed into $dest"
     t1=$(now)
-    run_kind=cow
     verify_tree "$SRC/node_modules" "$dest/node_modules"
     read -r run_app run_allocated <<<"$(disk_usage "$dest/node_modules")"
     rm -rf "$dest"
@@ -418,10 +275,8 @@ cow_run() { # name
 
 # ---------------------------------------------------------------------------
 # Stage-timing capture. Implements the parsing side of the contract
-# documented in the header: scan a wt create log for lines shaped
-# exactly `wt-stage <name>=<milliseconds>`, ignore everything else,
-# and bucket the milliseconds by phase (cold/warm). Eight buckets,
-# plain globals: macOS ships bash 3.2, so no associative arrays.
+# documented in the header: scan a wt create log using parse_stage_log
+# and bucket the milliseconds by phase (cold/warm).
 # ---------------------------------------------------------------------------
 stage_cold_ingest=""
 stage_cold_references=""
@@ -433,27 +288,20 @@ stage_warm_materialize=""
 stage_warm_total=""
 
 record_stages() { # phase logfile
-    phase=$1
-    while IFS= read -r line; do
-        [ "${line#wt-stage }" != "$line" ] || continue
-        kv=${line#wt-stage }
-        stage_name=${kv%%=*}
-        ms=${kv#*=}
-        case "$stage_name" in
-            ingest | references | materialize | total) ;;
-            *) continue ;;
+    local phase=$1
+    local k v
+    while IFS='=' read -r k v; do
+        case "$phase:$k" in
+            cold:ingest) stage_cold_ingest="$stage_cold_ingest $v" ;;
+            cold:references) stage_cold_references="$stage_cold_references $v" ;;
+            cold:materialize) stage_cold_materialize="$stage_cold_materialize $v" ;;
+            cold:total) stage_cold_total="$stage_cold_total $v" ;;
+            warm:ingest) stage_warm_ingest="$stage_warm_ingest $v" ;;
+            warm:references) stage_warm_references="$stage_warm_references $v" ;;
+            warm:materialize) stage_warm_materialize="$stage_warm_materialize $v" ;;
+            warm:total) stage_warm_total="$stage_warm_total $v" ;;
         esac
-        case "$phase:$stage_name" in
-            cold:ingest) stage_cold_ingest="$stage_cold_ingest $ms" ;;
-            cold:references) stage_cold_references="$stage_cold_references $ms" ;;
-            cold:materialize) stage_cold_materialize="$stage_cold_materialize $ms" ;;
-            cold:total) stage_cold_total="$stage_cold_total $ms" ;;
-            warm:ingest) stage_warm_ingest="$stage_warm_ingest $ms" ;;
-            warm:references) stage_warm_references="$stage_warm_references $ms" ;;
-            warm:materialize) stage_warm_materialize="$stage_warm_materialize $ms" ;;
-            warm:total) stage_warm_total="$stage_warm_total $ms" ;;
-        esac
-    done <"$2"
+    done < <(parse_stage_log "$2")
 }
 
 stage_row() { # phase label -> one markdown stage-median row
@@ -486,10 +334,6 @@ run_suite() { # label generator_function file_count
     esac
     suite_pkgs=$((suite_files / per_pkg))
 
-    gap_links=0
-    gap_modes=0
-    gap_link_example=""
-    gap_mode_example=""
     stage_cold_ingest=""
     stage_cold_references=""
     stage_cold_materialize=""
@@ -654,25 +498,6 @@ run_suite() { # label generator_function file_count
     echo "- direct cow:$cow_times"
     echo "- wt cold:$cold_times"
     echo "- wt warm:$warm_times"
-
-    if [ "$gap_links" -gt 0 ] || [ "$gap_modes" -gt 0 ]; then
-        echo
-        echo "### wt fidelity tolerances surfaced by --verify on this fixture (legacy fallback)"
-        echo
-        echo "Current wt ingest records and restores symlinks and modes, so these"
-        echo "tolerances should NOT fire on a modern binary and store. They are kept"
-        echo "as a legacy fallback for trees hydrated by pre-fidelity binaries or"
-        echo "stores; if they appear on a current build, treat it as a regression."
-        echo
-        echo "- $gap_links symlink(s) absent from wt-hydrated trees (first: \`$gap_link_example\`)."
-        echo "  Legacy fallback only: current wt ingest records symlinks and recreates"
-        echo "  them verbatim; baseline and direct-CoW clones are held to exact parity."
-        echo "- $gap_modes file(s) with different modes (first: \`$gap_mode_example\`)."
-        echo "  Legacy fallback only: current wt records per-path modes (and directory"
-        echo "  modes) at ingest and restores them after placement."
-        echo "Everything else — bytes, file presence, empty directories — matched exactly,"
-        echo "and any deviation there fails the run."
-    fi
 
     rm -rf "$SRC"
 }

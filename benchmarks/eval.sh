@@ -161,13 +161,6 @@ echo "Baseline binary:  $BASE_BIN"
 echo "Scenarios:        $SCENARIOS"
 echo "Runs:             $RUNS (verify=$VERIFY, threshold=${THRESHOLD_PCT}%)"
 
-# Millisecond high-res clock
-now() {
-    perl -MTime::HiRes=time -e 'printf "%.6f\n", time'
-}
-elapsed_ms() { # start end -> ms integer
-    awk -v a="$1" -v b="$2" 'BEGIN { printf "%.0f", (b - a) * 1000 }'
-}
 
 # Verify tree helper
 eval_verify_tree() { # src dest

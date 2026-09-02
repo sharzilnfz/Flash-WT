@@ -51,6 +51,8 @@ BENCH_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$BENCH_DIR/.." && pwd)"
 # shellcheck disable=SC1091  # sourced at runtime, same directory
 . "$BENCH_DIR/fixture.sh"
+# shellcheck disable=SC1091
+. "$BENCH_DIR/eval_metrics.sh"
 
 die() {
     echo "benchmarks: $*" >&2
@@ -84,28 +86,6 @@ if [ ! -x "$BIN" ]; then
     BIN="$REPO_ROOT/target/release/wt"
 fi
 [ -x "$BIN" ] || die "binary not runnable at $BIN"
-
-# Millisecond-resolution clocks without a compile step: perl ships
-# with both macOS and Linux.
-now() {
-    perl -MTime::HiRes=time -e 'printf "%.6f\n", time'
-}
-elapsed() { # start end -> seconds, 3 decimals
-    awk -v a="$1" -v b="$2" 'BEGIN { printf "%.3f", b - a }'
-}
-
-median() { # numbers on argv -> median, 3 decimals
-    printf '%s\n' "$@" | sort -g | awk '
-        { v[NR] = $1 }
-        END {
-            if (NR % 2) { printf "%.3f", v[(NR + 1) / 2] }
-            else { printf "%.3f", (v[NR / 2] + v[NR / 2 + 1]) / 2 }
-        }'
-}
-
-first_lines() { # n
-    awk -v n="$1" 'NR <= n { buf = buf (NR > 1 ? "\n" : "") $0 } END { if (NR) printf "%s\n", buf }'
-}
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/wt-v2-bench.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -142,19 +122,15 @@ parse_stages() { # logfile
     st_blt="-"
     st_v2c="-"
     st_v2l="-"
-    local line kv name value
-    while IFS= read -r line; do
-        [ "${line#wt-stage }" != "$line" ] || continue
-        kv=${line#wt-stage }
-        name=${kv%%=*}
-        value=${kv#*=}
-        case $name in
-            snapshot-mode) st_mode=$value ;;
-            snapshot-build-link-train) st_blt=$value ;;
-            snapshot-v2-cloned) st_v2c=$value ;;
-            snapshot-v2-linked) st_v2l=$value ;;
+    local k v
+    while IFS='=' read -r k v; do
+        case "$k" in
+            snapshot-mode) st_mode=$v ;;
+            snapshot-build-link-train) st_blt=$v ;;
+            snapshot-v2-cloned) st_v2c=$v ;;
+            snapshot-v2-linked) st_v2l=$v ;;
         esac
-    done <"$1"
+    done < <(parse_stage_log "$1")
 }
 
 # One wt create: timed, logged, stage-parsed, verified against the
@@ -185,12 +161,6 @@ row() { # cell sample
     printf '| %s | %s | %s | %s | %s | %s | %s |\n' \
         "$1" "$2" "$run_wall" "$st_mode" "$st_blt" "$st_v2c" "$st_v2l" \
         >>"$WORK/rows.md"
-}
-
-cell_median() {
-    # shellcheck disable=SC2086  # deliberate word split over the samples
-    set -- $1
-    median "$@"
 }
 
 # Rewrite package.json in three fixed packages with sample-unique

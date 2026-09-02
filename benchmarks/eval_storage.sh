@@ -33,6 +33,11 @@ tree_disk_usage() {
         END { printf "%.0f %.0f\n", (app ? app : 0), (alloc ? alloc : 0) }'
 }
 
+# Alias for tree_disk_usage used across benchmark runners.
+disk_usage() { # tree -> "<apparent_bytes> <allocated_bytes>" on stdout
+    tree_disk_usage "$@"
+}
+
 # Format storage metrics as a JSON object.
 # Args: apparent_bytes, allocated_bytes, volume_consumed_bytes, dedup_ratio
 storage_to_json() {
