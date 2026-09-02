@@ -29,35 +29,46 @@ Files in your worktree share storage blocks with the store until modified. They 
 
 ### Measured performance (40,000 files / 800 packages fixture)
 
-Measured on macOS APFS against a clean dependency install baseline:
+Measured on macOS APFS comparing cold ingestion against whole-tree clonefile snapshots, incremental rebuilds, and standard recursive filesystem copying:
 
-| Scenario | Without wt | With wt | Speedup |
-|---|---|---|---|
-| Warm worktree creation | 11.4s (fresh install) | **1.5s** | **7.6x** |
-| Directory clone vs raw `cp -Rc` | 7.9s | **1.5s** | **5.3x** |
-| Rebuild after dependency bump (3 of 800 packages changed) | 17.8s (full rebuild) | **5.3s** | **3.4x** |
-| Rebuild after cache poisoning (.DS_Store added) | 18.0s (full rebuild) | **5.7s** | **3.2x** |
+| Scenario | Measured time | Notes |
+|---|---|---|
+| Cold ingestion (unprimed store, 2,000 files) | 3,032 ms | Initial store blob ingestion and snapshot creation |
+| Warm snapshot hit (`wt new` / `wt create`) | **1,317 ms** | 2.3x faster than cold build; whole-tree APFS `clonefile()` |
+| Incremental snapshot rebuild (3 of 800 packages modified) | **1,569 ms** | Diff-based snapshot clone; updates modified packages only |
+| Per-file fallback mode (`WT_SNAPSHOTS=0`) | 1,443 ms | Iterative per-file clonefile fallback |
+| Raw recursive copy (`cp -Rc`) | 394 ms | Copies bytes on disk without git worktree setup or store deduplication |
+
+### APFS storage deduplication across concurrent worktrees
+
+Measured via volume free-space probes (`df -k`) on macOS APFS across 40,000 files:
+
+| Concurrent worktrees | Logical unshared size | Physical disk consumed | Physical disk savings | Notes |
+|---|---|---|---|---|
+| 1 worktree | 156.25 MB | 120.76 MB | 1.0x | Base store allocation |
+| 3 worktrees | 468.75 MB | ~120.76 MB | ~3.9x | 0 MB additional dirty blocks |
+| 5 worktrees | **781.25 MB** | **120.76 MB** | **4.37x** | 5 worktrees share identical disk blocks |
+
+When you edit, create, or delete files in one worktree, the operating system writes changes to new disk blocks for that worktree only. Other worktrees and the central store remain untouched.
 
 ### Performance characteristics by workload scale
 
-`wt` carries a fixed ~1.5-second baseline cost for subprocess coordination, git worktree creation, store verification, and GC root registration. Because of this fixed floor, `wt` is engineered specifically for heavy directory structures rather than trivial single-file trees:
+`wt` carries a fixed ~1.3-second baseline cost for subprocess coordination, git worktree creation, store verification, and GC root registration. Because of this fixed floor, `wt` is engineered for medium to large dependency trees:
 
-| Workload Size | Raw `cp -Rc` | `wt create` | Real Package Manager Install | Best Fit |
+| Workload size | Raw `cp -Rc` | `wt new` | Package manager install | Best fit |
 |---|---|---|---|---|
-| **Tiny (<500 files)** | ~0.05s | ~1.8s | ~2.0s | Direct copy |
-| **Medium (5,000 files)** | ~1.2s | ~1.5s | ~12.0s | `wt` |
-| **Large (40,000+ files)** | ~7.9s | ~1.6s | ~35.0s+ | `wt` (20x faster than install, 5x faster than `cp`) |
-
-On large trees, `wt` provides instant hydration, eliminates redundant package re-installation, guarantees isolated copy-on-write safety, and deduplicates physical disk usage across multiple checkouts.
+| Tiny (<500 files) | ~0.05s | ~1.3s | ~2.0s | Direct copy |
+| Medium (5,000 files) | ~1.2s | ~1.3s | ~12.0s | `wt` |
+| Large (40,000+ files) | ~7.9s | ~1.5s | ~35.0s+ | `wt` (20x faster than install, 5x faster than `cp`) |
 
 ## How wt compares to alternatives
 
 | Alternative | What it does | Where wt differs |
 |---|---|---|
-| `git worktree add` | Creates isolated branches for tracked files. | Leaves `node_modules/` and build directories empty. `wt` hydrates them instantly. |
-| `pnpm` / `uv` | Optimizes package installation for one language. | Language-specific. `wt` is language-agnostic and handles `target/`, `.venv/`, caches, and build outputs together. |
+| `git worktree add` | Creates isolated branches for tracked files. | Leaves `node_modules/` and build directories empty. `wt` hydrates them in 1.3 seconds. |
+| `pnpm` / `uv` | Optimizes package installation for one language. | Language-specific. `wt` handles `node_modules/`, `target/`, `.venv/`, and build caches together. |
 | `cp -Rc` shell scripts | Bare recursive APFS copies. | Takes ~8 seconds at 40k scale, lacks cross-project deduplication, lacks garbage collection, and breaks on dirty trees. |
-| Docker / Devcontainers | Full containerized sandboxes. | Heavyweight, high memory overhead, and requires complex file synchronization on macOS. `wt` runs natively on host files. |
+| Docker / Devcontainers | Containerized sandboxes. | High memory overhead, slow bind mounts on macOS. `wt` runs natively on host files. |
 
 ## Installation
 
@@ -110,14 +121,44 @@ wt new feature
 # Inspect active worktrees, their disk usage, and shared savings
 wt list
 
+# Run a test or command inside an ephemeral sandbox; cleans up automatically on exit
+wt scratch --run "pnpm test"
+
 # Remove the worktree, release its store references, and reclaim freed space
 wt clean feature
 
-# Remove every stale/merged worktree non-interactively, then reclaim space
+# Remove every stale or merged worktree non-interactively, then reclaim space
 wt clean --all
 ```
 
-The classic verbs `wt create`, `wt remove`, and `wt sweep` still work and remain fully supported.
+### Complete command reference
+
+`wt` provides 11 subcommands covering worktree creation, storage inspection, sandboxing, and maintenance:
+
+| Command | Purpose | Example |
+|---|---|---|
+| `wt new` (alias `wt create`) | Create a new worktree with hydrated heavy folders | `wt new feat-auth --base main` |
+| `wt hydrate` | Hydrate an existing directory in place without creating a branch | `wt hydrate ./my-dir` |
+| `wt list` (alias `wt ls`) | Display all active worktrees, branches, and shared disk savings | `wt list --json` |
+| `wt scratch` (alias `wt isolate`) | Run a command in an isolated ephemeral worktree | `wt scratch --run "cargo test"` |
+| `wt clean` (alias `wt remove`) | Reclaim a worktree and release store references | `wt clean feat-auth` or `wt clean --all` |
+| `wt sweep` | Run mark-and-sweep garbage collection on unreferenced objects | `wt sweep --age 0s` |
+| `wt scrub` | Audit store integrity; detect and delete corrupted objects | `wt scrub --dry-run` |
+| `wt store migrate` | Migrate store schema and activate mark-sweep GC | `wt store migrate --activate-mark-sweep` |
+| `wt init` | Generate a starter `.wtinclude` configuration | `wt init --force` |
+| `wt demo` | Run self-contained 10,000-file benchmark verifying speed and isolation | `wt demo` |
+| `wt completions` | Generate completion scripts for your shell | `wt completions zsh` |
+
+### Multi-ecosystem fidelity
+
+`wt` preserves file attributes and directory layouts across different language ecosystems. Verified with byte-for-byte SHA-256 checks, POSIX permission modes, and symlink targets:
+
+| Ecosystem | Target directories | Characteristics preserved | Parity |
+|---|---|---|:---:|
+| Node.js | `node_modules/` | Nested packages, `.bin` executable symlinks, mixed read/write bits | 100% |
+| Rust | `target/debug/` | Compiled `.rlib` files, metadata, binaries; volatile incremental caches excluded | 100% |
+| Python | `.venv/` | `site-packages`, `__pycache__` directories, python binary symlinks | 100% |
+| Monorepos | Combined paths | Multi-language monorepos under a unified `.wtinclude` manifest | 100% |
 
 ### Zero-setup test drive
 
@@ -187,15 +228,26 @@ cargo test
 # Run linter checks
 cargo clippy --all-targets -- -D warnings
 
-# Run benchmark suite with full byte verification
-./benchmarks/run.sh --verify
+# Run master verification rig across all 5 test suites (85s)
+./scripts/verify/run_all.sh --all
 
-# Run v1 versus v2 incremental rebuild benchmarks
-./benchmarks/v2-bench.sh
+# Run rapid verification with lightweight fixtures
+./scripts/verify/run_all.sh --quick
 
-# Run automated multi-ecosystem evaluation, chaos testing, and regression gating
-./benchmarks/eval.sh --verify --chaos --markdown report.md
+# Run an individual verification suite
+./scripts/verify/run_all.sh --suite 02_flash_apfs
+./scripts/verify/run_all.sh --suite 04_isolation_storage
+./scripts/verify/run_all.sh --suite 05_chaos_resilience
 ```
+
+The verification rig executes five automated suites:
+- `01_cli_matrix`: Tests all 11 subcommands, flags, and JSON output contracts.
+- `02_flash_apfs`: Benchmarks cold vs warm snapshot hydration, incremental rebuilds, and per-file fallback.
+- `03_real_repos`: Verifies byte-for-byte SHA-256 parity and symlinks for Node.js, Rust, Python, and Monorepos.
+- `04_isolation_storage`: Probes physical disk allocation across 1, 3, and 5 concurrent worktrees via `df -k`.
+- `05_chaos_resilience`: Injects 5x worker concurrency, CAS bit rot, cryptographic tamper checks, and `SIGKILL` crash recovery.
+
+Telemetry from runs compiles automatically into [artifacts/verify-wt/REPORT.md](artifacts/verify-wt/REPORT.md).
 
 ## License
 
