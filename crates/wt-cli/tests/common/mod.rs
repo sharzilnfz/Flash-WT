@@ -55,6 +55,16 @@ impl Fixture {
             .expect("run wt binary")
     }
 
+    /// Run `wt-hydrate <args>` inside the fixture repository.
+    #[allow(dead_code)]
+    pub fn wt_hydrate(&self, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_wt-hydrate"))
+            .args(args)
+            .current_dir(&self.repo)
+            .output()
+            .expect("run wt-hydrate binary")
+    }
+
     /// Run `wt <args>` with `WT_STORE` pointed at an isolated store,
     /// so tests never touch the developer's machine-wide store.
     #[allow(dead_code)] // each suite compiles this module; not all use both runners

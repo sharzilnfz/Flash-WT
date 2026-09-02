@@ -90,6 +90,27 @@ pub struct CreateData {
     pub files_hydrated: usize,
 }
 
+/// Payload for `wt hydrate --json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HydrateData {
+    pub destination_path: String,
+    pub source_path: String,
+    pub cache_hit: bool,
+    pub duration_ms: u64,
+    pub hydration_method: String,
+    pub bytes_shared_cow: u64,
+    pub bytes_copied: u64,
+    pub files_hydrated: usize,
+    pub dirs_hydrated: Vec<String>,
+}
+
+/// Payload for `wt init --json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InitData {
+    pub manifest_path: String,
+    pub created: bool,
+}
+
 /// Payload for `wt remove --json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveData {
@@ -398,5 +419,46 @@ mod tests {
         assert_eq!(parsed["data"]["total_files_hydrated"], 10);
         assert_eq!(parsed["data"]["worktrees"][0]["branch"], "main");
         assert_eq!(parsed["data"]["worktrees"][0]["is_active"], true);
+    }
+
+    #[test]
+    fn hydrate_envelope_ok_serialization() {
+        let data = HydrateData {
+            destination_path: "/tmp/dest".into(),
+            source_path: "/tmp/src".into(),
+            cache_hit: true,
+            duration_ms: 12,
+            hydration_method: "clone".into(),
+            bytes_shared_cow: 4096,
+            bytes_copied: 0,
+            files_hydrated: 50,
+            dirs_hydrated: vec!["node_modules".into()],
+        };
+        let env = Envelope::ok("hydrate", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize hydrate json");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse hydrate json");
+        assert_eq!(parsed["command"], "hydrate");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["data"]["destination_path"], "/tmp/dest");
+        assert_eq!(parsed["data"]["source_path"], "/tmp/src");
+        assert_eq!(parsed["data"]["files_hydrated"], 50);
+        assert_eq!(parsed["data"]["dirs_hydrated"][0], "node_modules");
+    }
+
+    #[test]
+    fn init_envelope_ok_serialization() {
+        let data = InitData {
+            manifest_path: "/tmp/repo/.wtinclude".into(),
+            created: true,
+        };
+        let env = Envelope::ok("init", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize init json");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse init json");
+        assert_eq!(parsed["command"], "init");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["data"]["manifest_path"], "/tmp/repo/.wtinclude");
+        assert_eq!(parsed["data"]["created"], true);
     }
 }

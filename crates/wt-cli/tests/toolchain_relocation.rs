@@ -194,13 +194,9 @@ fn test_starter_manifest_and_volatile_cache_exclusions() {
     fs::create_dir_all(next_dir.join("cache/webpack")).unwrap();
     fs::write(next_dir.join("cache/webpack/bundle.pack"), b"next cache").unwrap();
 
-    // Run wt create demo without explicit manifest (creates starter manifest)
-    let out = fx.wt(&["create", "demo"]);
-    assert!(
-        out.status.success(),
-        "wt create failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    // 1. Explicit `wt init` creates starter manifest with exclusions
+    let init_out = fx.wt(&["init"]);
+    assert!(init_out.status.success(), "wt init failed");
 
     // Acceptance criterion 5: Starter manifests omit volatile compiler incremental caches
     let starter = fs::read_to_string(fx.repo.join(".wtinclude")).unwrap();
@@ -215,6 +211,14 @@ fn test_starter_manifest_and_volatile_cache_exclusions() {
     assert!(
         starter.contains("!.next/cache/"),
         "Starter manifest missing !.next/cache/"
+    );
+
+    // Run wt create demo with the initialized manifest
+    let out = fx.wt(&["create", "demo"]);
+    assert!(
+        out.status.success(),
+        "wt create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 
     // Check hydrated destination

@@ -16,7 +16,7 @@ fn parse_age_value(text: &str) -> Result<Duration, String> {
 
 #[derive(Parser)]
 #[command(
-    name = "wt",
+    name = "wt-hydrate",
     version,
     about = "Instant git worktrees with heavy directories already hydrated"
 )]
@@ -46,6 +46,29 @@ pub enum WtCommand {
         /// the current repository named `<repo>-<name>`.
         #[arg(long)]
         dir: Option<PathBuf>,
+    },
+    /// Hydrate heavy directories into an existing directory or worktree.
+    Hydrate {
+        /// Destination directory or worktree to hydrate.
+        path: PathBuf,
+        /// Source repository root containing the heavy directories to ingest.
+        /// Defaults to discovering the enclosing repository.
+        #[arg(long)]
+        source: Option<PathBuf>,
+        /// Manifest listing heavy directories (gitignore syntax).
+        /// Defaults to `.wtinclude` in the source repository root.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
+    /// Initialize a starter `.wtinclude` manifest in the repository root or target directory.
+    Init {
+        /// Target directory to write `.wtinclude` into.
+        /// Defaults to the repository root.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Overwrite existing `.wtinclude` manifest if it exists.
+        #[arg(long, short)]
+        force: bool,
     },
     /// Clean and remove worktrees, reclaiming unreferenced store storage (modern primary verb).
     Clean {
@@ -206,6 +229,8 @@ impl WtCommand {
     pub fn name(&self) -> &'static str {
         match self {
             WtCommand::New { .. } => "new",
+            WtCommand::Hydrate { .. } => "hydrate",
+            WtCommand::Init { .. } => "init",
             WtCommand::Clean { .. } => "clean",
             WtCommand::Create { .. } => "create",
             WtCommand::Remove { .. } => "remove",

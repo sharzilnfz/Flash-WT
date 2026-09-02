@@ -63,18 +63,17 @@ fn create(
     }
 
     let patterns = match load_patterns(&root, manifest)? {
-        LoadedPatterns::CreatedStarter { path, patterns } => {
+        LoadedPatterns::Defaults { patterns } => {
             if !cfg.json {
                 println!(
                     "no .wtinclude in {}; using defaults ({})",
                     root.display(),
                     manifest::DEFAULT_PATTERNS.join(" ")
                 );
-                println!("wrote starter manifest {}", path.display());
             }
             patterns
         }
-        LoadedPatterns::Loaded { patterns } => patterns,
+        LoadedPatterns::Loaded { patterns, .. } => patterns,
     };
 
     let mut store = open_store()?;
