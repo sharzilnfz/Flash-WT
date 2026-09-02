@@ -3,7 +3,9 @@
 //! Post-hydration sanitization for virtual environments (.venv)
 //! and exclusion of volatile compiler incremental caches.
 
+use std::collections::HashSet;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -21,7 +23,19 @@ pub fn is_volatile_cache(rel_path: &str) -> bool {
 
 /// Recursively find all virtual environment root directories under `dir`.
 fn find_venvs(dir: &Path, out: &mut Vec<PathBuf>) {
-    if !dir.is_dir() {
+    let mut visited = HashSet::new();
+    find_venvs_inner(dir, out, &mut visited);
+}
+
+fn find_venvs_inner(dir: &Path, out: &mut Vec<PathBuf>, visited: &mut HashSet<(u64, u64)>) {
+    let Ok(meta) = fs::metadata(dir) else {
+        return;
+    };
+    if !meta.is_dir() {
+        return;
+    }
+    let key = (meta.dev(), meta.ino());
+    if !visited.insert(key) {
         return;
     }
     if dir.join("pyvenv.cfg").is_file() {
@@ -33,15 +47,16 @@ fn find_venvs(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == ".venv") || path.join("pyvenv.cfg").is_file() {
-                out.push(path);
-            } else if path
-                .file_name()
-                .is_some_and(|n| n != "node_modules" && n != "target" && n != ".git")
-            {
-                find_venvs(&path, out);
-            }
+        if !path.is_dir() {
+            continue;
+        }
+        if path.file_name().is_some_and(|n| n == ".venv") || path.join("pyvenv.cfg").is_file() {
+            out.push(path);
+        } else if path
+            .file_name()
+            .is_some_and(|n| n != "node_modules" && n != "target" && n != ".git")
+        {
+            find_venvs_inner(&path, out, visited);
         }
     }
 }
@@ -73,6 +88,24 @@ pub fn relocate_toolchains(
         }
     }
     Ok(())
+}
+
+fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+    if needle.is_empty() {
+        return haystack.to_vec();
+    }
+    let mut result = Vec::with_capacity(haystack.len());
+    let mut i = 0;
+    while i < haystack.len() {
+        if haystack[i..].starts_with(needle) {
+            result.extend_from_slice(replacement);
+            i += needle.len();
+        } else {
+            result.push(haystack[i]);
+            i += 1;
+        }
+    }
+    result
 }
 
 /// Sanitize and relocate a single Python virtual environment directory.
@@ -193,15 +226,78 @@ pub fn relocate_venv(src_root: &Path, dest_root: &Path, venv_dir: &Path) -> Resu
                 continue;
             }
 
-            // Executables in bin/*: check for shebang lines
+            // Executables in bin/*: check for shebang lines via byte buffer
             if let Ok(bytes) = fs::read(&path) {
-                if bytes.starts_with(b"#!") {
-                    if let Ok(content) = String::from_utf8(bytes.clone()) {
-                        let updated = replace_paths(&content);
-                        if updated != content {
-                            fs::write(&path, updated.as_bytes())
-                                .map_err(|e| Error::io("update shebang script", &path, e))?;
-                            let _ = fs::set_permissions(&path, meta.permissions());
+                if !bytes.starts_with(b"#!") {
+                    continue;
+                }
+                let newline = bytes.iter().position(|&b| b == b'\n');
+                let header_end = newline.map(|p| p + 1).unwrap_or(bytes.len());
+                let (header, rest) = bytes.split_at(header_end);
+                let mut new_header = header.to_vec();
+                for (from, to) in &replacements {
+                    new_header = replace_bytes(&new_header, from.as_bytes(), to.as_bytes());
+                }
+                if new_header != header {
+                    let mut new_bytes = Vec::with_capacity(new_header.len() + rest.len());
+                    new_bytes.extend_from_slice(&new_header);
+                    new_bytes.extend_from_slice(rest);
+                    fs::write(&path, &new_bytes)
+                        .map_err(|e| Error::io("update shebang script", &path, e))?;
+                    let _ = fs::set_permissions(&path, meta.permissions());
+                }
+            }
+        }
+    }
+
+    // 3. .pth files in lib/python*/site-packages
+    for lib_name in ["lib", "lib64"] {
+        let lib_dir = venv_dir.join(lib_name);
+        if !lib_dir.is_dir() {
+            continue;
+        }
+        let Ok(lib_entries) = fs::read_dir(&lib_dir) else {
+            continue;
+        };
+        for lib_entry in lib_entries.flatten() {
+            let lib_path = lib_entry.path();
+            if !lib_path.is_dir() {
+                continue;
+            }
+            let name = lib_entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("python") {
+                continue;
+            }
+            let site_packages = lib_path.join("site-packages");
+            if !site_packages.is_dir() {
+                continue;
+            }
+            let Ok(sp_entries) = fs::read_dir(&site_packages) else {
+                continue;
+            };
+            for sp_entry in sp_entries.flatten() {
+                let p = sp_entry.path();
+                let fname = sp_entry.file_name().to_string_lossy().into_owned();
+                if !fname.ends_with(".pth") {
+                    continue;
+                }
+                let Ok(ft) = sp_entry.file_type() else {
+                    continue;
+                };
+                if !ft.is_file() {
+                    continue;
+                }
+                if let Ok(bytes) = fs::read(&p) {
+                    let mut new_bytes = bytes.clone();
+                    for (from, to) in &replacements {
+                        new_bytes = replace_bytes(&new_bytes, from.as_bytes(), to.as_bytes());
+                    }
+                    if new_bytes != bytes {
+                        let meta = fs::metadata(&p).ok();
+                        fs::write(&p, &new_bytes)
+                            .map_err(|e| Error::io("update .pth file", &p, e))?;
+                        if let Some(m) = meta {
+                            let _ = fs::set_permissions(&p, m.permissions());
                         }
                     }
                 }
@@ -310,5 +406,82 @@ export PATH
         // Verify .pyc preserved
         let pyc_bytes = fs::read(&pyc_path).unwrap();
         assert_eq!(pyc_bytes, original_pyc);
+    }
+
+    #[test]
+    fn test_relocate_venv_rewrites_pth_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src_repo");
+        let dest = temp.path().join("dest_repo");
+        let dest_venv = dest.join(".venv");
+        fs::create_dir_all(dest_venv.join("lib/python3.11/site-packages")).unwrap();
+        fs::create_dir_all(dest_venv.join("bin")).unwrap();
+        fs::write(dest_venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+
+        let pth_content = format!("{}\n{}/src\n", src.display(), src.display());
+        let pth_path = dest_venv.join("lib/python3.11/site-packages/foo.pth");
+        fs::write(&pth_path, &pth_content).unwrap();
+        let editable_path =
+            dest_venv.join("lib/python3.11/site-packages/_editable_foo.pth");
+        let editable_content = format!("{}\n", src.display());
+        fs::write(&editable_path, &editable_content).unwrap();
+
+        relocate_venv(&src, &dest, &dest_venv).unwrap();
+
+        let updated = fs::read_to_string(&pth_path).unwrap();
+        assert!(updated.contains(&dest.display().to_string()));
+        assert!(!updated.contains(&src.display().to_string()));
+        let updated_editable = fs::read_to_string(&editable_path).unwrap();
+        assert!(updated_editable.contains(&dest.display().to_string()));
+        assert!(!updated_editable.contains(&src.display().to_string()));
+    }
+
+    #[test]
+    fn test_relocate_venv_rewrites_binary_shebang_non_utf8() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src_repo");
+        let dest = temp.path().join("dest_repo");
+        let src_venv = src.join(".venv");
+        let dest_venv = dest.join(".venv");
+        fs::create_dir_all(dest_venv.join("bin")).unwrap();
+        fs::write(dest_venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+
+        let bin_path = dest_venv.join("bin/binary_launcher");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(format!("#!{}/bin/python\n", src_venv.display()).as_bytes());
+        bytes.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
+        bytes.extend_from_slice(b"\nbinary payload");
+        let original_rest = bytes[bytes.iter().position(|&b| b == b'\n').unwrap() + 1..].to_vec();
+        fs::write(&bin_path, &bytes).unwrap();
+        fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        relocate_venv(&src, &dest, &dest_venv).unwrap();
+
+        let updated = fs::read(&bin_path).unwrap();
+        assert!(updated.starts_with(format!("#!{}/bin/python\n", dest_venv.display()).as_bytes()));
+        // payload after newline preserved, including non-utf8 bytes
+        let payload_start = updated.iter().position(|&b| b == b'\n').unwrap() + 1;
+        assert_eq!(&updated[payload_start..], original_rest.as_slice());
+        let perms = fs::metadata(&bin_path).unwrap().permissions().mode();
+        assert_eq!(perms & 0o777, 0o755);
+        // ensure src path not present
+        assert!(!updated.windows(src_venv.to_string_lossy().len()).any(|w| w == src_venv.to_string_lossy().as_bytes()));
+    }
+
+    #[test]
+    fn test_find_venvs_cycle_detection() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cycle_root");
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        // create a venv at a/b
+        fs::write(root.join("a/b/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        // recursive symlink a/b/cycle -> ../a
+        std::os::unix::fs::symlink(root.join("a"), root.join("a/b/cycle")).unwrap();
+
+        let mut venvs = Vec::new();
+        find_venvs(&root, &mut venvs);
+        // Should find the venv without panicking / infinite recursion
+        assert_eq!(venvs.len(), 1);
+        assert!(venvs[0].ends_with("a/b"));
     }
 }
