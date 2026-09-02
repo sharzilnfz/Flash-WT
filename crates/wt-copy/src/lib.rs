@@ -39,7 +39,7 @@ pub use clonefile::ClonefileBackend;
 #[cfg(target_os = "linux")]
 pub use copy_file_range::{CopyFileRangeBackend, copy_file_range_file};
 pub use deep_copy::DeepCopyBackend;
-pub use engine::{BatchPlacementReceipt, CopyEngine, CopyReceipt};
+pub use engine::{CopyEngine, CopyReceipt};
 pub use hardlink::HardlinkBackend;
 #[cfg(target_os = "macos")]
 pub use materialize::{CloneOut, FileMaterialize, HardlinkOut, placement_refused};
@@ -92,18 +92,6 @@ impl BackendKind {
     }
 }
 
-/// Whether a backend is safe to enable by default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Safety {
-    /// Safe to use without extra machinery.
-    Safe,
-    /// Exists but must stay disabled until the shared-write hazard is
-    /// solved. No current backend reports this: ticket 07 cleared the
-    /// hardlink hazard with copy-on-shared-write protection, but the
-    /// classification and its refusal path stay part of the contract.
-    UnsafePending,
-}
-
 /// What went wrong in a backend copy.
 #[derive(Debug)]
 pub enum Error {
@@ -112,9 +100,6 @@ pub enum Error {
     DestinationExists,
     /// The filesystem holding the paths does not support this backend.
     Unsupported,
-    /// This backend is compiled in but not yet safe to run
-    /// ([`Safety::UnsafePending`]) and a caller tried to use it anyway.
-    UnsafeBackend,
     /// Any filesystem failure during the copy.
     Io(io::Error),
 }
@@ -130,7 +115,6 @@ impl std::fmt::Display for Error {
         match self {
             Error::DestinationExists => write!(f, "destination already exists"),
             Error::Unsupported => write!(f, "backend unsupported on this filesystem"),
-            Error::UnsafeBackend => write!(f, "backend is unsafe-pending and disabled"),
             Error::Io(e) => write!(f, "copy failed: {e}"),
         }
     }
@@ -159,18 +143,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// - `supports(dir)` answers for the filesystem that holds `dir`. It
 ///   must be cheap enough to call per hydration and must not mutate
 ///   anything.
-/// - `safety()` is a static property of the backend kind, not of the
-///   filesystem.
 pub trait CopyBackend {
     /// Which strategy this backend implements.
     fn kind(&self) -> BackendKind;
-
-    /// Static safety classification. Every shipped backend reports
-    /// [`Safety::Safe`]: hardlink earned it in ticket 07 by making
-    /// shared inodes read-only (copy-on-shared-write).
-    fn safety(&self) -> Safety {
-        Safety::Safe
-    }
 
     /// True if this backend can operate on the filesystem holding
     /// `dir` (for example, clonefile requires APFS).
@@ -179,20 +154,8 @@ pub trait CopyBackend {
     /// Copy the tree at `src` to the not-yet-existing path `dest`.
     ///
     /// Returns [`Error::DestinationExists`] if `dest` exists,
-    /// [`Error::UnsafeBackend`] when `safety()` is
-    /// [`Safety::UnsafePending`], and [`Error::Io`] on failure. On
-    /// any error `dest` does not exist.
+    /// and [`Error::Io`] on failure. On any error `dest` does not exist.
     fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()>;
-}
-
-/// Refuse a backend that exists only behind an explicit opt-in gate
-/// ([`Safety::UnsafePending`]). Enforced by every backend's shared
-/// placement plumbing before anything touches the filesystem.
-pub(crate) fn ensure_backend_runnable(safety: Safety) -> Result<()> {
-    match safety {
-        Safety::Safe => Ok(()),
-        Safety::UnsafePending => Err(Error::UnsafeBackend),
-    }
 }
 
 /// Fast fail for a destination that already exists (including as a

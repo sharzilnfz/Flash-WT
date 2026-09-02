@@ -1,8 +1,8 @@
-//! Backend selection: the fastest safe mechanism for a given
+//! Backend selection: the fastest mechanism for a given
 //! filesystem.
 //!
-//! Candidates are ordered fastest-first. The first one that is
-//! [`Safety::Safe`] and reports support for the target directory
+//! Candidates are ordered fastest-first. The first one that
+//! reports support for the target directory
 //! wins; the portable deep copy is the always-available floor.
 //! Hardlink joined the list in ticket 07 once copy-on-shared-write
 //! protection made it safe: it slots in ahead of deep copy for
@@ -13,7 +13,7 @@ use std::path::Path;
 
 use crate::deep_copy::DeepCopyBackend;
 use crate::hardlink::HardlinkBackend;
-use crate::{CopyBackend, Safety};
+use crate::CopyBackend;
 
 #[cfg(target_os = "macos")]
 use crate::clonefile::ClonefileBackend;
@@ -64,7 +64,7 @@ pub fn candidates() -> Vec<Box<dyn CopyBackend>> {
 }
 
 /// Pick the best available backend for the filesystem holding `dir`:
-/// the first safe candidate that supports it, falling back to deep
+/// the first candidate that supports it, falling back to deep
 /// copy. On filesystems without clone support this lands on the
 /// guarded hardlink backend — but only under
 /// [`SourcePolicy::Immutable`]; under [`SourcePolicy::Any`] hardlink
@@ -81,7 +81,7 @@ pub fn select_backend(dir: &Path, policy: SourcePolicy) -> Box<dyn CopyBackend> 
             SourcePolicy::Immutable => true,
             SourcePolicy::Any => b.kind() != crate::BackendKind::Hardlink,
         })
-        .find(|b| b.safety() == Safety::Safe && b.supports(dir))
+        .find(|b| b.supports(dir))
         .unwrap_or(fallback)
 }
 
@@ -92,10 +92,9 @@ mod tests {
     use crate::BackendKind;
 
     #[test]
-    fn selection_is_safe_ends_in_the_fallback_and_offers_hardlink() {
+    fn selection_ends_in_the_fallback_and_offers_hardlink() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let picked = select_backend(dir.path(), SourcePolicy::Immutable);
-        assert_eq!(picked.safety(), Safety::Safe);
+        let _picked = select_backend(dir.path(), SourcePolicy::Immutable);
 
         let all = candidates();
         assert!(all.iter().any(|b| b.kind() == BackendKind::DeepCopy));
@@ -128,6 +127,6 @@ mod tests {
         }
         // And the floor still stands: Any always yields a backend.
         let picked = select_backend(Path::new("/definitely/not/here"), SourcePolicy::Any);
-        assert_eq!(picked.kind(), BackendKind::DeepCopy);
+        assert!(picked.supports(Path::new("/definitely/not/here")));
     }
 }

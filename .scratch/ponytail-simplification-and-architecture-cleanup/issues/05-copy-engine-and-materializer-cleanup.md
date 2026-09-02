@@ -1,6 +1,6 @@
 # Ticket 05: Copy Engine & Materializer Cleanup
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Description
 

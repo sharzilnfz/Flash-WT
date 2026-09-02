@@ -26,7 +26,7 @@ impl CopyBackend for CopyFileRangeBackend {
     }
 
     fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()> {
-        crate::copy_tree::staged_copy(dest, self.safety(), &mut |staging| {
+        crate::copy_tree::staged_copy(dest, &mut |staging| {
             let mut clone_file = |from: &Path, to: &Path| copy_file_range_file(from, to);
             copy_tree(src, staging, &mut clone_file).map_err(Error::Io)
         })

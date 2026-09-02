@@ -34,3 +34,8 @@ signal-hook = "0.3"
 [profile.release]
 lto = true
 strip = true
+
+[profile.test]
+debug = 1
+split-debuginfo = "unpacked"
+

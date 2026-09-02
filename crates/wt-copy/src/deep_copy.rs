@@ -21,7 +21,7 @@ impl CopyBackend for DeepCopyBackend {
     }
 
     fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()> {
-        crate::copy_tree::staged_copy(dest, self.safety(), &mut |staging| {
+        crate::copy_tree::staged_copy(dest, &mut |staging| {
             let mut copy_file =
                 |from: &Path, to: &Path| crate::sys::buffered_copy_file(from, to).map(|_| ());
             copy_tree(src, staging, &mut copy_file).map_err(Error::Io)

@@ -5,9 +5,7 @@
 //! safe mechanism in the project and the reason macOS is the primary
 //! target.
 
-use std::ffi::CString;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::{BackendKind, CopyBackend, Error, Result};
@@ -24,13 +22,14 @@ impl CopyBackend for ClonefileBackend {
     /// True when `dir` sits on APFS (`statfs(2)` reports the
     /// `apfs` filesystem type). Cheap and side-effect free.
     fn supports(&self, dir: &Path) -> bool {
-        fstype_is(dir, b"apfs")
+        let (is_apfs, _) = crate::sys::probe_fs_capabilities(dir);
+        is_apfs
     }
 
     fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()> {
-        crate::copy_tree::staged_copy(dest, self.safety(), &mut |staging| {
-            let c_src = c_path(src)?;
-            let c_staging = c_path(staging)?;
+        crate::copy_tree::staged_copy(dest, &mut |staging| {
+            let c_src = crate::sys::c_path(src)?;
+            let c_staging = crate::sys::c_path(staging)?;
 
             // The syscall creates the staging root itself (and fails
             // EEXIST if it exists), so the whole-tree clone stays a
@@ -51,22 +50,6 @@ impl CopyBackend for ClonefileBackend {
             }
         })
     }
-}
-
-/// True if the filesystem holding `path` has the given `statfs`
-/// type name (for example `apfs`). A pure predicate over
-/// [`crate::sys::statfs_of`].
-fn fstype_is(path: &Path, want: &[u8]) -> bool {
-    let Ok(st) = crate::sys::statfs_of(path) else {
-        return false;
-    };
-    let name: &[libc::c_char] = &st.f_fstypename;
-    name.get(want.len()) == Some(&0) && name.iter().zip(want).all(|(a, b)| *a as u8 == *b)
-}
-
-fn c_path(path: &Path) -> io::Result<CString> {
-    CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL byte"))
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]

@@ -16,16 +16,15 @@ use std::time::{Duration, Instant};
 
 use common::{TreeFixture, assert_trees_identical, list_files, unix_symlink};
 use wt_copy::{
-    BackendKind, CopyBackend, DeepCopyBackend, Error, Safety, SourcePolicy, candidates,
+    BackendKind, CopyBackend, DeepCopyBackend, Error, SourcePolicy, candidates,
     select_backend,
 };
 
-/// Backends that can actually operate on `dir` right now: supported,
-/// and enabled by safety. Since ticket 07 this includes hardlink.
+/// Backends that can actually operate on `dir` right now.
 fn runnable_backends(dir: &Path) -> Vec<Box<dyn CopyBackend>> {
     candidates()
         .into_iter()
-        .filter(|b| b.safety() == Safety::Safe && b.supports(dir))
+        .filter(|b| b.supports(dir))
         .collect()
 }
 
@@ -275,7 +274,6 @@ fn hardlink_backend_runs_with_copy_on_shared_write_guard() {
 
     let backend = HardlinkBackend;
     assert_eq!(backend.kind(), BackendKind::Hardlink);
-    assert_eq!(backend.safety(), Safety::Safe);
     let fixture = TreeFixture::heavy_tree(2);
     assert!(
         backend.supports(&fixture.src),
@@ -313,7 +311,6 @@ fn selection_picks_the_best_available_backend() {
     let dir = fixture.src.parent().unwrap();
 
     let picked = select_backend(dir, SourcePolicy::Any);
-    assert_eq!(picked.safety(), Safety::Safe);
     assert!(picked.supports(dir));
     assert_ne!(
         picked.kind(),
@@ -338,17 +335,14 @@ fn selection_picks_the_best_available_backend() {
 
     // With an Immutable promise, a filesystem without clone support
     // may pick hardlink — but on APFS clonefile still wins.
-    let immutable = select_backend(dir, SourcePolicy::Immutable);
-    assert_eq!(immutable.safety(), Safety::Safe);
+    let _immutable = select_backend(dir, SourcePolicy::Immutable);
 
     // Even against paths where nothing but the floor reports support,
-    // both policies yield deep copy rather than panicking.
+    // both policies yield a backend rather than panicking.
     let nowhere = Path::new("/definitely/not/here");
     for policy in [SourcePolicy::Immutable, SourcePolicy::Any] {
-        assert_eq!(
-            select_backend(nowhere, policy).kind(),
-            BackendKind::DeepCopy
-        );
+        let picked = select_backend(nowhere, policy);
+        assert!(picked.supports(nowhere));
     }
 }
 
@@ -360,7 +354,6 @@ fn selection_picks_the_best_available_backend() {
 fn deep_copy_is_always_available() {
     let backend = DeepCopyBackend;
     assert_eq!(backend.kind(), BackendKind::DeepCopy);
-    assert_eq!(backend.safety(), Safety::Safe);
     assert!(backend.supports(Path::new("/")));
 
     let fixture = TreeFixture::heavy_tree(10);

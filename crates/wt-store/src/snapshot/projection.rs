@@ -609,7 +609,7 @@ fn finish_clone(
             Err(CloneFailure::SnapshotVanished)
         }
         Err(wt_copy::Error::DestinationExists) => Err(CloneFailure::Refused(None)),
-        Err(wt_copy::Error::Unsupported | wt_copy::Error::UnsafeBackend) => {
+        Err(wt_copy::Error::Unsupported) => {
             cleanup_partial(dest_heavy, restore_empty_dir)?;
             Err(CloneFailure::Refused(None))
         }

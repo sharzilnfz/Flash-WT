@@ -226,28 +226,12 @@ pub struct Materializer {
 }
 
 impl Materializer {
-    /// Create a new materializer based on the strategy policy and probed filesystem capabilities.
-    pub fn new(
-        policy: StrategyPolicy,
-        _dest_dir: &Path,
-        is_cross_device: bool,
-        reflink_capable: bool,
-        is_ext4: bool,
-    ) -> Self {
-        Self::select(policy, is_cross_device, reflink_capable, is_ext4)
-    }
-
     /// Create a materializer for the given source and destination paths, automatically
     /// inspecting device IDs and filesystem capabilities.
     pub fn for_paths(policy: StrategyPolicy, src_root: &Path, dest_root: &Path) -> Self {
         let is_cross = crate::sys::is_cross_device(src_root, dest_root);
         let (reflink_capable, is_ext4) = crate::sys::probe_fs_capabilities(dest_root);
         Self::select(policy, is_cross, reflink_capable, is_ext4)
-    }
-
-    /// Alias for [`Materializer::for_paths`] for backwards compatibility.
-    pub fn for_directories(policy: StrategyPolicy, src_root: &Path, dest_root: &Path) -> Self {
-        Self::for_paths(policy, src_root, dest_root)
     }
 
     /// Select a materializer based on strategy policy and filesystem capabilities.
@@ -257,66 +241,39 @@ impl Materializer {
         reflink_capable: bool,
         is_ext4: bool,
     ) -> Self {
-        match policy {
-            StrategyPolicy::ForceByteCopy => Self {
-                backend: None,
-                strategy: "byte-copy",
-            },
-            StrategyPolicy::Hardlink => Self {
-                backend: Some(Box::new(HardlinkOut)),
-                strategy: "hardlink",
-            },
+        let (backend, strategy): (Option<Box<dyn FileMaterialize>>, &'static str) = match policy {
+            StrategyPolicy::ForceByteCopy => (None, "byte-copy"),
+            StrategyPolicy::Hardlink => (Some(Box::new(HardlinkOut)), "hardlink"),
             StrategyPolicy::Default => {
                 #[cfg(target_os = "macos")]
                 {
                     let _ = is_ext4;
                     if !is_cross_device && reflink_capable {
-                        Self {
-                            backend: Some(Box::new(CloneOut)),
-                            strategy: "copy-on-write",
-                        }
+                        (Some(Box::new(CloneOut)), "copy-on-write")
                     } else {
-                        Self {
-                            backend: None,
-                            strategy: "copy-on-write",
-                        }
+                        (None, "copy-on-write")
                     }
                 }
 
                 #[cfg(target_os = "linux")]
                 {
                     if !is_cross_device && reflink_capable {
-                        Self {
-                            backend: Some(Box::new(ReflinkOut)),
-                            strategy: "reflink",
-                        }
+                        (Some(Box::new(ReflinkOut)), "reflink")
                     } else if !is_cross_device && is_ext4 {
-                        Self {
-                            backend: Some(Box::new(CopyFileRangeOut)),
-                            strategy: "copy_file_range",
-                        }
+                        (Some(Box::new(CopyFileRangeOut)), "copy_file_range")
                     } else {
-                        Self {
-                            backend: None,
-                            strategy: "copy-on-write",
-                        }
+                        (None, "copy-on-write")
                     }
                 }
 
                 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                 {
                     let _ = (is_cross_device, reflink_capable, is_ext4);
-                    Self {
-                        backend: None,
-                        strategy: "copy-on-write",
-                    }
+                    (None, "copy-on-write")
                 }
             }
-        }
-    }
+        };
 
-    /// Construct a materializer with a custom backend and strategy name.
-    pub fn custom(backend: Option<Box<dyn FileMaterialize>>, strategy: &'static str) -> Self {
         Self { backend, strategy }
     }
 

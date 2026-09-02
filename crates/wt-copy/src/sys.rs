@@ -89,21 +89,12 @@ pub fn buffered_copy_file(from: &Path, to: &Path) -> io::Result<u64> {
         );
     }
 
-    let mut buf = vec![0u8; 128 * 1024];
-    let mut copied = 0u64;
-    loop {
-        let n = io::Read::read(&mut src, &mut buf)?;
-        if n == 0 {
-            break;
-        }
-        io::Write::write_all(&mut dest, &buf[..n])?;
-        copied += n as u64;
-    }
+    let copied = io::copy(&mut src, &mut dest)?;
     fs::set_permissions(to, fs::Permissions::from_mode(mode))?;
     Ok(copied)
 }
 
-fn c_path(path: &Path) -> io::Result<CString> {
+pub(crate) fn c_path(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL byte"))
 }

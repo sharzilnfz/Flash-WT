@@ -237,9 +237,8 @@ fn materializer_cross_device_selection_falls_back_to_byte_copy() {
     let src = blob(base.path(), b"cross device data\n");
     let dest = base.path().join("dest.txt");
 
-    let materializer = Materializer::new(
+    let materializer = Materializer::select(
         StrategyPolicy::Default,
-        base.path(),
         true,  // is_cross_device
         true,  // reflink_capable
         false, // is_ext4
