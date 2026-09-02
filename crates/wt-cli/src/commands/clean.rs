@@ -34,7 +34,7 @@ pub fn run(
 
     // Single worktree targeted cleanup
     if let Some(branch_name) = name {
-        return clean_single_worktree(&engine, branch_name, dir, age, cfg);
+        return clean_single_worktree(&engine, branch_name, dir, force, age, cfg);
     }
 
     // Interactive or batch cleanup
@@ -45,6 +45,7 @@ fn clean_single_worktree(
     engine: &WorkspaceEngine,
     name: &str,
     dir: Option<&Path>,
+    force: bool,
     age: Option<Duration>,
     cfg: &RunConfig,
 ) -> Result<(CleanData, Vec<Diagnostic>)> {
@@ -53,6 +54,24 @@ fn clean_single_worktree(
         None => engine.default_dest(name)?,
     };
 
+    if dest.exists() {
+        let is_dirty = engine.is_worktree_dirty(&dest);
+        let is_merged = engine.is_branch_merged(name);
+        if !force && (is_dirty || !is_merged) {
+            let reason = if is_dirty && !is_merged {
+                "worktree has uncommitted changes and unmerged commits"
+            } else if is_dirty {
+                "worktree has uncommitted changes"
+            } else {
+                "branch is not merged into HEAD"
+            };
+            return Err(Error::Usage(format!(
+                "refusing to remove {} ({reason}); use --force to override",
+                dest.display()
+            )));
+        }
+    }
+
     let mut diagnostics = Vec::new();
     let mut silent_cfg = *cfg;
     silent_cfg.json = true;
@@ -60,10 +79,13 @@ fn clean_single_worktree(
     let (remove_data, mut rm_diags) = gc::remove(name, dir, &silent_cfg)?;
     diagnostics.append(&mut rm_diags);
 
-    // If directory still exists on disk, remove git worktree tracking
-    engine.remove_worktree_lenient(&dest);
+    if dest.exists() {
+        return Err(Error::Store(format!(
+            "worktree {} still exists after removal",
+            dest.display()
+        )));
+    }
 
-    // Automatically invoke GC sweep to reclaim unreferenced blobs/snapshots
     let (sweep_data, mut sw_diags) = gc::sweep(age, &silent_cfg)?;
     diagnostics.append(&mut sw_diags);
 
@@ -148,18 +170,30 @@ fn clean_batch_worktrees(
         ));
     }
 
-    let selected_candidates: Vec<CleanCandidate> = if all {
+    let eligible: Vec<CleanCandidate> = if force {
+        candidates.clone()
+    } else {
         candidates
+            .iter()
+            .filter(|c| c.is_merged && !engine.is_worktree_dirty(&c.path))
+            .cloned()
+            .collect()
+    };
+
+    let selected_candidates: Vec<CleanCandidate> = if all {
+        eligible
     } else if io::stdin().is_terminal() && !cfg.json && !force {
-        // Interactive TTY multi-select prompt (ticket 05)
         println!("\nActive worktrees available for cleanup:");
         for (i, c) in candidates.iter().enumerate() {
-            let status = if c.is_merged {
+            let dirty = engine.is_worktree_dirty(&c.path);
+            let status = if dirty {
+                "[dirty - uncommitted changes]"
+            } else if c.is_merged {
                 "[merged into HEAD - recommended]"
             } else {
                 "[unmerged changes/commits]"
             };
-            let check = if c.is_merged { "[x]" } else { "[ ]" };
+            let check = if c.is_merged && !dirty { "[x]" } else { "[ ]" };
             println!(
                 "  {} {}. {} ({}) {}",
                 check,
@@ -201,10 +235,9 @@ fn clean_batch_worktrees(
         }
 
         if trimmed.is_empty() {
-            // Default to pre-selected merged
-            candidates.into_iter().filter(|c| c.is_merged).collect()
+            eligible
         } else if trimmed == "all" {
-            candidates
+            eligible
         } else {
             let mut indices = HashSet::new();
             for part in trimmed.split([',', ' ']) {
@@ -214,20 +247,26 @@ fn clean_batch_worktrees(
                     }
                 }
             }
-            candidates
+            let chosen: Vec<CleanCandidate> = candidates
                 .into_iter()
                 .enumerate()
                 .filter(|(idx, _)| indices.contains(idx))
                 .map(|(_, c)| c)
-                .collect()
+                .collect();
+            if force {
+                chosen
+            } else {
+                chosen
+                    .into_iter()
+                    .filter(|c| c.is_merged && !engine.is_worktree_dirty(&c.path))
+                    .collect()
+            }
         }
     } else {
-        // Non-interactive or piped mode: default to merged worktrees
-        let merged: Vec<_> = candidates.into_iter().filter(|c| c.is_merged).collect();
-        if merged.is_empty() && !force {
+        if eligible.is_empty() && !force {
             if !cfg.json {
                 println!(
-                    "No merged worktrees found to clean. Use 'wt clean <name>' or 'wt clean --all'."
+                    "No merged worktrees found to clean. Use 'wt clean <name>' or 'wt clean --all --force' to include unmerged/dirty."
                 );
             }
             return Ok((
@@ -243,7 +282,7 @@ fn clean_batch_worktrees(
                 Vec::new(),
             ));
         }
-        merged
+        eligible
     };
 
     if selected_candidates.is_empty() {
@@ -274,27 +313,33 @@ fn clean_batch_worktrees(
     silent_cfg.json = true;
 
     for candidate in &selected_candidates {
-        if let Ok((rm_data, mut rm_diags)) =
-            gc::remove(&candidate.branch, Some(&candidate.path), &silent_cfg)
-        {
-            diagnostics.append(&mut rm_diags);
-            references_released += rm_data.references_released;
-            if rm_data.mirror_removed {
-                mirrors_removed += 1;
+        match gc::remove(&candidate.branch, Some(&candidate.path), &silent_cfg) {
+            Ok((rm_data, mut rm_diags)) => {
+                diagnostics.append(&mut rm_diags);
+                if candidate.path.exists() {
+                    diagnostics.push(Diagnostic::error(
+                        "REMOVE_FAILED",
+                        format!("worktree {} still exists after removal", candidate.path.display()),
+                    ));
+                    continue;
+                }
+                references_released += rm_data.references_released;
+                if rm_data.mirror_removed {
+                    mirrors_removed += 1;
+                }
+                removed_worktrees.push(candidate.path.display().to_string());
+                branches_removed.push(candidate.branch.clone());
+                if !cfg.json {
+                    println!(
+                        "✓ Removed worktree {} ({})",
+                        candidate.path.display(),
+                        candidate.branch
+                    );
+                }
             }
-        }
-
-        engine.remove_worktree_lenient(&candidate.path);
-
-        removed_worktrees.push(candidate.path.display().to_string());
-        branches_removed.push(candidate.branch.clone());
-
-        if !cfg.json {
-            println!(
-                "✓ Removed worktree {} ({})",
-                candidate.path.display(),
-                candidate.branch
-            );
+            Err(e) => {
+                diagnostics.push(Diagnostic::error("REMOVE_FAILED", e.to_string()));
+            }
         }
     }
 
