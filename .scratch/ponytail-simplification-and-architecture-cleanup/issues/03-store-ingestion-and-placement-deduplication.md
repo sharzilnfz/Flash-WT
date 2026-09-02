@@ -1,6 +1,6 @@
 # Ticket 03: Store Ingestion & Placement Deduplication
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Description
 

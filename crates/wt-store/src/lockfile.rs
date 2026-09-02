@@ -37,20 +37,20 @@ const LOCKFILES: &[&str] = &[
 /// Locate the nearest project lockfile associated with the heavy
 /// directory `heavy_rel`, searching from its parent directory up to `repo_root`.
 pub fn find_lockfile(repo_root: &Path, heavy_rel: &Path) -> Option<PathBuf> {
-    let mut cur = repo_root.join(heavy_rel).parent().map(Path::to_path_buf)?;
-    loop {
+    let full_path = repo_root.join(heavy_rel);
+    let start = full_path.parent()?;
+    for dir in start.ancestors() {
+        if !dir.starts_with(repo_root) {
+            break;
+        }
         for name in LOCKFILES {
-            let candidate = cur.join(name);
+            let candidate = dir.join(name);
             if candidate.is_file() {
                 return Some(candidate);
             }
         }
-        if cur == repo_root {
+        if dir == repo_root {
             break;
-        }
-        match cur.parent() {
-            Some(p) if p.starts_with(repo_root) || p == repo_root => cur = p.to_path_buf(),
-            _ => break,
         }
     }
     None
