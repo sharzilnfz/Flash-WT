@@ -120,10 +120,7 @@ fn materialize_batch_matches_sequential_on_content_mode_counters() {
         };
         batch_items.push(BatchItem {
             src: src.clone(),
-            dest: batch_root
-                .join("a")
-                .join("b")
-                .join(format!("file-{i}.txt")),
+            dest: batch_root.join("a").join("b").join(format!("file-{i}.txt")),
             mode,
             size: content.len() as u64,
         });
@@ -135,9 +132,7 @@ fn materialize_batch_matches_sequential_on_content_mode_counters() {
         });
     }
 
-    let receipt = materializer
-        .materialize_batch(&batch_items)
-        .expect("batch");
+    let receipt = materializer.materialize_batch(&batch_items).expect("batch");
     assert_eq!(receipt.total, 20);
     assert_eq!(receipt.placed, 20);
     assert_eq!(receipt.shared_cow, 0);
@@ -183,8 +178,15 @@ fn materialize_batch_matches_sequential_on_content_mode_counters() {
             .expect("meta batch")
             .permissions()
             .mode();
-        let seq_mode = fs::metadata(seq_dest).expect("meta seq").permissions().mode();
-        assert_eq!(batch_mode & 0o7777, seq_mode & 0o7777, "mode differs for file {i}");
+        let seq_mode = fs::metadata(seq_dest)
+            .expect("meta seq")
+            .permissions()
+            .mode();
+        assert_eq!(
+            batch_mode & 0o7777,
+            seq_mode & 0o7777,
+            "mode differs for file {i}"
+        );
         if let Some(want) = batch_items[i].mode {
             assert_eq!(batch_mode & 0o7777, want, "mode not applied for file {i}");
         }

@@ -83,6 +83,10 @@ pub struct CreateData {
     pub incremental_decision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incremental_fallback_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_mechanism: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_fallback_reason: Option<String>,
 }
 
 /// Payload for `wt hydrate --json`.
@@ -101,6 +105,10 @@ pub struct HydrateData {
     pub incremental_decision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incremental_fallback_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_mechanism: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_fallback_reason: Option<String>,
 }
 
 /// Payload for `wt init --json`.
@@ -304,6 +312,8 @@ mod tests {
             files_hydrated: 10,
             incremental_decision: None,
             incremental_fallback_reason: None,
+            copy_mechanism: None,
+            copy_fallback_reason: None,
         };
         let env = Envelope::ok("create", data, vec![]);
         let json = serde_json::to_string(&env).expect("serialize");
@@ -319,6 +329,7 @@ mod tests {
         assert_eq!(parsed["data"]["bytes_copied"], 0);
         assert!(parsed["data"].get("incremental_decision").is_none());
         assert!(parsed["data"].get("incremental_fallback_reason").is_none());
+        assert!(parsed["data"].get("copy_mechanism").is_none());
         assert_eq!(parsed["diagnostics"], serde_json::json!([]));
     }
 
@@ -431,13 +442,15 @@ mod tests {
             source_path: "/tmp/src".into(),
             cache_hit: true,
             duration_ms: 12,
-            hydration_method: "clone".into(),
-            bytes_shared_cow: 4096,
-            bytes_copied: 0,
+            hydration_method: "byte_copy".into(),
+            bytes_shared_cow: 0,
+            bytes_copied: 4096,
             files_hydrated: 50,
             dirs_hydrated: vec!["node_modules".into()],
             incremental_decision: None,
             incremental_fallback_reason: None,
+            copy_mechanism: Some("byte-copy".into()),
+            copy_fallback_reason: Some("cross-device mount".into()),
         };
         let env = Envelope::ok("hydrate", data, vec![]);
         let json = serde_json::to_string(&env).expect("serialize hydrate json");
@@ -448,6 +461,8 @@ mod tests {
         assert_eq!(parsed["data"]["destination_path"], "/tmp/dest");
         assert_eq!(parsed["data"]["source_path"], "/tmp/src");
         assert_eq!(parsed["data"]["files_hydrated"], 50);
+        assert_eq!(parsed["data"]["copy_mechanism"], "byte-copy");
+        assert_eq!(parsed["data"]["copy_fallback_reason"], "cross-device mount");
         assert_eq!(parsed["data"]["dirs_hydrated"][0], "node_modules");
         assert!(parsed["data"].get("incremental_decision").is_none());
         assert!(parsed["data"].get("incremental_fallback_reason").is_none());
@@ -468,6 +483,8 @@ mod tests {
             incremental_fallback_reason: Some(
                 "changed entries ratio 15.00% (6 of 40) exceeds maximum threshold 10.00%".into(),
             ),
+            copy_mechanism: None,
+            copy_fallback_reason: None,
         };
         let env = Envelope::ok("create", data, vec![]);
         let json = serde_json::to_string(&env).expect("serialize create json");

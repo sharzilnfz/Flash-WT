@@ -8,8 +8,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use tempfile::TempDir;
-use wt_store::{DiskStore, HydrateDest, HydrateOutcome, HydratePinned, HydratePolicy, HydrateReq,
-    HydrateSrc, HydrateTree, Ingested};
+use wt_store::{
+    DiskStore, HydrateDest, HydrateOutcome, HydratePinned, HydratePolicy, HydrateReq, HydrateSrc,
+    HydrateTree, Ingested,
+};
 
 #[test]
 fn fallback_materialization_creates_files_dirs_and_metadata() {
@@ -235,14 +237,13 @@ fn pinned_lockfile_hit_hydrates_without_ingest() {
     let blob = store.put(content).expect("put");
 
     let lock_hash = wt_store::hash_lockfile(b"pinned-lockfile-bytes");
-    let entries = vec![wt_store::SnapshotEntry::file(
-        "pkg/index.js",
-        blob,
-        0o644,
-    )];
-    let manifest =
-        wt_store::Manifest::new_with_lockfile_and_size(entries, Some(lock_hash), content.len() as u64)
-            .expect("manifest");
+    let entries = vec![wt_store::SnapshotEntry::file("pkg/index.js", blob, 0o644)];
+    let manifest = wt_store::Manifest::new_with_lockfile_and_size(
+        entries,
+        Some(lock_hash),
+        content.len() as u64,
+    )
+    .expect("manifest");
     let hash = manifest.hash;
     store
         .publish_manifest(

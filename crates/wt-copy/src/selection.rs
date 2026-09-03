@@ -63,6 +63,98 @@ pub fn candidates() -> Vec<Box<dyn CopyBackend>> {
     out
 }
 
+/// A candidate backend that was evaluated and skipped or refused during selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateRefusal {
+    /// The backend that was evaluated.
+    pub backend: crate::BackendKind,
+    /// Why this backend was refused or skipped for the target directory.
+    pub reason: String,
+}
+
+/// The result of backend selection, recording the chosen backend, its kind,
+/// and refusal reasons for any faster candidates that were rejected.
+pub struct SelectionOutcome {
+    /// The instantiated copy backend.
+    pub backend: Box<dyn CopyBackend>,
+    /// The kind of the selected backend.
+    pub kind: crate::BackendKind,
+    /// Refusal reasons for candidates that were skipped or unsupported.
+    pub refusals: Vec<CandidateRefusal>,
+}
+
+impl SelectionOutcome {
+    /// The backend kind selected.
+    pub fn selected_backend(&self) -> crate::BackendKind {
+        self.kind
+    }
+
+    /// The refusal reason for why faster acceleration was refused, if any.
+    pub fn refusal_reason(&self) -> Option<&str> {
+        self.refusals.last().map(|r| r.reason.as_str())
+    }
+}
+
+/// Detailed backend selection: evaluates candidate backends in priority order,
+/// recording refusal reasons for each skipped candidate until a supported backend is found.
+pub fn select_backend_detailed(dir: &Path, policy: SourcePolicy) -> SelectionOutcome {
+    select_from_candidates(dir, policy, candidates())
+}
+
+/// Select a backend from an explicit candidate list, recording refusal reasons for each skipped candidate.
+pub fn select_from_candidates(
+    dir: &Path,
+    policy: SourcePolicy,
+    candidates: Vec<Box<dyn CopyBackend>>,
+) -> SelectionOutcome {
+    let mut refusals = Vec::new();
+    let fs_name = crate::sys::filesystem_name(dir);
+
+    for b in candidates {
+        if b.kind() == crate::BackendKind::Hardlink && policy == SourcePolicy::Any {
+            refusals.push(CandidateRefusal {
+                backend: crate::BackendKind::Hardlink,
+                reason: "hardlink refused: source policy Any prohibits sharing mutable inodes"
+                    .to_string(),
+            });
+            continue;
+        }
+        if b.supports(dir) {
+            let kind = b.kind();
+            return SelectionOutcome {
+                backend: b,
+                kind,
+                refusals,
+            };
+        }
+        let reason = match b.kind() {
+            crate::BackendKind::Clonefile => {
+                format!("filesystem {fs_name} does not support APFS clonefile")
+            }
+            crate::BackendKind::Reflink => {
+                format!("filesystem {fs_name} does not support FICLONE reflink")
+            }
+            crate::BackendKind::CopyFileRange => {
+                format!("filesystem {fs_name} does not support copy_file_range page splicing")
+            }
+            crate::BackendKind::Hardlink => {
+                format!("filesystem {fs_name} does not support hardlinks")
+            }
+            crate::BackendKind::DeepCopy => "deep copy unavailable".to_string(),
+        };
+        refusals.push(CandidateRefusal {
+            backend: b.kind(),
+            reason,
+        });
+    }
+
+    SelectionOutcome {
+        backend: Box::new(DeepCopyBackend),
+        kind: crate::BackendKind::DeepCopy,
+        refusals,
+    }
+}
+
 /// Pick the best available backend for the filesystem holding `dir`:
 /// the first candidate that supports it, falling back to deep
 /// copy. On filesystems without clone support this lands on the
@@ -74,15 +166,7 @@ pub fn candidates() -> Vec<Box<dyn CopyBackend>> {
 /// The deep-copy floor is constructed directly rather than reached by
 /// `expect`: selection must not be able to panic.
 pub fn select_backend(dir: &Path, policy: SourcePolicy) -> Box<dyn CopyBackend> {
-    let fallback: Box<dyn CopyBackend> = Box::new(DeepCopyBackend);
-    candidates()
-        .into_iter()
-        .filter(|b| match policy {
-            SourcePolicy::Immutable => true,
-            SourcePolicy::Any => b.kind() != crate::BackendKind::Hardlink,
-        })
-        .find(|b| b.supports(dir))
-        .unwrap_or(fallback)
+    select_backend_detailed(dir, policy).backend
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -128,5 +212,28 @@ mod tests {
         // And the floor still stands: Any always yields a backend.
         let picked = select_backend(Path::new("/definitely/not/here"), SourcePolicy::Any);
         assert!(picked.supports(Path::new("/definitely/not/here")));
+    }
+
+    #[test]
+    fn detailed_selection_reports_refusal_reasons() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outcome = select_from_candidates(
+            dir.path(),
+            SourcePolicy::Any,
+            vec![Box::new(HardlinkBackend), Box::new(DeepCopyBackend)],
+        );
+        assert_eq!(outcome.selected_backend(), BackendKind::DeepCopy);
+        assert!(outcome.refusal_reason().is_some());
+        assert!(
+            outcome
+                .refusal_reason()
+                .unwrap()
+                .contains("source policy Any")
+        );
+        assert_eq!(outcome.refusals.len(), 1);
+        assert_eq!(outcome.refusals[0].backend, BackendKind::Hardlink);
+
+        let detailed = select_backend_detailed(dir.path(), SourcePolicy::Immutable);
+        assert!(!detailed.selected_backend().as_str().is_empty());
     }
 }

@@ -41,6 +41,7 @@ pub use copy_file_range::{CopyFileRangeBackend, copy_file_range_file};
 pub use deep_copy::DeepCopyBackend;
 pub use engine::{CopyEngine, CopyReceipt};
 pub use hardlink::HardlinkBackend;
+pub use materialize::{BatchItem, BatchReceipt, Materializer, PlacementOutcome, StrategyPolicy};
 #[cfg(target_os = "macos")]
 pub use materialize::{CloneOut, FileMaterialize, HardlinkOut, placement_refused};
 #[cfg(target_os = "linux")]
@@ -49,11 +50,13 @@ pub use materialize::{
 };
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub use materialize::{FileMaterialize, HardlinkOut, placement_refused};
-pub use materialize::{BatchItem, BatchReceipt, Materializer, PlacementOutcome, StrategyPolicy};
 #[cfg(target_os = "linux")]
 pub use reflink::{ReflinkBackend, reflink_file};
-pub use selection::{SourcePolicy, candidates, select_backend};
-pub use sys::buffered_copy_file;
+pub use selection::{
+    CandidateRefusal, SelectionOutcome, SourcePolicy, candidates, select_backend,
+    select_backend_detailed,
+};
+pub use sys::{buffered_copy_file, refusal_reason_for_errno};
 
 use std::io;
 use std::path::Path;

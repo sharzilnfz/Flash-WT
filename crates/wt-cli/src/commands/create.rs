@@ -137,6 +137,11 @@ pub fn run(
                 report.hydration_method,
                 total_ms
             );
+            if report.total_copied > 0 || report.hydration_method == "byte_copy" {
+                if let Some(refusal) = &report.refusal_reason {
+                    println!("  Copy mechanism: byte-copy (acceleration refused: {refusal})");
+                }
+            }
         }
         if let Ok(curr) = std::env::current_dir() {
             if let Ok(rel) = dest.strip_prefix(&curr) {
@@ -158,6 +163,21 @@ pub fn run(
         }
     }
 
+    let (copy_mechanism, copy_fallback_reason) =
+        if report.total_copied > 0 || report.hydration_method == "byte_copy" {
+            (
+                Some(
+                    report
+                        .copy_backend
+                        .clone()
+                        .unwrap_or_else(|| "byte-copy".to_string()),
+                ),
+                report.refusal_reason.clone(),
+            )
+        } else {
+            (None, None)
+        };
+
     let data = CreateData {
         worktree_path: dest.display().to_string(),
         branch: name.to_string(),
@@ -169,6 +189,8 @@ pub fn run(
         files_hydrated: report.total_files,
         incremental_decision: report.incremental_decision,
         incremental_fallback_reason: report.incremental_fallback_reason,
+        copy_mechanism,
+        copy_fallback_reason,
     };
 
     Ok((data, report.diagnostics))

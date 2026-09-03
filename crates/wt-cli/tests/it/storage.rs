@@ -1639,12 +1639,34 @@ fn cross_device_or_fallback_copies_emit_diagnostic_warning_in_json() {
     assert_eq!(json["data"]["bytes_shared_cow"], 0);
     assert!(json["data"]["bytes_copied"].as_u64().unwrap() > 0);
 
+    assert_eq!(json["data"]["copy_mechanism"], "byte-copy");
+    assert!(json["data"]["copy_fallback_reason"].is_string());
+
     let diags = json["diagnostics"].as_array().unwrap();
     assert!(
         diags
             .iter()
             .any(|d| d["code"] == "CROSS_DEVICE_COPY_DEGRADATION")
     );
+}
+
+#[test]
+fn fallback_run_names_backend_and_refusal_reason_in_human_output() {
+    let fx = Fixture::heavy_repo(20);
+    fs::write(fx.repo.join(".wtinclude"), "heavy/\n").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
+        .args(["create", "human-fallback"])
+        .env("WT_SNAPSHOTS", "0")
+        .env("WT_NO_HARDLINK", "1")
+        .current_dir(&fx.repo)
+        .output()
+        .expect("run wt binary");
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Copy mechanism: byte-copy"));
+    assert!(stdout.contains("acceleration refused"));
 }
 
 #[cfg(unix)]

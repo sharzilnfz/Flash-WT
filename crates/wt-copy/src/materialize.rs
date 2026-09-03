@@ -209,7 +209,7 @@ pub enum StrategyPolicy {
 }
 
 /// The result and diagnostics of placing one file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementOutcome {
     /// The display name of the strategy attempted or used.
     pub strategy: &'static str,
@@ -218,13 +218,17 @@ pub struct PlacementOutcome {
     /// Whether the file required a permission mode repair (e.g. replacing a shared hardlink
     /// with a private byte copy because executable bits differed from target mode).
     pub is_mode_repaired: bool,
+    /// The refusal reason if accelerated placement was refused and fell back to byte copy.
+    pub refusal_reason: Option<String>,
 }
 
 /// Encapsulated file materializer that handles backend selection,
 /// fallback placement, directory repair on ENOENT, and permission mode normalization.
 pub struct Materializer {
     backend: Option<Box<dyn FileMaterialize>>,
+    backend_name: &'static str,
     strategy: &'static str,
+    refusal_reason: Option<String>,
 }
 
 /// One file-shaped placement inside a batch.
@@ -241,7 +245,7 @@ pub struct BatchItem {
 }
 
 /// Counters for one [`Materializer::materialize_batch`] run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchReceipt {
     /// Items submitted.
     pub total: usize,
@@ -255,6 +259,25 @@ pub struct BatchReceipt {
     pub bytes_shared: u64,
     /// Bytes physically copied.
     pub bytes_copied: u64,
+    /// The exact backend name used ("copy-on-write", "reflink", "copy_file_range", "hardlink", "byte-copy").
+    pub backend_name: &'static str,
+    /// The refusal reason if acceleration was refused and files fell back to byte copy.
+    pub refusal_reason: Option<String>,
+}
+
+impl Default for BatchReceipt {
+    fn default() -> Self {
+        Self {
+            total: 0,
+            placed: 0,
+            shared_cow: 0,
+            repaired: 0,
+            bytes_shared: 0,
+            bytes_copied: 0,
+            backend_name: "byte-copy",
+            refusal_reason: None,
+        }
+    }
 }
 
 impl Materializer {
@@ -263,7 +286,18 @@ impl Materializer {
     pub fn for_paths(policy: StrategyPolicy, src_root: &Path, dest_root: &Path) -> Self {
         let is_cross = crate::sys::is_cross_device(src_root, dest_root);
         let (reflink_capable, is_ext4) = crate::sys::probe_fs_capabilities(dest_root);
-        Self::select(policy, is_cross, reflink_capable, is_ext4)
+        let refusal_reason = if is_cross {
+            let src_fs = crate::sys::filesystem_name(src_root);
+            let dest_fs = crate::sys::filesystem_name(dest_root);
+            Some(format!(
+                "cross-device mount between {} ({src_fs}) and {} ({dest_fs})",
+                src_root.display(),
+                dest_root.display()
+            ))
+        } else {
+            None
+        };
+        Self::select_internal(policy, is_cross, reflink_capable, is_ext4, refusal_reason)
     }
 
     /// Select a materializer based on strategy policy and filesystem capabilities.
@@ -273,40 +307,122 @@ impl Materializer {
         reflink_capable: bool,
         is_ext4: bool,
     ) -> Self {
-        let (backend, strategy): (Option<Box<dyn FileMaterialize>>, &'static str) = match policy {
-            StrategyPolicy::ForceByteCopy => (None, "byte-copy"),
-            StrategyPolicy::Hardlink => (Some(Box::new(HardlinkOut)), "hardlink"),
+        Self::select_internal(policy, is_cross_device, reflink_capable, is_ext4, None)
+    }
+
+    fn select_internal(
+        policy: StrategyPolicy,
+        is_cross_device: bool,
+        reflink_capable: bool,
+        is_ext4: bool,
+        explicit_refusal: Option<String>,
+    ) -> Self {
+        let (backend, backend_name, strategy, refusal_reason): (
+            Option<Box<dyn FileMaterialize>>,
+            &'static str,
+            &'static str,
+            Option<String>,
+        ) = match policy {
+            StrategyPolicy::ForceByteCopy => (
+                None,
+                "byte-copy",
+                "byte-copy",
+                explicit_refusal
+                    .or_else(|| Some("forced byte copy policy (ForceByteCopy)".to_string())),
+            ),
+            StrategyPolicy::Hardlink => (Some(Box::new(HardlinkOut)), "hardlink", "hardlink", None),
             StrategyPolicy::Default => {
                 #[cfg(target_os = "macos")]
                 {
                     let _ = is_ext4;
                     if !is_cross_device && reflink_capable {
-                        (Some(Box::new(CloneOut)), "copy-on-write")
+                        (
+                            Some(Box::new(CloneOut)),
+                            "copy-on-write",
+                            "copy-on-write",
+                            None,
+                        )
+                    } else if is_cross_device {
+                        (
+                            None,
+                            "byte-copy",
+                            "copy-on-write",
+                            explicit_refusal.or_else(|| {
+                                Some(
+                                    "cross-device mount between source and destination".to_string(),
+                                )
+                            }),
+                        )
                     } else {
-                        (None, "copy-on-write")
+                        (
+                            None,
+                            "byte-copy",
+                            "copy-on-write",
+                            explicit_refusal.or_else(|| {
+                                Some("filesystem does not support APFS clonefile".to_string())
+                            }),
+                        )
                     }
                 }
 
                 #[cfg(target_os = "linux")]
                 {
                     if !is_cross_device && reflink_capable {
-                        (Some(Box::new(ReflinkOut)), "reflink")
+                        (Some(Box::new(ReflinkOut)), "reflink", "reflink", None)
                     } else if !is_cross_device && is_ext4 {
-                        (Some(Box::new(CopyFileRangeOut)), "copy_file_range")
+                        (
+                            Some(Box::new(CopyFileRangeOut)),
+                            "copy_file_range",
+                            "copy_file_range",
+                            None,
+                        )
+                    } else if is_cross_device {
+                        (
+                            None,
+                            "byte-copy",
+                            "copy-on-write",
+                            explicit_refusal.or_else(|| {
+                                Some(
+                                    "cross-device mount between source and destination".to_string(),
+                                )
+                            }),
+                        )
                     } else {
-                        (None, "copy-on-write")
+                        (
+                            None,
+                            "byte-copy",
+                            "copy-on-write",
+                            explicit_refusal.or_else(|| {
+                                Some(
+                                    "filesystem does not support FICLONE reflink or copy_file_range"
+                                        .to_string(),
+                                )
+                            }),
+                        )
                     }
                 }
 
                 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                 {
                     let _ = (is_cross_device, reflink_capable, is_ext4);
-                    (None, "copy-on-write")
+                    (
+                        None,
+                        "byte-copy",
+                        "copy-on-write",
+                        explicit_refusal.or_else(|| {
+                            Some("platform does not support copy-on-write acceleration".to_string())
+                        }),
+                    )
                 }
             }
         };
 
-        Self { backend, strategy }
+        Self {
+            backend,
+            backend_name,
+            strategy,
+            refusal_reason,
+        }
     }
 
     /// The display name of the strategy this materializer attempts.
@@ -319,6 +435,16 @@ impl Materializer {
         self.backend.as_deref()
     }
 
+    /// The exact backend name selected ("copy-on-write", "reflink", "copy_file_range", "hardlink", "byte-copy").
+    pub fn selected_backend(&self) -> &'static str {
+        self.backend_name
+    }
+
+    /// The refusal reason if acceleration was refused at selection time.
+    pub fn refusal_reason(&self) -> Option<&str> {
+        self.refusal_reason.as_deref()
+    }
+
     /// Place one file at `dest` from `src`, creating parent directories if missing,
     /// falling back to byte copy if placement is refused, and normalizing permission `mode`.
     pub fn materialize_file(
@@ -327,7 +453,7 @@ impl Materializer {
         dest: &Path,
         mode: Option<u32>,
     ) -> io::Result<PlacementOutcome> {
-        let placed = match self.place_once(src, dest) {
+        let (placed, refusal_reason) = match self.place_once(src, dest) {
             Ok(placed) => placed,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 if let Some(parent) = dest.parent() {
@@ -356,6 +482,7 @@ impl Materializer {
             strategy: self.strategy,
             is_shared_cow,
             is_mode_repaired,
+            refusal_reason,
         })
     }
 
@@ -368,7 +495,10 @@ impl Materializer {
     /// keeps [`Self::materialize_file`] semantics exactly.
     pub fn materialize_batch(&self, items: &[BatchItem]) -> io::Result<BatchReceipt> {
         if items.is_empty() {
-            return Ok(BatchReceipt::default());
+            return Ok(BatchReceipt {
+                backend_name: self.backend_name,
+                ..Default::default()
+            });
         }
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -381,6 +511,7 @@ impl Materializer {
         let repaired = AtomicUsize::new(0);
         let bytes_shared = AtomicU64::new(0);
         let bytes_copied = AtomicU64::new(0);
+        let refusal_slot: Mutex<Option<String>> = Mutex::new(None);
         let err_slot: Mutex<Option<io::Error>> = Mutex::new(None);
 
         std::thread::scope(|s| {
@@ -392,27 +523,19 @@ impl Materializer {
                     let mut local_bytes_shared = 0u64;
                     let mut local_bytes_copied = 0u64;
                     loop {
-                        if err_slot
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .is_some()
-                        {
+                        if err_slot.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
                             break;
                         }
-                        let idx =
-                            next_idx.fetch_add(1, Ordering::Relaxed);
+                        let idx = next_idx.fetch_add(1, Ordering::Relaxed);
                         if idx >= items.len() {
                             break;
                         }
                         let item = &items[idx];
-                        let outcome = match self
-                            .materialize_file(&item.src, &item.dest, item.mode)
+                        let outcome = match self.materialize_file(&item.src, &item.dest, item.mode)
                         {
                             Ok(outcome) => outcome,
                             Err(e) => {
-                                let mut slot = err_slot
-                                    .lock()
-                                    .unwrap_or_else(|p| p.into_inner());
+                                let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
                                 if slot.is_none() {
                                     *slot = Some(e);
                                 }
@@ -425,6 +548,13 @@ impl Materializer {
                             local_bytes_shared += item.size;
                         } else {
                             local_bytes_copied += item.size;
+                            if let Some(refusal) = outcome.refusal_reason {
+                                let mut slot =
+                                    refusal_slot.lock().unwrap_or_else(|p| p.into_inner());
+                                if slot.is_none() {
+                                    *slot = Some(refusal);
+                                }
+                            }
                         }
                         if outcome.is_mode_repaired {
                             local_repaired += 1;
@@ -443,29 +573,49 @@ impl Materializer {
             return Err(err);
         }
 
+        let placed_count = placed.into_inner();
+        let shared_count = shared.into_inner();
+        let final_refusal = refusal_slot.into_inner().unwrap_or_default().or_else(|| {
+            if shared_count < placed_count {
+                self.refusal_reason.clone()
+            } else {
+                None
+            }
+        });
+
         Ok(BatchReceipt {
             total: items.len(),
-            placed: placed.into_inner(),
-            shared_cow: shared.into_inner(),
+            placed: placed_count,
+            shared_cow: shared_count,
             repaired: repaired.into_inner(),
             bytes_shared: bytes_shared.into_inner(),
             bytes_copied: bytes_copied.into_inner(),
+            backend_name: self.backend_name,
+            refusal_reason: final_refusal,
         })
     }
 
-    fn place_once(&self, src: &Path, dest: &Path) -> io::Result<bool> {
+    fn place_once(&self, src: &Path, dest: &Path) -> io::Result<(bool, Option<String>)> {
         if dest.exists() || dest.is_symlink() {
             let _ = fs::remove_file(dest);
         }
         if let Some(backend) = &self.backend {
             match backend.materialize_file(src, dest) {
-                Ok(()) => return Ok(true),
-                Err(e) if placement_refused(&e) => {}
+                Ok(()) => return Ok((true, None)),
+                Err(e) if placement_refused(&e) => {
+                    let reason = if let Some(code) = e.raw_os_error() {
+                        crate::sys::refusal_reason_for_errno(code)
+                    } else {
+                        format!("placement refused: {e}")
+                    };
+                    buffered_copy_file(src, dest)?;
+                    return Ok((false, Some(reason)));
+                }
                 Err(e) => return Err(e),
             }
         }
         buffered_copy_file(src, dest)?;
-        Ok(false)
+        Ok((false, self.refusal_reason.clone()))
     }
 
     fn finalize_mode(
