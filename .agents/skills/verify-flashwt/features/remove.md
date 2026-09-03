@@ -6,14 +6,15 @@ releases store references, and reclaims unreferenced store storage.
 ## Sub-features
 
 - `clean-unified` removes worktrees and performs store garbage collection in one invocation.
+- `clean-safety` verifies that the branch is merged and the working directory is clean before removal.
 - `remove-worktree` deletes the worktree directory and unregisters it from git.
-- `remove-refs` releases store references (refcount drops to zero for exclusive content).
+- `remove-refs` releases store references (refcounts decrement for each hydrated blob).
 - `remove-mirror` deletes the store-local worktree mirror.
 
 ## How to get to it (user POV)
 
-- Run `flashwt clean <name>` (modern verb) to tear down a worktree and run garbage collection (use `--force` / `-f` if unmerged).
-- Run `flashwt clean --all` to prune all stale or merged worktrees non-interactively.
+- Run `flashwt clean <name>` (modern verb) to tear down a worktree and run garbage collection (use `--force` / `-f` if unmerged or dirty).
+- Run `flashwt clean --all` to prune all clean, merged worktrees non-interactively.
 - Run `flashwt remove <name>` (classic verb) to remove a worktree without triggering store sweep.
 - Pass `--dir <path>` when the worktree lives outside the default sibling path.
 
@@ -35,9 +36,8 @@ Preconditions:
 - **Verify the directory is gone.** `test ! -e "$FLASHWT_FIXTURE/demo" && echo gone`.
 - **Verify git forgot it.** `git -C "$FLASHWT_ORIGIN" worktree list` no longer
   lists the demo path.
-- **Verify refs released.** The refcount files under `$FLASHWT_STORE/refs/` for the
-  hydrated blobs no longer count demo (compare the `find "$FLASHWT_STORE/refs"`
-  listing captured at create time).
+- **Verify refs released.** In legacy mode, the refcount files under `$FLASHWT_STORE/refs/`
+  no longer count the removed worktree.
 - **Proof.** Save the envelope, the `worktree list` output, and the store
   listing to `artifacts/verify-flashwt/<run-id>/`.
 
@@ -45,9 +45,7 @@ Preconditions:
 
 - Deleting the worktree directory by hand first makes remove fail with
   `<path> is not a worktree` and strands the store mirror. Always let flashwt do it.
-- `references_released: 0` can be correct when another worktree shares the
-  same content. A second create from the same fixture releases its half only.
+- `references_released` counts the number of references successfully decremented. In shared stores, decrements succeed (e.g. refcount drops from 2 to 1), so `references_released` matches the hydrated blob count. It reports 0 only if no files were hydrated or in `mark-sweep-no-refs` mode.
 - `flashwt remove` leaves unreferenced blobs in the store until a later sweep.
   `flashwt clean` runs sweep immediately during removal.
-- Removing a `scratch`/`isolate` worktree also requires its lease to expire or
-  sweep to reclaim it; see scratch-isolate.md.
+- Removing a `scratch`/`isolate` worktree leaves its lease file behind until `flashwt sweep` reclaims it.
