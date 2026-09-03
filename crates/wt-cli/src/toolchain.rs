@@ -66,11 +66,14 @@ fn find_venvs_inner(dir: &Path, out: &mut Vec<PathBuf>, visited: &mut HashSet<(u
 /// For Python virtual environments (.venv), rewrites absolute paths in `pyvenv.cfg`,
 /// updates `bin/activate*` scripts with the new target worktree path, and patches
 /// shebang lines in `bin/*` script executables. Preserves `.pyc` bytecode files without rewriting.
+/// Also purges any volatile compiler caches (e.g. Rust incremental caches) that were copied.
 pub fn relocate_toolchains(
     src_root: &Path,
     dest_root: &Path,
     hydrated_dirs: &[PathBuf],
 ) -> Result<()> {
+    purge_volatile_caches(dest_root, hydrated_dirs);
+
     for rel in hydrated_dirs {
         let dest_dir = dest_root.join(rel);
         if !dest_dir.exists() {
@@ -88,6 +91,41 @@ pub fn relocate_toolchains(
         }
     }
     Ok(())
+}
+
+/// Remove volatile compiler caches (such as Rust incremental caches)
+/// from the hydrated destination worktree.
+pub fn purge_volatile_caches(dest_root: &Path, hydrated_dirs: &[PathBuf]) {
+    for rel in hydrated_dirs {
+        let base = dest_root.join(rel);
+        if !base.exists() {
+            continue;
+        }
+        purge_volatile_caches_inner(dest_root, &base);
+    }
+}
+
+fn purge_volatile_caches_inner(dest_root: &Path, dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Ok(rel) = path.strip_prefix(dest_root) {
+            let rel_str = rel.to_string_lossy();
+            if is_volatile_cache(&rel_str) {
+                if path.is_dir() {
+                    let _ = fs::remove_dir_all(&path);
+                } else {
+                    let _ = fs::remove_file(&path);
+                }
+                continue;
+            }
+        }
+        if path.is_dir() {
+            purge_volatile_caches_inner(dest_root, &path);
+        }
+    }
 }
 
 fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
