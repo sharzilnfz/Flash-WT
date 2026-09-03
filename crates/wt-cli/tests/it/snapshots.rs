@@ -652,6 +652,7 @@ fn concurrent_identical_creates_one_publish_wins_loser_consumes_winner() {
                     .arg(&one)
                     .env("WT_STORE", &store)
                     .env("WT_SNAPSHOTS", "1")
+                    .env("WT_NO_TINY_BYPASS", "1")
                     .current_dir(&repo)
                     .output()
                     .expect("run wt binary")
@@ -664,6 +665,7 @@ fn concurrent_identical_creates_one_publish_wins_loser_consumes_winner() {
                 .arg(&two)
                 .env("WT_STORE", &store)
                 .env("WT_SNAPSHOTS", "1")
+                .env("WT_NO_TINY_BYPASS", "1")
                 .current_dir(&repo)
                 .output()
                 .expect("run wt binary")
@@ -812,7 +814,10 @@ fn incremental_rebuild_guard_wide_diff_surfaces_fallback_in_json_and_timing() {
     // Bump wide again to create a fresh wide diff
     for pkg in 0..4 {
         for f in 10..19 {
-            let p = fx.repo.join("heavy").join(format!("pkg0{pkg}/file-{f:03}.txt"));
+            let p = fx
+                .repo
+                .join("heavy")
+                .join(format!("pkg0{pkg}/file-{f:03}.txt"));
             fs::write(&p, format!("package {pkg} file {f} FRESH WIDE EDIT\n")).unwrap();
         }
     }

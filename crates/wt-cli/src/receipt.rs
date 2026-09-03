@@ -74,8 +74,7 @@ impl OperationReceipt {
 
     pub fn load(path: &Path) -> io::Result<Self> {
         let content = fs::read_to_string(path)?;
-        serde_json::from_str(&content)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        serde_json::from_str(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {

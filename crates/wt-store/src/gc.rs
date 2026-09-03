@@ -848,17 +848,23 @@ impl<'a> StoreReclaimer<'a> {
                                                 let fields: Vec<&str> = line.split('\t').collect();
                                                 match fields.as_slice() {
                                                     [_, id_str] => {
-                                                        if let Some(cid) = ContentId::from_hex(id_str) {
+                                                        if let Some(cid) =
+                                                            ContentId::from_hex(id_str)
+                                                        {
                                                             blob_ids.insert(cid);
                                                         }
                                                     }
                                                     [_, kind, id_str] if *kind == "blob" => {
-                                                        if let Some(cid) = ContentId::from_hex(id_str) {
+                                                        if let Some(cid) =
+                                                            ContentId::from_hex(id_str)
+                                                        {
                                                             blob_ids.insert(cid);
                                                         }
                                                     }
                                                     [_, kind, id_str] if *kind == "snapshot" => {
-                                                        if let Some(cid) = ContentId::from_hex(id_str) {
+                                                        if let Some(cid) =
+                                                            ContentId::from_hex(id_str)
+                                                        {
                                                             snapshot_ids.insert(cid);
                                                         }
                                                     }
@@ -866,10 +872,12 @@ impl<'a> StoreReclaimer<'a> {
                                                 }
                                             }
                                             for snap_id in &snapshot_ids {
-                                                if let Some(manifest) = crate::snapshot::read_published(
-                                                    self.store.root(),
-                                                    snap_id,
-                                                ) {
+                                                if let Some(manifest) =
+                                                    crate::snapshot::read_published(
+                                                        self.store.root(),
+                                                        snap_id,
+                                                    )
+                                                {
                                                     for entry in &manifest.entries {
                                                         if let Some(blob) = entry.blob {
                                                             blob_ids.insert(blob);
@@ -946,7 +954,8 @@ impl<'a> StoreReclaimer<'a> {
         let mode = self.store.gc_mode();
         match mode {
             GcMode::Legacy => {
-                let (swept, reclaimed_bytes) = self.store.sweep_ext(policy.grace, policy.dry_run)?;
+                let (swept, reclaimed_bytes) =
+                    self.store.sweep_ext(policy.grace, policy.dry_run)?;
                 let audit_disagreements = self.store.audit_marks_against_refs(policy.grace)?;
                 Ok(SweepSummary {
                     mode,
@@ -965,10 +974,9 @@ impl<'a> StoreReclaimer<'a> {
                 })
             }
             GcMode::MarkSweep | GcMode::MarkSweepNoRefs => {
-                let swept = self.store.sweep_mark_sweep_with_policy_excluding(
-                    policy,
-                    &self.dead_mirrors,
-                )?;
+                let swept = self
+                    .store
+                    .sweep_mark_sweep_with_policy_excluding(policy, &self.dead_mirrors)?;
                 Ok(SweepSummary {
                     mode,
                     examined_blobs: swept.examined,
@@ -1200,12 +1208,15 @@ mod tests {
             dry_run: false,
         };
 
-        let (_, live_reclaimed, _) =
-            reclaimer_live.sweep_leases(&live_policy).expect("live sweep leases");
+        let (_, live_reclaimed, _) = reclaimer_live
+            .sweep_leases(&live_policy)
+            .expect("live sweep leases");
         assert_eq!(live_reclaimed, 1);
         assert!(!lease_p.exists());
 
-        let live_summary = reclaimer_live.sweep_objects(&live_policy).expect("live sweep objects");
+        let live_summary = reclaimer_live
+            .sweep_objects(&live_policy)
+            .expect("live sweep objects");
         assert_eq!(live_summary.reclaimed_blobs, 1);
         assert!(!blob_file.exists());
     }

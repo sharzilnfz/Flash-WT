@@ -135,6 +135,8 @@ pub struct HydrationReceipt {
     pub incremental_decision: Option<crate::snapshot::IncrementalDecision>,
     /// Diagnostic reason if incremental rebuild fell back.
     pub incremental_fallback_reason: Option<String>,
+    /// Incremental hit rate if evaluated.
+    pub incremental_hit_rate: Option<f64>,
     /// The concrete copy backend selected for materialization, if determined.
     pub copy_backend: Option<String>,
     /// Refusal reason when accelerated placement falls back to byte copy.
@@ -221,6 +223,7 @@ impl DiskStore {
                     v2_linked: 0,
                     incremental_decision: None,
                     incremental_fallback_reason: None,
+                    incremental_hit_rate: None,
                     copy_backend: Some("clonefile".to_string()),
                     refusal_reason: None,
                 }))
@@ -302,6 +305,7 @@ impl DiskStore {
                         v2_linked: info.linked_files,
                         incremental_decision: info.incremental_decision,
                         incremental_fallback_reason: info.incremental_fallback_reason,
+                        incremental_hit_rate: info.incremental_hit_rate,
                         copy_backend: Some("clonefile".to_string()),
                         refusal_reason: None,
                     });
@@ -417,6 +421,7 @@ impl DiskStore {
             v2_linked: 0,
             incremental_decision: None,
             incremental_fallback_reason: None,
+            incremental_hit_rate: None,
             copy_backend,
             refusal_reason,
         })

@@ -69,6 +69,8 @@ pub enum IncrementalResult {
         cloned_units: usize,
         /// Number of files freshly hardlinked.
         linked_files: usize,
+        /// Hit rate of unchanged entries against base snapshot.
+        hit_rate: f64,
     },
     /// Incremental rebuild rejected or failed; caller must fall back to full build.
     Fallback {
@@ -76,6 +78,8 @@ pub enum IncrementalResult {
         decision: IncrementalDecision,
         /// Detailed human-readable fallback diagnostic.
         reason: String,
+        /// Hit rate of unchanged entries if calculated prior to fallback.
+        hit_rate: Option<f64>,
     },
 }
 
@@ -111,6 +115,8 @@ pub struct SnapshotHydration {
     pub incremental_decision: Option<IncrementalDecision>,
     /// Detailed diagnostic reason if incremental rebuild fell back.
     pub incremental_fallback_reason: Option<String>,
+    /// Incremental hit rate if evaluated.
+    pub incremental_hit_rate: Option<f64>,
 }
 
 /// Result of attempting the snapshot path for one heavy directory.
@@ -323,6 +329,7 @@ fn try_lockfile_hit_impl(
                             build: None,
                             incremental_decision: None,
                             incremental_fallback_reason: None,
+                            incremental_hit_rate: None,
                         });
                     }
                     Err(CloneFailure::SnapshotVanished) => continue,
@@ -474,6 +481,7 @@ fn hydrate_impl(store: &mut DiskStore, req: &SnapshotProjectionRequest<'_>) -> S
                             build,
                             incremental_decision: None,
                             incremental_fallback_reason: None,
+                            incremental_hit_rate: None,
                         });
                     }
                     // Snapshot evicted mid-flight: rebuild and try again.
@@ -490,6 +498,7 @@ fn hydrate_impl(store: &mut DiskStore, req: &SnapshotProjectionRequest<'_>) -> S
         let mut incremental: Option<(usize, usize)> = None;
         let mut incremental_decision: Option<IncrementalDecision> = None;
         let mut incremental_fallback_reason: Option<String> = None;
+        let mut incremental_hit_rate: Option<f64> = None;
 
         if v2 {
             match try_incremental(
@@ -504,13 +513,20 @@ fn hydrate_impl(store: &mut DiskStore, req: &SnapshotProjectionRequest<'_>) -> S
                 IncrementalResult::Hit {
                     cloned_units,
                     linked_files,
+                    hit_rate,
                 } => {
                     incremental = Some((cloned_units, linked_files));
                     incremental_decision = Some(IncrementalDecision::Hit);
+                    incremental_hit_rate = Some(hit_rate);
                 }
-                IncrementalResult::Fallback { decision, reason } => {
+                IncrementalResult::Fallback {
+                    decision,
+                    reason,
+                    hit_rate,
+                } => {
                     incremental_decision = Some(decision);
                     incremental_fallback_reason = Some(reason);
+                    incremental_hit_rate = hit_rate;
                 }
             }
         }
@@ -575,6 +591,7 @@ fn hydrate_impl(store: &mut DiskStore, req: &SnapshotProjectionRequest<'_>) -> S
                     build,
                     incremental_decision,
                     incremental_fallback_reason,
+                    incremental_hit_rate,
                 });
             }
             // Snapshot evicted mid-flight: rebuild and try again.
@@ -608,6 +625,7 @@ pub fn try_incremental(
         return IncrementalResult::Fallback {
             decision: IncrementalDecision::NoBaseSnapshot,
             reason: "no previous snapshot found in selection index".to_string(),
+            hit_rate: None,
         };
     };
 
@@ -616,6 +634,7 @@ pub fn try_incremental(
         return IncrementalResult::Fallback {
             decision: IncrementalDecision::EmptyManifest,
             reason: "manifest has no entries".to_string(),
+            hit_rate: None,
         };
     }
 
@@ -623,12 +642,18 @@ pub fn try_incremental(
         return IncrementalResult::Fallback {
             decision: IncrementalDecision::LockfileMiss,
             reason: "lockfile hash mismatch between current manifest and base snapshot".to_string(),
+            hit_rate: None,
         };
     }
 
     let diff = SnapshotDiff::compute(&old_manifest.entries, &manifest.entries);
     let changed = diff.changed_count();
     let changed_ratio = changed as f64 / total as f64;
+    let hit_rate = if total > 0 {
+        (total.saturating_sub(changed)) as f64 / total as f64
+    } else {
+        1.0
+    };
     if changed_ratio > INCREMENTAL_DIFF_RATIO_MAX {
         return IncrementalResult::Fallback {
             decision: IncrementalDecision::DiffTooWide,
@@ -639,6 +664,7 @@ pub fn try_incremental(
                 total,
                 INCREMENTAL_DIFF_RATIO_MAX * 100.0,
             ),
+            hit_rate: Some(hit_rate),
         };
     }
 
@@ -653,11 +679,13 @@ pub fn try_incremental(
             IncrementalResult::Hit {
                 cloned_units: timing.clone_units,
                 linked_files: timing.linked_files,
+                hit_rate,
             }
         }
         Err(e) => IncrementalResult::Fallback {
             decision: IncrementalDecision::PublishFailed,
             reason: format!("incremental publish failed: {e}"),
+            hit_rate: None,
         },
     }
 }
@@ -676,6 +704,7 @@ pub fn try_incremental(
     IncrementalResult::Fallback {
         decision: IncrementalDecision::PublishFailed,
         reason: "incremental snapshots unsupported on this platform".to_string(),
+        hit_rate: None,
     }
 }
 

@@ -488,6 +488,43 @@ impl WorkspaceEngine {
         self.cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
+    /// Number of cache hits recorded by this engine's cache.
+    pub fn cache_hits(&self) -> usize {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).hits()
+    }
+
+    /// Number of cache misses recorded by this engine's cache.
+    pub fn cache_misses(&self) -> usize {
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .misses()
+    }
+
+    /// Whether this engine's cache has a verified commit for `(dir, rev)`.
+    pub fn cache_has_commit(&self, dir: &Path, rev: &str) -> bool {
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_commit(dir, rev)
+    }
+
+    /// Whether this engine's cache has a resolved git directory for `worktree`.
+    pub fn cache_has_git_dir(&self, worktree: &Path) -> bool {
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_git_dir(worktree)
+    }
+
+    /// Whether this engine's cache has a toplevel root for `dir`.
+    pub fn cache_has_toplevel(&self, dir: &Path) -> bool {
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_toplevel(dir)
+    }
+
     /// The repository root this engine operates on.
     pub fn root(&self) -> &Path {
         &self.root
@@ -819,29 +856,29 @@ bare
         let expected_sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
         let engine = WorkspaceEngine::with_isolated_cache(repo.clone());
-        assert_eq!(engine.cache().lock().unwrap().hits(), 0);
-        assert_eq!(engine.cache().lock().unwrap().misses(), 0);
+        assert_eq!(engine.cache_hits(), 0);
+        assert_eq!(engine.cache_misses(), 0);
 
         let commit1 = engine.resolve_commit("main").unwrap();
         assert_eq!(commit1, expected_sha);
-        assert_eq!(engine.cache().lock().unwrap().hits(), 0);
-        assert_eq!(engine.cache().lock().unwrap().misses(), 1);
-        assert!(engine.cache().lock().unwrap().has_commit(&repo, "main"));
+        assert_eq!(engine.cache_hits(), 0);
+        assert_eq!(engine.cache_misses(), 1);
+        assert!(engine.cache_has_commit(&repo, "main"));
 
         let commit2 = engine.resolve_commit("main").unwrap();
         assert_eq!(commit2, expected_sha);
-        assert_eq!(engine.cache().lock().unwrap().hits(), 1);
-        assert_eq!(engine.cache().lock().unwrap().misses(), 1);
+        assert_eq!(engine.cache_hits(), 1);
+        assert_eq!(engine.cache_misses(), 1);
 
         let commit_head = engine.resolve_commit("HEAD").unwrap();
         assert_eq!(commit_head, expected_sha);
-        assert_eq!(engine.cache().lock().unwrap().hits(), 1);
-        assert_eq!(engine.cache().lock().unwrap().misses(), 2);
+        assert_eq!(engine.cache_hits(), 1);
+        assert_eq!(engine.cache_misses(), 2);
 
         let commit_head2 = engine.resolve_commit("HEAD").unwrap();
         assert_eq!(commit_head2, expected_sha);
-        assert_eq!(engine.cache().lock().unwrap().hits(), 2);
-        assert_eq!(engine.cache().lock().unwrap().misses(), 2);
+        assert_eq!(engine.cache_hits(), 2);
+        assert_eq!(engine.cache_misses(), 2);
     }
 
     #[test]
@@ -862,18 +899,18 @@ bare
         let engine = WorkspaceEngine::with_isolated_cache(repo.clone());
         let top1 = engine.show_toplevel(&sub).unwrap();
         assert_eq!(top1, expected_toplevel);
-        assert_eq!(engine.cache().lock().unwrap().hits(), 0);
-        assert_eq!(engine.cache().lock().unwrap().misses(), 1);
+        assert_eq!(engine.cache_hits(), 0);
+        assert_eq!(engine.cache_misses(), 1);
 
         let top2 = engine.show_toplevel(&sub).unwrap();
         assert_eq!(top2, expected_toplevel);
-        assert_eq!(engine.cache().lock().unwrap().hits(), 1);
-        assert_eq!(engine.cache().lock().unwrap().misses(), 1);
+        assert_eq!(engine.cache_hits(), 1);
+        assert_eq!(engine.cache_misses(), 1);
 
         let top3 = engine.show_toplevel(&repo).unwrap();
         assert_eq!(top3, expected_toplevel);
-        assert_eq!(engine.cache().lock().unwrap().hits(), 2);
-        assert_eq!(engine.cache().lock().unwrap().misses(), 1);
+        assert_eq!(engine.cache_hits(), 2);
+        assert_eq!(engine.cache_misses(), 1);
     }
 
     #[test]
@@ -902,18 +939,18 @@ bare
 
         let gd1 = engine.resolve_git_dir(&wt_path);
         assert!(gd1.exists());
-        assert_eq!(engine.cache().lock().unwrap().hits(), 0);
-        assert_eq!(engine.cache().lock().unwrap().misses(), 1);
+        assert_eq!(engine.cache_hits(), 0);
+        assert_eq!(engine.cache_misses(), 1);
 
         let gd2 = engine.git_dir(&wt_path).unwrap();
         assert_eq!(gd1, gd2);
-        assert_eq!(engine.cache().lock().unwrap().hits(), 1);
-        assert_eq!(engine.cache().lock().unwrap().misses(), 1);
+        assert_eq!(engine.cache_hits(), 1);
+        assert_eq!(engine.cache_misses(), 1);
 
         let gd3 = engine.git_dir(&wt_path).unwrap();
         assert_eq!(gd1, gd3);
-        assert_eq!(engine.cache().lock().unwrap().hits(), 2);
-        assert_eq!(engine.cache().lock().unwrap().misses(), 1);
+        assert_eq!(engine.cache_hits(), 2);
+        assert_eq!(engine.cache_misses(), 1);
     }
 
     #[test]
@@ -927,13 +964,13 @@ bare
         let engine2 = engine1.clone();
 
         let commit1 = engine1.resolve_commit("main").unwrap();
-        assert_eq!(engine1.cache().lock().unwrap().hits(), 0);
-        assert_eq!(engine1.cache().lock().unwrap().misses(), 1);
+        assert_eq!(engine1.cache_hits(), 0);
+        assert_eq!(engine1.cache_misses(), 1);
 
         let commit2 = engine2.resolve_commit("main").unwrap();
         assert_eq!(commit1, commit2);
-        assert_eq!(engine2.cache().lock().unwrap().hits(), 1);
-        assert_eq!(engine2.cache().lock().unwrap().misses(), 1);
+        assert_eq!(engine2.cache_hits(), 1);
+        assert_eq!(engine2.cache_misses(), 1);
     }
 
     #[test]
@@ -949,16 +986,16 @@ bare
 
         let gd = engine.resolve_git_dir(&wt_path);
         assert!(gd.exists());
-        assert!(engine.cache().lock().unwrap().has_git_dir(&wt_path));
+        assert!(engine.cache_has_git_dir(&wt_path));
 
         engine.remove_worktree_force(&wt_path).unwrap();
-        assert!(!engine.cache().lock().unwrap().has_git_dir(&wt_path));
+        assert!(!engine.cache_has_git_dir(&wt_path));
 
         let feat_sha = engine.resolve_commit("feat").unwrap();
         assert!(!feat_sha.is_empty());
-        assert!(engine.cache().lock().unwrap().has_commit(&repo, "feat"));
+        assert!(engine.cache_has_commit(&repo, "feat"));
 
         engine.delete_branch("feat").unwrap();
-        assert!(!engine.cache().lock().unwrap().has_commit(&repo, "feat"));
+        assert!(!engine.cache_has_commit(&repo, "feat"));
     }
 }

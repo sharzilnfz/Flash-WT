@@ -71,7 +71,7 @@ impl<T: Serialize> Envelope<T> {
 }
 
 /// Payload for `wt create --json`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CreateData {
     pub worktree_path: String,
     pub branch: String,
@@ -86,6 +86,8 @@ pub struct CreateData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incremental_fallback_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental_hit_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub copy_mechanism: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub copy_fallback_reason: Option<String>,
@@ -96,7 +98,7 @@ pub struct CreateData {
 }
 
 /// Payload for `wt hydrate --json`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HydrateData {
     pub destination_path: String,
     pub source_path: String,
@@ -112,9 +114,13 @@ pub struct HydrateData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incremental_fallback_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental_hit_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub copy_mechanism: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub copy_fallback_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_path: Option<String>,
 }
 
 /// Payload for `wt init --json`.
@@ -230,6 +236,10 @@ pub struct DoctorEnvVars {
     pub wt_hardlink: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wt_no_hardlink: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_tiny_bypass: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_no_tiny_bypass: Option<String>,
 }
 
 /// Probed filesystem capabilities in `DoctorData`.
@@ -392,6 +402,7 @@ mod tests {
             files_hydrated: 10,
             incremental_decision: None,
             incremental_fallback_reason: None,
+            incremental_hit_rate: None,
             copy_mechanism: None,
             copy_fallback_reason: None,
             resumed: None,
@@ -475,6 +486,8 @@ mod tests {
                 wt_max_snapshot_bytes: None,
                 wt_hardlink: None,
                 wt_no_hardlink: None,
+                wt_tiny_bypass: None,
+                wt_no_tiny_bypass: None,
             },
             fs_capabilities: DoctorFsCapabilities {
                 apfs_clonefile: true,
@@ -598,8 +611,10 @@ mod tests {
             dirs_hydrated: vec!["node_modules".into()],
             incremental_decision: None,
             incremental_fallback_reason: None,
+            incremental_hit_rate: None,
             copy_mechanism: Some("byte-copy".into()),
             copy_fallback_reason: Some("cross-device mount".into()),
+            receipt_path: None,
         };
         let env = Envelope::ok("hydrate", data, vec![]);
         let json = serde_json::to_string(&env).expect("serialize hydrate json");
@@ -632,6 +647,7 @@ mod tests {
             incremental_fallback_reason: Some(
                 "changed entries ratio 15.00% (6 of 40) exceeds maximum threshold 10.00%".into(),
             ),
+            incremental_hit_rate: Some(0.85),
             copy_mechanism: None,
             copy_fallback_reason: None,
             resumed: None,
@@ -645,6 +661,7 @@ mod tests {
             parsed["data"]["incremental_fallback_reason"],
             "changed entries ratio 15.00% (6 of 40) exceeds maximum threshold 10.00%"
         );
+        assert_eq!(parsed["data"]["incremental_hit_rate"], 0.85);
     }
 
     #[test]
@@ -686,7 +703,10 @@ mod tests {
         assert_eq!(parsed["command"], "lease");
         assert_eq!(parsed["status"], "ok");
         assert_eq!(parsed["data"]["leases"][0]["lease_id"], "scratch-demo1");
-        assert_eq!(parsed["data"]["leases"][0]["worktree_path"], "/tmp/wt/repo-scratch-demo1");
+        assert_eq!(
+            parsed["data"]["leases"][0]["worktree_path"],
+            "/tmp/wt/repo-scratch-demo1"
+        );
         assert_eq!(parsed["data"]["matched_lease"]["lease_id"], "scratch-demo1");
     }
 
@@ -703,6 +723,7 @@ mod tests {
             files_hydrated: 10,
             incremental_decision: None,
             incremental_fallback_reason: None,
+            incremental_hit_rate: None,
             copy_mechanism: None,
             copy_fallback_reason: None,
             resumed: Some(true),

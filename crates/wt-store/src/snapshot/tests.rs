@@ -1415,11 +1415,15 @@ fn try_incremental_guard_narrow_diff_takes_incremental_path() {
         IncrementalResult::Hit {
             cloned_units,
             linked_files,
+            hit_rate,
         } => {
             assert_eq!(cloned_units, 1);
             assert_eq!(linked_files, 1);
+            assert!(hit_rate > 0.0);
         }
-        IncrementalResult::Fallback { decision, reason } => {
+        IncrementalResult::Fallback {
+            decision, reason, ..
+        } => {
             panic!("expected incremental hit for 5% diff, got fallback {decision:?}: {reason}");
         }
     }
@@ -1464,9 +1468,9 @@ fn try_incremental_guard_wide_diff_falls_back_to_full_build() {
 
     // Bump 3 files out of 20 (15% changed entries > 10% threshold)
     let mut new_entries = old_manifest.entries.clone();
-    for i in 0..3 {
+    for (i, entry) in new_entries.iter_mut().take(3).enumerate() {
         let bumped_blob = store.put(format!("bumped file {i}\n").as_bytes()).unwrap();
-        new_entries[i] = SnapshotEntry::file(format!("file_{i:02}.txt"), bumped_blob, 0o644);
+        *entry = SnapshotEntry::file(format!("file_{i:02}.txt"), bumped_blob, 0o644);
     }
     let new_manifest =
         Manifest::new_with_lockfile_and_size(new_entries, Some(lock_hash), 200).unwrap();
@@ -1483,7 +1487,9 @@ fn try_incremental_guard_wide_diff_falls_back_to_full_build() {
     );
 
     match res {
-        IncrementalResult::Fallback { decision, reason } => {
+        IncrementalResult::Fallback {
+            decision, reason, ..
+        } => {
             assert_eq!(decision, IncrementalDecision::DiffTooWide);
             assert!(
                 reason.contains("exceeds maximum threshold"),
@@ -1553,7 +1559,9 @@ fn try_incremental_guard_lockfile_miss_falls_back_to_full_build() {
     );
 
     match res {
-        IncrementalResult::Fallback { decision, reason } => {
+        IncrementalResult::Fallback {
+            decision, reason, ..
+        } => {
             assert_eq!(decision, IncrementalDecision::LockfileMiss);
             assert!(
                 reason.contains("lockfile hash mismatch"),
@@ -1652,8 +1660,12 @@ fn snapshot_projection_engine_hydrates_narrow_wide_and_lockfile_miss() {
     let outcome2 = SnapshotProjectionEngine::hydrate(&mut store, &req2);
     match outcome2 {
         SnapshotOutcome::Hydrated(info) => {
-            assert_eq!(info.mode, "v2", "narrow diff should take v2 incremental path");
+            assert_eq!(
+                info.mode, "v2",
+                "narrow diff should take v2 incremental path"
+            );
             assert_eq!(info.incremental_decision, Some(IncrementalDecision::Hit));
+            assert!(info.incremental_hit_rate.is_some());
             assert_eq!(info.cloned_units, 1);
             assert_eq!(info.linked_files, 1);
             assert_eq!(
@@ -1691,7 +1703,10 @@ fn snapshot_projection_engine_hydrates_narrow_wide_and_lockfile_miss() {
     let outcome3 = SnapshotProjectionEngine::hydrate(&mut store, &req3);
     match outcome3 {
         SnapshotOutcome::Hydrated(info) => {
-            assert_eq!(info.mode, "build", "wide diff should fall back to full build mode");
+            assert_eq!(
+                info.mode, "build",
+                "wide diff should fall back to full build mode"
+            );
             assert_eq!(
                 info.incremental_decision,
                 Some(IncrementalDecision::DiffTooWide)
@@ -1728,7 +1743,10 @@ fn snapshot_projection_engine_hydrates_narrow_wide_and_lockfile_miss() {
     let outcome4 = SnapshotProjectionEngine::hydrate(&mut store, &req4);
     match outcome4 {
         SnapshotOutcome::Hydrated(info) => {
-            assert_eq!(info.mode, "build", "lockfile miss should fall back to full build mode");
+            assert_eq!(
+                info.mode, "build",
+                "lockfile miss should fall back to full build mode"
+            );
             assert_eq!(
                 info.incremental_decision,
                 Some(IncrementalDecision::LockfileMiss)
@@ -1739,4 +1757,3 @@ fn snapshot_projection_engine_hydrates_narrow_wide_and_lockfile_miss() {
         other => panic!("expected fallback to build for lockfile miss, got {other:?}"),
     }
 }
-

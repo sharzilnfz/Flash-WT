@@ -510,4 +510,3 @@ mod tests {
         assert_eq!(loaded.patterns(), &["b/".to_string()]);
     }
 }
-

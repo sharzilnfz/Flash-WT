@@ -6,9 +6,7 @@ use wt_copy::probe_capabilities;
 use wt_store::DiskStore;
 
 use crate::config::RunConfig;
-use crate::envelope::{
-    Diagnostic, DoctorData, DoctorEnvVars, DoctorFsCapabilities, StoreDuData,
-};
+use crate::envelope::{Diagnostic, DoctorData, DoctorEnvVars, DoctorFsCapabilities, StoreDuData};
 use crate::error::Result;
 use crate::hydrate::store_dir;
 use crate::output::HumanBytes;
@@ -29,6 +27,8 @@ fn collect_env_vars() -> DoctorEnvVars {
         wt_max_snapshot_bytes: env_var_opt("WT_MAX_SNAPSHOT_BYTES"),
         wt_hardlink: env_var_opt("WT_HARDLINK"),
         wt_no_hardlink: env_var_opt("WT_NO_HARDLINK"),
+        wt_tiny_bypass: env_var_opt("WT_TINY_BYPASS"),
+        wt_no_tiny_bypass: env_var_opt("WT_NO_TINY_BYPASS"),
     }
 }
 
@@ -74,9 +74,14 @@ pub fn run(cfg: &RunConfig) -> Result<(DoctorData, Vec<Diagnostic>)> {
             ("WT_TIMING", env_vars.wt_timing.as_deref()),
             ("WT_GC_GRACE", env_vars.wt_gc_grace.as_deref()),
             ("WT_SNAPSHOT_CAP", env_vars.wt_snapshot_cap.as_deref()),
-            ("WT_MAX_SNAPSHOT_BYTES", env_vars.wt_max_snapshot_bytes.as_deref()),
+            (
+                "WT_MAX_SNAPSHOT_BYTES",
+                env_vars.wt_max_snapshot_bytes.as_deref(),
+            ),
             ("WT_HARDLINK", env_vars.wt_hardlink.as_deref()),
             ("WT_NO_HARDLINK", env_vars.wt_no_hardlink.as_deref()),
+            ("WT_TINY_BYPASS", env_vars.wt_tiny_bypass.as_deref()),
+            ("WT_NO_TINY_BYPASS", env_vars.wt_no_tiny_bypass.as_deref()),
         ];
         for (k, v) in env_pairs {
             match v {

@@ -36,7 +36,8 @@
         "scratch",
         "list",
         "demo",
-        "lease"
+        "lease",
+        "doctor"
       ],
       "description": "Canonical name of the invoked wt command."
     },
@@ -60,7 +61,9 @@
         { "$ref": "#/definitions/ScratchData" },
         { "$ref": "#/definitions/DemoData" },
         { "$ref": "#/definitions/CleanData" },
-        { "$ref": "#/definitions/LeaseData" }
+        { "$ref": "#/definitions/LeaseData" },
+        { "$ref": "#/definitions/DoctorData" },
+        { "$ref": "#/definitions/StoreDuData" }
       ]
     },
     "diagnostics": {
@@ -113,6 +116,11 @@
         "bytes_shared_cow": { "type": "integer", "minimum": 0 },
         "bytes_copied": { "type": "integer", "minimum": 0 },
         "files_hydrated": { "type": "integer", "minimum": 0 },
+        "incremental_decision": { "type": "string" },
+        "incremental_fallback_reason": { "type": "string" },
+        "incremental_hit_rate": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "copy_mechanism": { "type": "string" },
+        "copy_fallback_reason": { "type": "string" },
         "resumed": { "type": "boolean" },
         "receipt_path": { "type": "string" }
       },
@@ -143,7 +151,13 @@
         "dirs_hydrated": {
           "type": "array",
           "items": { "type": "string" }
-        }
+        },
+        "incremental_decision": { "type": "string" },
+        "incremental_fallback_reason": { "type": "string" },
+        "incremental_hit_rate": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "copy_mechanism": { "type": "string" },
+        "copy_fallback_reason": { "type": "string" },
+        "receipt_path": { "type": "string" }
       },
       "additionalProperties": false
     },
@@ -417,6 +431,76 @@
         "branch": { "type": "string" },
         "base": { "type": "string" },
         "pid": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "DoctorData": {
+      "type": "object",
+      "required": [
+        "store_path",
+        "env_vars",
+        "fs_capabilities",
+        "store_disk_usage"
+      ],
+      "properties": {
+        "store_path": { "type": "string" },
+        "env_vars": { "$ref": "#/definitions/DoctorEnvVars" },
+        "fs_capabilities": { "$ref": "#/definitions/DoctorFsCapabilities" },
+        "store_disk_usage": { "$ref": "#/definitions/StoreDuData" }
+      },
+      "additionalProperties": false
+    },
+    "DoctorEnvVars": {
+      "type": "object",
+      "properties": {
+        "wt_store": { "type": "string" },
+        "wt_snapshots": { "type": "string" },
+        "wt_snapshots_v2": { "type": "string" },
+        "wt_verify": { "type": "string" },
+        "wt_timing": { "type": "string" },
+        "wt_gc_grace": { "type": "string" },
+        "wt_snapshot_cap": { "type": "string" },
+        "wt_max_snapshot_bytes": { "type": "string" },
+        "wt_hardlink": { "type": "string" },
+        "wt_no_hardlink": { "type": "string" },
+        "wt_tiny_bypass": { "type": "string" },
+        "wt_no_tiny_bypass": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "DoctorFsCapabilities": {
+      "type": "object",
+      "required": [
+        "apfs_clonefile",
+        "ficlone",
+        "copy_file_range"
+      ],
+      "properties": {
+        "apfs_clonefile": { "type": "boolean" },
+        "ficlone": { "type": "boolean" },
+        "copy_file_range": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "StoreDuData": {
+      "type": "object",
+      "required": [
+        "store_path",
+        "objects_bytes",
+        "snapshots_bytes",
+        "mirrors_bytes",
+        "refs_bytes",
+        "caches_bytes",
+        "total_bytes"
+      ],
+      "properties": {
+        "store_path": { "type": "string" },
+        "objects_bytes": { "type": "integer", "minimum": 0 },
+        "snapshots_bytes": { "type": "integer", "minimum": 0 },
+        "mirrors_bytes": { "type": "integer", "minimum": 0 },
+        "refs_bytes": { "type": "integer", "minimum": 0 },
+        "caches_bytes": { "type": "integer", "minimum": 0 },
+        "total_bytes": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     }

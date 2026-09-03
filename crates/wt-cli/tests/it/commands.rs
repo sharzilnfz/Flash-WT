@@ -7,9 +7,7 @@ use std::process::Command;
 use std::time::SystemTime;
 
 use crate::common::{Fixture, git, git_out, list_files};
-use wt_store::{
-    ContentId, DiskStore, PublishOptions, WorktreeLease, lease_path, publish_lease,
-};
+use wt_store::{ContentId, DiskStore, PublishOptions, WorktreeLease, lease_path, publish_lease};
 
 const HEAVY_FILES: usize = 200;
 
@@ -178,7 +176,9 @@ fn onboarding_fresh_repo_without_manifest_creates_worktree_and_explains_zero_sav
     assert!(stdout.contains("using defaults"), "stdout:\n{stdout}");
     assert!(stdout.contains("nothing to hydrate"), "stdout:\n{stdout}");
     assert!(
-        stdout.contains("no matching heavy directories found and the worktree relies strictly on git tracking"),
+        stdout.contains(
+            "no matching heavy directories found and the worktree relies strictly on git tracking"
+        ),
         "stdout must explain zero savings:\n{stdout}"
     );
     assert!(
@@ -206,7 +206,9 @@ fn onboarding_fresh_repo_without_manifest_creates_worktree_and_explains_zero_sav
     assert_eq!(envelope["data"]["files_hydrated"], 0);
     assert_eq!(envelope["data"]["bytes_shared_cow"], 0);
 
-    let diags = envelope["diagnostics"].as_array().expect("diagnostics array");
+    let diags = envelope["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
     let zero_savings = diags
         .iter()
         .find(|d| d["code"] == "ZERO_SAVINGS")
@@ -1469,7 +1471,10 @@ fn sweep_dry_run_reports_without_deleting() {
     assert!(dry_text.contains("1 dead lease"));
 
     // Verify neither the blob nor the lease was deleted
-    assert!(blob_path.exists(), "dry run must not delete unreferenced blob");
+    assert!(
+        blob_path.exists(),
+        "dry run must not delete unreferenced blob"
+    );
     assert!(lease_p.exists(), "dry run must not delete dead lease");
 
     // 4. Run dry run with --json
@@ -1495,7 +1500,9 @@ fn sweep_dry_run_reports_without_deleting() {
     assert!(live_text.contains("swept store"));
 
     // Now verified deleted
-    assert!(!blob_path.exists(), "live sweep must delete unreferenced blob");
+    assert!(
+        !blob_path.exists(),
+        "live sweep must delete unreferenced blob"
+    );
     assert!(!lease_p.exists(), "live sweep must delete dead lease");
 }
-

@@ -42,7 +42,9 @@ pub(crate) fn is_sync_disabled() -> bool {
         }
         return true;
     }
-    if std::env::var_os("WT_FORCE_SYNC").is_some() || std::env::var_os("WT_TEST_FORCE_SYNC").is_some() {
+    if std::env::var_os("WT_FORCE_SYNC").is_some()
+        || std::env::var_os("WT_TEST_FORCE_SYNC").is_some()
+    {
         return false;
     }
     if cfg!(test) {

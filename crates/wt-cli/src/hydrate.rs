@@ -98,8 +98,13 @@ pub fn scan_dir_size_capped(
     Ok(())
 }
 
-/// Returns true if target directories total under 500 files and under 8 MB.
-pub fn is_tiny_repo(root: &Path, dirs: &[PathBuf]) -> bool {
+/// Returns true if target directories total under the specified file and byte limits.
+pub fn is_tiny_repo_with_limits(
+    root: &Path,
+    dirs: &[PathBuf],
+    max_files: u64,
+    max_bytes: u64,
+) -> bool {
     if dirs.is_empty() {
         return false;
     }
@@ -107,22 +112,19 @@ pub fn is_tiny_repo(root: &Path, dirs: &[PathBuf]) -> bool {
     let mut bytes = 0u64;
     for rel in dirs {
         let src = root.join(rel);
-        if scan_dir_size_capped(
-            &src,
-            &mut files,
-            &mut bytes,
-            TINY_REPO_MAX_FILES,
-            TINY_REPO_MAX_BYTES,
-        )
-        .is_err()
-        {
+        if scan_dir_size_capped(&src, &mut files, &mut bytes, max_files, max_bytes).is_err() {
             return false;
         }
-        if files >= TINY_REPO_MAX_FILES || bytes >= TINY_REPO_MAX_BYTES {
+        if files >= max_files || bytes >= max_bytes {
             return false;
         }
     }
-    files < TINY_REPO_MAX_FILES && bytes < TINY_REPO_MAX_BYTES
+    files < max_files && bytes < max_bytes
+}
+
+/// Returns true if target directories total under 500 files and under 8 MB.
+pub fn is_tiny_repo(root: &Path, dirs: &[PathBuf]) -> bool {
+    is_tiny_repo_with_limits(root, dirs, TINY_REPO_MAX_FILES, TINY_REPO_MAX_BYTES)
 }
 
 /// Determines if the given request should bypass the store entirely.
@@ -130,7 +132,7 @@ pub fn should_bypass_tiny_repo(root: &Path, dirs: &[PathBuf], cfg: &RunConfig) -
     if !cfg.tiny_bypass {
         return false;
     }
-    if cfg.strategy_policy == StrategyPolicy::Hardlink {
+    if cfg.strategy_policy != StrategyPolicy::Default {
         return false;
     }
     if cfg.verify {
@@ -157,6 +159,52 @@ pub struct HydrationReport {
     pub diagnostics: Vec<Diagnostic>,
     pub incremental_decision: Option<String>,
     pub incremental_fallback_reason: Option<String>,
+    pub incremental_hit_rate: Option<f64>,
+}
+
+/// Print copy mechanism refusal detail if fallback to byte-copy occurred.
+pub fn print_copy_mechanism_refusal(report: &HydrationReport) {
+    if report.total_copied > 0 || report.hydration_method == "byte_copy" {
+        if let Some(refusal) = &report.refusal_reason {
+            println!("  Copy mechanism: byte-copy (acceleration refused: {refusal})");
+        }
+    }
+}
+
+/// Print zero savings explanation when no files or directories were hydrated.
+pub fn print_zero_savings(dirs_hydrated: &[PathBuf]) {
+    let reason = if dirs_hydrated.is_empty() {
+        ZeroSavingsReason::NoMatchingDirectories
+    } else {
+        ZeroSavingsReason::NoFilesHydrated
+    };
+    println!("  {}", reason.human_summary());
+}
+
+fn refused_accelerated_mechanism(refusal_reason: Option<&str>) -> &'static str {
+    if let Some(reason) = refusal_reason {
+        if reason.contains("clonefile") || reason.contains("APFS") {
+            return "clonefile";
+        }
+        if reason.contains("reflink") || reason.contains("FICLONE") {
+            return "reflink";
+        }
+        if reason.contains("copy_file_range") {
+            return "copy_file_range";
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "clonefile"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "reflink"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        "clonefile"
+    }
 }
 
 /// Deep hydration engine coordinating discovery, caching, and storage delegation.
@@ -284,6 +332,7 @@ impl<'a> HydrationEngine<'a> {
             diagnostics: Vec::new(),
             incremental_decision: None,
             incremental_fallback_reason: None,
+            incremental_hit_rate: None,
         })
     }
 
@@ -343,6 +392,7 @@ impl<'a> HydrationEngine<'a> {
                 diagnostics,
                 incremental_decision: None,
                 incremental_fallback_reason: None,
+                incremental_hit_rate: None,
             });
         }
 
@@ -364,6 +414,7 @@ impl<'a> HydrationEngine<'a> {
         let mut report_diagnostics = Vec::new();
         let mut incremental_decision: Option<String> = None;
         let mut incremental_fallback_reason: Option<String> = None;
+        let mut incremental_hit_rate: Option<f64> = None;
 
         for rel in &dirs {
             dirs_hydrated.push(rel.clone());
@@ -520,6 +571,9 @@ impl<'a> HydrationEngine<'a> {
                 if let Some(reason) = receipt.incremental_fallback_reason {
                     incremental_fallback_reason = Some(reason);
                 }
+                if let Some(rate) = receipt.incremental_hit_rate {
+                    incremental_hit_rate = Some(rate);
+                }
                 if let Some(mode) = receipt.strategy.strip_prefix("snapshot-") {
                     match mode {
                         "hit" => timings.snapshot_mode = "hit",
@@ -592,17 +646,22 @@ impl<'a> HydrationEngine<'a> {
                         let reason_str = last_refusal_reason
                             .as_deref()
                             .unwrap_or("acceleration unavailable");
+                        let mech_name = if name == "byte-copy" || name == "deep-copy" {
+                            refused_accelerated_mechanism(last_refusal_reason.as_deref())
+                        } else {
+                            name
+                        };
                         println!(
-                            "{name} unavailable on this filesystem: wrote byte copies for {n} of {total_files} file(s) (copy mechanism: byte-copy; acceleration refused: {reason_str})"
+                            "{mech_name} unavailable on this filesystem: wrote byte copies for {n} of {total_files} file(s) (copy mechanism: byte-copy; acceleration refused: {reason_str})"
                         );
                     }
                 }
             }
         }
 
-        store.flush().map_err(|e| {
-            Error::io_unanchored("update verified-blob ledger", store.root(), e)
-        })?;
+        store
+            .flush()
+            .map_err(|e| Error::io_unanchored("update verified-blob ledger", store.root(), e))?;
 
         if !req.cfg.json {
             println!(
@@ -611,8 +670,7 @@ impl<'a> HydrationEngine<'a> {
             );
         }
 
-        let mut diagnostics =
-            crate::base::check_base_movement(store, req.root, req.base_branch);
+        let mut diagnostics = crate::base::check_base_movement(store, req.root, req.base_branch);
         diagnostics.extend(report_diagnostics);
 
         if total_files == 0 {
@@ -680,6 +738,7 @@ impl<'a> HydrationEngine<'a> {
             diagnostics,
             incremental_decision,
             incremental_fallback_reason,
+            incremental_hit_rate,
         })
     }
 }
@@ -728,12 +787,18 @@ mod tests {
         let heavy = temp.path().join("heavy");
         fs::create_dir_all(&heavy).unwrap();
 
-        for i in 0..TINY_REPO_MAX_FILES {
+        const TEST_MAX_FILES: u64 = 25;
+        for i in 0..TEST_MAX_FILES {
             fs::write(heavy.join(format!("file_{i}.txt")), b"").unwrap();
         }
 
         let dirs = vec![PathBuf::from("heavy")];
-        assert!(!is_tiny_repo(temp.path(), &dirs));
+        assert!(!is_tiny_repo_with_limits(
+            temp.path(),
+            &dirs,
+            TEST_MAX_FILES,
+            TINY_REPO_MAX_BYTES
+        ));
     }
 
     #[test]
@@ -774,6 +839,10 @@ mod tests {
 
         let mut cfg = test_config();
         cfg.strategy_policy = StrategyPolicy::Hardlink;
+        assert!(!should_bypass_tiny_repo(temp.path(), &dirs, &cfg));
+
+        cfg = test_config();
+        cfg.strategy_policy = StrategyPolicy::ForceByteCopy;
         assert!(!should_bypass_tiny_repo(temp.path(), &dirs, &cfg));
 
         cfg = test_config();

@@ -7,8 +7,9 @@ use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, HydrateData};
 use crate::error::{Error, Result};
 use crate::hydrate::{HydrationEngine, HydrationRequest};
-use crate::hydration_filter::{self, LoadedPatterns, ZeroSavingsReason, load_patterns};
+use crate::hydration_filter::{self, LoadedPatterns, load_patterns};
 use crate::output::{HumanBytes, HumanCount};
+use crate::receipt::OperationReceipt;
 use crate::workspace::{self, WorkspaceEngine};
 
 pub fn run(
@@ -56,6 +57,18 @@ pub fn run(
         }
     };
 
+    let resolved_git_dir = workspace::resolve_git_dir(&dest);
+    let final_receipt_path = OperationReceipt::receipt_path(&resolved_git_dir);
+    let branch = workspace::run(&dest, &["branch", "--show-current"]).unwrap_or_default();
+    let mut receipt = OperationReceipt::new_in_progress(
+        "hydrate",
+        branch,
+        source_root.display().to_string(),
+        dest.display().to_string(),
+        None,
+    );
+    let _ = receipt.save(&final_receipt_path);
+
     let timing_enabled = cfg.timing;
     let started = Instant::now();
 
@@ -85,6 +98,14 @@ pub fn run(
 
     let report = engine.hydrate(req)?;
 
+    let dirs: Vec<String> = report
+        .dirs_hydrated
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    receipt.complete(dirs);
+    let _ = receipt.save(&final_receipt_path);
+
     if !cfg.json {
         report.timings.emit(started, timing_enabled);
         let total_bytes = report.bytes_shared_cow + report.bytes_copied;
@@ -102,18 +123,9 @@ pub fn run(
                 report.hydration_method,
                 total_ms
             );
-            if report.total_copied > 0 || report.hydration_method == "byte_copy" {
-                if let Some(refusal) = &report.refusal_reason {
-                    println!("  Copy mechanism: byte-copy (acceleration refused: {refusal})");
-                }
-            }
+            crate::hydrate::print_copy_mechanism_refusal(&report);
         } else {
-            let reason = if report.dirs_hydrated.is_empty() {
-                ZeroSavingsReason::NoMatchingDirectories
-            } else {
-                ZeroSavingsReason::NoFilesHydrated
-            };
-            println!("  {}", reason.human_summary());
+            crate::hydrate::print_zero_savings(&report.dirs_hydrated);
         }
     }
 
@@ -148,8 +160,10 @@ pub fn run(
             .collect(),
         incremental_decision: report.incremental_decision,
         incremental_fallback_reason: report.incremental_fallback_reason,
+        incremental_hit_rate: report.incremental_hit_rate,
         copy_mechanism,
         copy_fallback_reason,
+        receipt_path: Some(final_receipt_path.display().to_string()),
     };
 
     Ok((data, report.diagnostics))

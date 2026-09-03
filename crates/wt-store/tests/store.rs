@@ -1216,7 +1216,10 @@ fn parallel_cold_ingest_produces_identical_blob_ids_and_manifest_bytes() {
 
     let bytes1 = manifest1.serialize();
     let bytes2 = manifest2.serialize();
-    assert_eq!(bytes1, bytes2, "manifest bytes must be identical for identical inputs");
+    assert_eq!(
+        bytes1, bytes2,
+        "manifest bytes must be identical for identical inputs"
+    );
     assert_eq!(manifest1.entries.len(), manifest2.entries.len());
     assert_eq!(manifest1.total_size, manifest2.total_size);
 }

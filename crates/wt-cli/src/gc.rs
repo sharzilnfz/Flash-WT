@@ -308,10 +308,18 @@ pub fn sweep(
                     println!(
                         "dry run: would reclaim {} unreferenced blob{} ({} bytes), {} dead lease{} ({} bytes)",
                         summary.reclaimed_blobs,
-                        if summary.reclaimed_blobs == 1 { "" } else { "s" },
+                        if summary.reclaimed_blobs == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                         summary.reclaimed_blob_bytes,
                         summary.leases_reclaimed,
-                        if summary.leases_reclaimed == 1 { "" } else { "s" },
+                        if summary.leases_reclaimed == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                         summary.lease_bytes_reclaimed,
                     );
                 } else if summary.leases_reclaimed > 0 {
@@ -357,9 +365,21 @@ pub fn sweep(
                 leases_reclaimed: Some(summary.leases_reclaimed),
                 lease_bytes_reclaimed: Some(summary.lease_bytes_reclaimed),
                 dry_run: if dry_run { Some(true) } else { None },
-                unreferenced_blobs: if dry_run { Some(summary.reclaimed_blobs as usize) } else { None },
-                dead_leases: if dry_run { Some(summary.leases_reclaimed) } else { None },
-                reclaimed_bytes: if dry_run { Some(total_reclaimed_bytes) } else { None },
+                unreferenced_blobs: if dry_run {
+                    Some(summary.reclaimed_blobs as usize)
+                } else {
+                    None
+                },
+                dead_leases: if dry_run {
+                    Some(summary.leases_reclaimed)
+                } else {
+                    None
+                },
+                reclaimed_bytes: if dry_run {
+                    Some(total_reclaimed_bytes)
+                } else {
+                    None
+                },
             };
             Ok((data, Vec::new()))
         }
@@ -374,10 +394,18 @@ pub fn sweep(
                     println!(
                         "dry run: would reclaim {} unreferenced blob{} ({} bytes), {} dead lease{} ({} bytes)",
                         summary.reclaimed_blobs,
-                        if summary.reclaimed_blobs == 1 { "" } else { "s" },
+                        if summary.reclaimed_blobs == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                         summary.reclaimed_blob_bytes,
                         summary.leases_reclaimed,
-                        if summary.leases_reclaimed == 1 { "" } else { "s" },
+                        if summary.leases_reclaimed == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                         summary.lease_bytes_reclaimed,
                     );
                 } else if summary.leases_reclaimed > 0 {
@@ -419,9 +447,21 @@ pub fn sweep(
                 leases_reclaimed: Some(summary.leases_reclaimed),
                 lease_bytes_reclaimed: Some(summary.lease_bytes_reclaimed),
                 dry_run: if dry_run { Some(true) } else { None },
-                unreferenced_blobs: if dry_run { Some(summary.reclaimed_blobs as usize) } else { None },
-                dead_leases: if dry_run { Some(summary.leases_reclaimed) } else { None },
-                reclaimed_bytes: if dry_run { Some(total_reclaimed_bytes) } else { None },
+                unreferenced_blobs: if dry_run {
+                    Some(summary.reclaimed_blobs as usize)
+                } else {
+                    None
+                },
+                dead_leases: if dry_run {
+                    Some(summary.leases_reclaimed)
+                } else {
+                    None
+                },
+                reclaimed_bytes: if dry_run {
+                    Some(total_reclaimed_bytes)
+                } else {
+                    None
+                },
             };
             Ok((data, Vec::new()))
         }

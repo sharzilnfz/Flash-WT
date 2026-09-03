@@ -9,7 +9,7 @@ use crate::config::RunConfig;
 use crate::envelope::{CreateData, Diagnostic};
 use crate::error::{Error, Result};
 use crate::hydrate::{HydrationEngine, HydrationRequest};
-use crate::hydration_filter::{self, LoadedPatterns, ZeroSavingsReason, load_patterns};
+use crate::hydration_filter::{self, LoadedPatterns, load_patterns};
 use crate::output::{HumanBytes, HumanCount};
 use crate::receipt::{OperationReceipt, ReceiptState};
 use crate::signal;
@@ -188,18 +188,9 @@ pub fn run(
                 report.hydration_method,
                 total_ms
             );
-            if report.total_copied > 0 || report.hydration_method == "byte_copy" {
-                if let Some(refusal) = &report.refusal_reason {
-                    println!("  Copy mechanism: byte-copy (acceleration refused: {refusal})");
-                }
-            }
+            crate::hydrate::print_copy_mechanism_refusal(&report);
         } else {
-            let reason = if report.dirs_hydrated.is_empty() {
-                ZeroSavingsReason::NoMatchingDirectories
-            } else {
-                ZeroSavingsReason::NoFilesHydrated
-            };
-            println!("  {}", reason.human_summary());
+            crate::hydrate::print_zero_savings(&report.dirs_hydrated);
         }
         if let Ok(curr) = std::env::current_dir() {
             if let Ok(rel) = dest.strip_prefix(&curr) {
@@ -247,6 +238,7 @@ pub fn run(
         files_hydrated: report.total_files,
         incremental_decision: report.incremental_decision,
         incremental_fallback_reason: report.incremental_fallback_reason,
+        incremental_hit_rate: report.incremental_hit_rate,
         copy_mechanism,
         copy_fallback_reason,
         resumed: if resuming { Some(true) } else { None },
