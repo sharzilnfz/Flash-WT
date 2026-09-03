@@ -32,7 +32,7 @@ pub use hydrate::{
     HydrateDest, HydrateOutcome, HydratePinned, HydratePolicy, HydrateReq, HydrateSrc, HydrateTree,
     HydrationReceipt,
 };
-pub use ingest::{IngestOptions, Ingested};
+pub use ingest::{IngestOptions, Ingested, stream_hash_file};
 pub use lease::{
     DEFAULT_LEASE_TTL_SECS, ReadLease, WorktreeLease, current_process_start_time, is_lease_expired,
     is_process_alive, lease_path, process_start_time, publish as publish_lease,

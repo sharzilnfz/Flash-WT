@@ -16,7 +16,7 @@
 //! never leaves a half-written blob at its final address.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -498,6 +498,68 @@ impl DiskStore {
             }
         }
         Ok(id)
+    }
+
+    /// Store a file from `src_path` with a precomputed [`ContentId`].
+    ///
+    /// Streams the file in 64KB chunks into a temp file to avoid holding
+    /// large file contents in memory. If the blob already exists, returns
+    /// `*id` immediately without copying.
+    pub fn put_file_with_id(&mut self, src_path: &Path, id: &ContentId) -> Result<ContentId> {
+        let mut buf = vec![0u8; 64 * 1024];
+        self.put_file_with_id_buf(src_path, id, &mut buf)
+    }
+
+    /// Store a file from `src_path` with a precomputed [`ContentId`] using a caller-provided buffer.
+    pub fn put_file_with_id_buf(
+        &mut self,
+        src_path: &Path,
+        id: &ContentId,
+        buf: &mut [u8],
+    ) -> Result<ContentId> {
+        let path = self.object_path(id);
+        if !path.exists() {
+            let hex = id.to_string();
+            let shard_dir = self.root.join("objects").join(&hex[..2]);
+            fs::create_dir_all(&shard_dir)?;
+            let mut tmp = tempfile::NamedTempFile::new_in(&shard_dir)?;
+            let mut src = fs::File::open(src_path)?;
+            loop {
+                let n = src.read(buf)?;
+                if n == 0 {
+                    break;
+                }
+                tmp.write_all(&buf[..n])?;
+            }
+            if !crate::fsutil::is_sync_disabled() {
+                tmp.as_file().sync_all()?;
+            }
+            tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
+            if !crate::fsutil::is_sync_disabled() {
+                crate::fsutil::sync_parent_dir(&path)?;
+            }
+            let perms = fs::Permissions::from_mode(0o644);
+            let _ = fs::set_permissions(&path, perms);
+            if let Ok(meta) = fs::metadata(&path) {
+                if let Ok(mtime) = meta.modified() {
+                    self.ledger().record(
+                        *id,
+                        crate::verified::Fingerprint {
+                            size: meta.len(),
+                            mtime,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(*id)
+    }
+
+    /// Stream-hash a file and store it. Returns its [`ContentId`].
+    pub fn put_file(&mut self, src_path: &Path) -> Result<ContentId> {
+        let mut buf = vec![0u8; 64 * 1024];
+        let id = crate::ingest::stream_hash_file_with_buf(src_path, &mut buf)?;
+        self.put_file_with_id_buf(src_path, &id, &mut buf)
     }
 
     /// Fetch bytes by id, verifying the hash before returning.
