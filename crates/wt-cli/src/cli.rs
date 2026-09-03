@@ -197,6 +197,11 @@ snapshot hits entirely and rebuilds from freshly hashed blobs."
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// Inspect active ephemeral scratch leases.
+    Lease {
+        #[command(subcommand)]
+        action: Option<LeaseAction>,
+    },
 }
 
 impl WtCommand {
@@ -216,8 +221,22 @@ impl WtCommand {
             WtCommand::List => "list",
             WtCommand::Demo => "demo",
             WtCommand::Completions { .. } => "completions",
+            WtCommand::Lease { .. } => "lease",
         }
     }
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum LeaseAction {
+    /// Show active scratch worktree leases in machine-readable JSON format.
+    #[command(alias = "list", alias = "ls")]
+    Show {
+        /// Optional lease ID or scratch branch name to inspect.
+        id: Option<String>,
+        /// Include expired or dead leases.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]

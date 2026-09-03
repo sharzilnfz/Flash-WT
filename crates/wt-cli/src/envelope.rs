@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::receipt::{OperationReceipt, ReceiptState};
+
 /// Current JSON output schema version (ticket 01).
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -87,6 +89,10 @@ pub struct CreateData {
     pub copy_mechanism: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub copy_fallback_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resumed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_path: Option<String>,
 }
 
 /// Payload for `wt hydrate --json`.
@@ -274,6 +280,10 @@ pub struct LeaseEntry {
     pub expires_at: u64,
     pub ttl_remaining_secs: u64,
     pub is_expired: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_dir: Option<String>,
 }
 
 /// Payload for `wt scratch --json` / `wt isolate --json` (ticket 03).
@@ -327,6 +337,14 @@ pub struct CleanData {
     pub sweep_reclaimed: usize,
 }
 
+/// Payload for `wt lease show --json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LeaseData {
+    pub leases: Vec<LeaseEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_lease: Option<LeaseEntry>,
+}
+
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
@@ -376,6 +394,8 @@ mod tests {
             incremental_fallback_reason: None,
             copy_mechanism: None,
             copy_fallback_reason: None,
+            resumed: None,
+            receipt_path: None,
         };
         let env = Envelope::ok("create", data, vec![]);
         let json = serde_json::to_string(&env).expect("serialize");
@@ -614,6 +634,8 @@ mod tests {
             ),
             copy_mechanism: None,
             copy_fallback_reason: None,
+            resumed: None,
+            receipt_path: None,
         };
         let env = Envelope::ok("create", data, vec![]);
         let json = serde_json::to_string(&env).expect("serialize create json");
@@ -639,5 +661,61 @@ mod tests {
         assert_eq!(parsed["status"], "ok");
         assert_eq!(parsed["data"]["manifest_path"], "/tmp/repo/.wtinclude");
         assert_eq!(parsed["data"]["created"], true);
+    }
+
+    #[test]
+    fn lease_envelope_ok_serialization() {
+        let entry = LeaseEntry {
+            lease_id: "scratch-demo1".into(),
+            pid: 1234,
+            pid_alive: true,
+            expires_at: 1900000000,
+            ttl_remaining_secs: 1800,
+            is_expired: false,
+            worktree_path: Some("/tmp/wt/repo-scratch-demo1".into()),
+            git_dir: Some("/tmp/repo/.git/worktrees/scratch-demo1".into()),
+        };
+        let data = LeaseData {
+            leases: vec![entry.clone()],
+            matched_lease: Some(entry),
+        };
+        let env = Envelope::ok("lease", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize lease json");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse lease json");
+        assert_eq!(parsed["command"], "lease");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["data"]["leases"][0]["lease_id"], "scratch-demo1");
+        assert_eq!(parsed["data"]["leases"][0]["worktree_path"], "/tmp/wt/repo-scratch-demo1");
+        assert_eq!(parsed["data"]["matched_lease"]["lease_id"], "scratch-demo1");
+    }
+
+    #[test]
+    fn create_envelope_resumed_serialization() {
+        let data = CreateData {
+            worktree_path: "/tmp/wt-demo".into(),
+            branch: "demo".into(),
+            cache_hit: true,
+            duration_ms: 42,
+            hydration_method: "clone".into(),
+            bytes_shared_cow: 1024,
+            bytes_copied: 0,
+            files_hydrated: 10,
+            incremental_decision: None,
+            incremental_fallback_reason: None,
+            copy_mechanism: None,
+            copy_fallback_reason: None,
+            resumed: Some(true),
+            receipt_path: Some("/tmp/repo/.git/worktrees/demo/wt-receipt.json".into()),
+        };
+        let env = Envelope::ok("create", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        assert_eq!(parsed["data"]["resumed"], true);
+        assert_eq!(
+            parsed["data"]["receipt_path"],
+            "/tmp/repo/.git/worktrees/demo/wt-receipt.json"
+        );
     }
 }
