@@ -28,10 +28,27 @@ use std::path::Path;
 /// Check if hardware durability flushes are disabled (via test environment or explicit env flag).
 #[inline]
 pub(crate) fn is_sync_disabled() -> bool {
+    if let Some(val) = std::env::var_os("WT_TEST_NO_SYNC") {
+        let s = val.to_string_lossy();
+        if s == "0" || s.eq_ignore_ascii_case("false") {
+            return false;
+        }
+        return true;
+    }
+    if let Some(val) = std::env::var_os("WT_NO_SYNC") {
+        let s = val.to_string_lossy();
+        if s == "0" || s.eq_ignore_ascii_case("false") {
+            return false;
+        }
+        return true;
+    }
+    if std::env::var_os("WT_FORCE_SYNC").is_some() || std::env::var_os("WT_TEST_FORCE_SYNC").is_some() {
+        return false;
+    }
     if cfg!(test) {
         return true;
     }
-    std::env::var_os("WT_NO_SYNC").is_some() || std::env::var_os("WT_TEST_NO_SYNC").is_some()
+    false
 }
 
 /// Write `bytes` to `path` crash-durably: create/truncate, write,
@@ -62,14 +79,19 @@ pub(crate) fn durable_write_then_rename(tmp_path: &Path, final_path: &Path) -> i
     sync_parent_dir(final_path)
 }
 
-/// `fsync` the directory that contains `path`. Required after a
-/// rename/create for the NAME change itself to be durable.
-pub(crate) fn sync_parent_dir(path: &Path) -> io::Result<()> {
+/// Flush `dir_path` so its directory entries survive power loss.
+pub(crate) fn sync_dir(dir_path: &Path) -> io::Result<()> {
     if is_sync_disabled() {
         return Ok(());
     }
-    let dir = fs::File::open(path.parent().unwrap_or_else(|| Path::new(".")))?;
+    let dir = fs::File::open(dir_path)?;
     dir.sync_all()
+}
+
+/// Flush the directory that contains `path`. Required after a
+/// rename/create for the name change itself to be durable.
+pub(crate) fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    sync_dir(path.parent().unwrap_or_else(|| Path::new(".")))
 }
 
 use std::fs::File;

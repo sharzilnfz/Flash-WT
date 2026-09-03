@@ -387,9 +387,20 @@ fn flush_pending(
     let results = hash_pending_files(pending);
     let mut copy_buf = vec![0u8; 64 * 1024];
 
+    let mut batch = Vec::with_capacity(pending.len());
     for (file, hash_res) in pending.drain(..).zip(results) {
         let id = hash_res.map_err(|e| io_ctx("read", &file.path, e))?;
-        store.put_file_with_id_buf(&file.path, &id, &mut copy_buf)?;
+        batch.push((file, id));
+    }
+
+    let files_to_put: Vec<(&Path, ContentId)> = batch
+        .iter()
+        .map(|(file, id)| (file.path.as_path(), *id))
+        .collect();
+
+    store.put_files_batch_buf(&files_to_put, &mut copy_buf)?;
+
+    for (file, id) in batch {
         if file.mtime >= UNIX_EPOCH && file.ctime >= UNIX_EPOCH {
             cache.record(
                 file.rel.clone(),

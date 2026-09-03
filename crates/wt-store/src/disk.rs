@@ -124,6 +124,18 @@ pub struct Swept {
     pub reclaimed: u64,
 }
 
+const BATCH_FILE_LIMIT: usize = 256;
+
+enum BatchItemSource<'a> {
+    Bytes(&'a [u8]),
+    File(&'a Path),
+}
+
+struct BatchItem<'a> {
+    id: ContentId,
+    source: BatchItemSource<'a>,
+}
+
 impl DiskStore {
     /// Create or open a store rooted at `root`. The directory (and its
     /// `objects`/`refs` subdirectories) is created if missing.
@@ -298,7 +310,7 @@ impl DiskStore {
     /// names under `objects/` are skipped rather than failing the
     /// enumeration — the sweep must tolerate a store that was touched
     /// by an interrupted run.
-    pub(crate) fn ids(&self) -> Result<Vec<ContentId>> {
+    pub fn ids(&self) -> Result<Vec<ContentId>> {
         let mut out = Vec::new();
         let shards = fs::read_dir(self.root.join("objects")).map_err(Error::Io)?;
         for shard in shards.flatten() {
@@ -438,66 +450,28 @@ impl DiskStore {
     /// Store bytes, deduplicated by content. Returns the content's
     /// [`ContentId`]. Does not change any reference count.
     pub fn put(&mut self, content: &[u8]) -> Result<ContentId> {
-        let id = ContentId(Sha256::digest(content).into());
-        let path = self.object_path(&id);
-        if !path.exists() {
-            // object_path is always <root>/objects/<2 hex>/<62 hex>, so
-            // the shard directory is computable without unwrapping.
-            let hex = id.to_string();
-            let shard_dir = self.root.join("objects").join(&hex[..2]);
-            fs::create_dir_all(&shard_dir)?;
-            let mut tmp = tempfile::NamedTempFile::new_in(&shard_dir)?;
-            tmp.write_all(content)?;
-            // Durability: fsync the blob's bytes BEFORE the rename unless disabled.
-            // A crash after the rename without this could leave the
-            // final address naming empty/truncated content — and a
-            // content-addressed store cannot tell that from a valid
-            // empty file. The parent-dir fsync after persist makes
-            // the new directory entry itself durable too.
-            if !crate::fsutil::is_sync_disabled() {
-                tmp.as_file().sync_all()?;
-            }
-            // Rename is atomic; a second handle putting the same
-            // content races harmlessly because both write identical
-            // bytes to the same final name.
-            tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
-            if !crate::fsutil::is_sync_disabled() {
-                crate::fsutil::sync_parent_dir(&path)?;
-            }
-            // Temp files carry restrictive modes; normalize the blob
-            // to plain 0644 (ticket 05). CoW clones then inherit
-            // normal writable permissions, so the placement path needs
-            // no per-file chmod. Blobs written by older versions keep
-            // their 0600 mode until re-ingested — their clones are
-            // owner-rw-only, which is acceptable and cheaper than a
-            // chmod walk over every hydrated file.
-            //
-            // The fingerprint is recorded here too: the address IS the
-            // hash of the bytes just written through an atomic rename,
-            // so a fresh blob is verified by construction.
-            let perms = fs::Permissions::from_mode(0o644);
-            // Failure is deliberately swallowed here, and only here:
-            // the worst case is a blob left at the temp file's 0600
-            // mode, exactly the accepted state of blobs written by
-            // older versions (their clones come out owner-rw-only).
-            // Correctness is untouched — materialize applies the
-            // per-path mode recorded at ingest time — and failing the
-            // put over a cosmetic chmod would strand already-durable
-            // content.
-            let _ = fs::set_permissions(&path, perms);
-            if let Ok(meta) = fs::metadata(&path) {
-                if let Ok(mtime) = meta.modified() {
-                    self.ledger().record(
-                        id,
-                        crate::verified::Fingerprint {
-                            size: meta.len(),
-                            mtime,
-                        },
-                    );
-                }
-            }
+        let ids = self.put_batch(&[content])?;
+        Ok(ids[0])
+    }
+
+    /// Store a batch of byte slices, deduplicated by content.
+    ///
+    /// Writes new blobs to temporary files, flushes file data in one pass,
+    /// renames them into shard directories, and syncs each touched shard
+    /// directory once per batch. Returns the list of [`ContentId`]s.
+    pub fn put_batch(&mut self, contents: &[&[u8]]) -> Result<Vec<ContentId>> {
+        if contents.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(id)
+        let items: Vec<BatchItem<'_>> = contents
+            .iter()
+            .map(|&b| BatchItem {
+                id: ContentId(Sha256::digest(b).into()),
+                source: BatchItemSource::Bytes(b),
+            })
+            .collect();
+        let mut dummy_buf = [];
+        self.put_batch_internal(&items, &mut dummy_buf)
     }
 
     /// Store a file from `src_path` with a precomputed [`ContentId`].
@@ -517,30 +491,141 @@ impl DiskStore {
         id: &ContentId,
         buf: &mut [u8],
     ) -> Result<ContentId> {
-        let path = self.object_path(id);
-        if !path.exists() {
-            let hex = id.to_string();
-            let shard_dir = self.root.join("objects").join(&hex[..2]);
-            fs::create_dir_all(&shard_dir)?;
-            let mut tmp = tempfile::NamedTempFile::new_in(&shard_dir)?;
-            let mut src = fs::File::open(src_path)?;
-            loop {
-                let n = src.read(buf)?;
-                if n == 0 {
-                    break;
+        let ids = self.put_files_batch_buf(&[(src_path, *id)], buf)?;
+        Ok(ids[0])
+    }
+
+    /// Store a batch of files with precomputed [`ContentId`]s.
+    ///
+    /// Streams files in 64KB chunks into temporary files, flushes file data
+    /// in one pass, renames them into shard directories, and syncs each
+    /// touched shard directory once per batch.
+    pub fn put_files_batch<P: AsRef<Path>>(
+        &mut self,
+        files: &[(P, ContentId)],
+    ) -> Result<Vec<ContentId>> {
+        let mut buf = vec![0u8; 64 * 1024];
+        self.put_files_batch_buf(files, &mut buf)
+    }
+
+    /// Store a batch of files with precomputed [`ContentId`]s using a caller-provided buffer.
+    pub fn put_files_batch_buf<P: AsRef<Path>>(
+        &mut self,
+        files: &[(P, ContentId)],
+        buf: &mut [u8],
+    ) -> Result<Vec<ContentId>> {
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let items: Vec<BatchItem<'_>> = files
+            .iter()
+            .map(|(p, id)| BatchItem {
+                id: *id,
+                source: BatchItemSource::File(p.as_ref()),
+            })
+            .collect();
+        let mut local_buf;
+        let copy_buf = if buf.is_empty() {
+            local_buf = vec![0u8; 64 * 1024];
+            &mut local_buf[..]
+        } else {
+            buf
+        };
+        self.put_batch_internal(&items, copy_buf)
+    }
+
+    /// Stream-hash a file and store it. Returns its [`ContentId`].
+    pub fn put_file(&mut self, src_path: &Path) -> Result<ContentId> {
+        let mut buf = vec![0u8; 64 * 1024];
+        let id = crate::ingest::stream_hash_file_with_buf(src_path, &mut buf)?;
+        self.put_file_with_id_buf(src_path, &id, &mut buf)
+    }
+
+    fn put_batch_internal(
+        &mut self,
+        items: &[BatchItem<'_>],
+        buf: &mut [u8],
+    ) -> Result<Vec<ContentId>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut result_ids = Vec::with_capacity(items.len());
+        let mut staged_ids = std::collections::BTreeSet::new();
+        let mut to_stage = Vec::new();
+
+        for item in items {
+            result_ids.push(item.id);
+            if self.contains(&item.id) || !staged_ids.insert(item.id) {
+                continue;
+            }
+            to_stage.push((item.id, self.object_path(&item.id), &item.source));
+        }
+
+        if to_stage.is_empty() {
+            return Ok(result_ids);
+        }
+
+        let sync_disabled = crate::fsutil::is_sync_disabled();
+        let mut touched_shard_dirs = std::collections::BTreeSet::new();
+        let mut persisted_blobs = Vec::with_capacity(to_stage.len());
+        let mut created_any_new_shard = false;
+
+        for chunk in to_stage.chunks(BATCH_FILE_LIMIT) {
+            let mut temp_files = Vec::with_capacity(chunk.len());
+            for (id, path, source) in chunk {
+                let hex = id.to_string();
+                let shard_dir = self.root.join("objects").join(&hex[..2]);
+                if !shard_dir.exists() {
+                    fs::create_dir_all(&shard_dir)?;
+                    created_any_new_shard = true;
                 }
-                tmp.write_all(&buf[..n])?;
+                let mut tmp = tempfile::NamedTempFile::new_in(&shard_dir)?;
+                match source {
+                    BatchItemSource::Bytes(bytes) => {
+                        tmp.write_all(bytes)?;
+                    }
+                    BatchItemSource::File(src_path) => {
+                        let mut src = fs::File::open(src_path)?;
+                        loop {
+                            let n = src.read(buf)?;
+                            if n == 0 {
+                                break;
+                            }
+                            tmp.write_all(&buf[..n])?;
+                        }
+                    }
+                }
+                temp_files.push((*id, path.clone(), shard_dir, tmp));
             }
-            if !crate::fsutil::is_sync_disabled() {
-                tmp.as_file().sync_all()?;
+
+            if !sync_disabled {
+                for (_, _, _, tmp) in &temp_files {
+                    tmp.as_file().sync_all()?;
+                }
             }
-            tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
-            if !crate::fsutil::is_sync_disabled() {
-                crate::fsutil::sync_parent_dir(&path)?;
+
+            for (id, path, shard_dir, tmp) in temp_files {
+                tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
+                touched_shard_dirs.insert(shard_dir);
+                persisted_blobs.push((id, path));
             }
-            let perms = fs::Permissions::from_mode(0o644);
-            let _ = fs::set_permissions(&path, perms);
-            if let Ok(meta) = fs::metadata(&path) {
+        }
+
+        if !sync_disabled {
+            for shard_dir in &touched_shard_dirs {
+                crate::fsutil::sync_dir(shard_dir)?;
+            }
+            if created_any_new_shard {
+                let objects_dir = self.root.join("objects");
+                crate::fsutil::sync_dir(&objects_dir)?;
+            }
+        }
+
+        let perms = fs::Permissions::from_mode(0o644);
+        for (id, path) in &persisted_blobs {
+            let _ = fs::set_permissions(path, perms.clone());
+            if let Ok(meta) = fs::metadata(path) {
                 if let Ok(mtime) = meta.modified() {
                     self.ledger().record(
                         *id,
@@ -552,14 +637,8 @@ impl DiskStore {
                 }
             }
         }
-        Ok(*id)
-    }
 
-    /// Stream-hash a file and store it. Returns its [`ContentId`].
-    pub fn put_file(&mut self, src_path: &Path) -> Result<ContentId> {
-        let mut buf = vec![0u8; 64 * 1024];
-        let id = crate::ingest::stream_hash_file_with_buf(src_path, &mut buf)?;
-        self.put_file_with_id_buf(src_path, &id, &mut buf)
+        Ok(result_ids)
     }
 
     /// Fetch bytes by id, verifying the hash before returning.
