@@ -9,7 +9,7 @@ use crate::config::RunConfig;
 use crate::envelope::{CreateData, Diagnostic};
 use crate::error::{Error, Result};
 use crate::hydrate::{HydrationEngine, HydrationRequest};
-use crate::hydration_filter::{self, LoadedPatterns, load_patterns};
+use crate::hydration_filter::{self, LoadedPatterns, ZeroSavingsReason, load_patterns};
 use crate::output::{HumanBytes, HumanCount};
 use crate::signal;
 use crate::timing::StageTimings;
@@ -142,6 +142,13 @@ pub fn run(
                     println!("  Copy mechanism: byte-copy (acceleration refused: {refusal})");
                 }
             }
+        } else {
+            let reason = if report.dirs_hydrated.is_empty() {
+                ZeroSavingsReason::NoMatchingDirectories
+            } else {
+                ZeroSavingsReason::NoFilesHydrated
+            };
+            println!("  {}", reason.human_summary());
         }
         if let Ok(curr) = std::env::current_dir() {
             if let Ok(rel) = dest.strip_prefix(&curr) {

@@ -630,7 +630,9 @@ impl WorkspaceEngine {
     pub fn create_worktree(&self, name: &str, dest: &Path, start_point: &str) -> Result<()> {
         let dest_text = dest.to_string_lossy().into_owned();
         self.git(&["worktree", "add", "-b", name, &dest_text, start_point])
-            .or_else(|_| self.git(&["worktree", "add", &dest_text, name]))?;
+            .or_else(|_| self.git(&["worktree", "add", &dest_text, name]))
+            .or_else(|_| self.git(&["worktree", "add", "-b", name, &dest_text]))
+            .or_else(|_| self.git(&["worktree", "add", "--orphan", "-b", name, &dest_text]))?;
         Ok(())
     }
 
