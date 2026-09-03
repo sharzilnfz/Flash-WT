@@ -287,7 +287,7 @@ Read [docs/archive/product-handoff.md](docs/archive/product-handoff.md) and the 
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLASHFLASHWT_STORE` | `~/.cache/flashwt/store` | Directory for the content-addressed object store |
+| `FLASHWT_STORE` | `~/.cache/flashwt/store` | Directory for the content-addressed object store |
 | `FLASHWT_SNAPSHOTS` | `1` on APFS, `0` elsewhere | Enable whole-directory APFS snapshot caching; `FLASHWT_SNAPSHOTS=0` opts out |
 | `FLASHWT_SNAPSHOTS_V2` | `1` on APFS, `0` elsewhere | Enable diff-based incremental snapshot rebuilds; `FLASHWT_SNAPSHOTS_V2=0` opts out |
 | `FLASHWT_TINY_BYPASS` | `1` | Bypass store for repos under 500 files and 8 MB; `FLASHWT_TINY_BYPASS=0` opts out |
@@ -303,19 +303,10 @@ Read [docs/archive/product-handoff.md](docs/archive/product-handoff.md) and the 
 ## Development and testing
 
 ```sh
-# Run all unit, integration, and crash recovery tests (300+ tests)
 cargo test
-
-# Run linter checks
 cargo clippy --all-targets -- -D warnings
-
-# Run master verification rig across all 5 test suites (85s)
 ./scripts/verify/run_all.sh --all
-
-# Run rapid verification with lightweight fixtures
 ./scripts/verify/run_all.sh --quick
-
-# Run an individual verification suite
 ./scripts/verify/run_all.sh --suite 02_flash_apfs
 ./scripts/verify/run_all.sh --suite 04_isolation_storage
 ./scripts/verify/run_all.sh --suite 05_chaos_resilience
