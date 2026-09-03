@@ -7,6 +7,7 @@ pub mod create;
 pub mod demo;
 pub mod hydrate;
 pub mod init;
+pub mod lease;
 pub mod list;
 pub mod scratch;
 pub mod scrub;
@@ -152,6 +153,13 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
         }
         WtCommand::Completions { shell } => {
             completions::run(shell)?;
+            Ok(None)
+        }
+        WtCommand::Lease { action } => {
+            let (data, diags) = lease::run(action, cfg)?;
+            if cfg.json {
+                emit_json(command_name, data, diags)?;
+            }
             Ok(None)
         }
     }

@@ -12,6 +12,7 @@ pub mod gc;
 pub mod hydrate;
 pub mod hydration_filter;
 pub mod output;
+pub mod receipt;
 pub mod signal;
 pub mod timing;
 pub mod toolchain;
