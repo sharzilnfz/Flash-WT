@@ -140,3 +140,20 @@ impl Drop for FlockGuard {
         unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
     }
 }
+
+/// Recursively measure the total size in bytes of files under `path`.
+pub fn measure_tree_size(path: &Path) -> u64 {
+    let mut total = 0;
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.is_file() {
+            total += meta.len();
+        } else if meta.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    total += measure_tree_size(&entry.path());
+                }
+            }
+        }
+    }
+    total
+}

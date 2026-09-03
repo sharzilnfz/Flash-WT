@@ -160,6 +160,51 @@ fn is_btrfs_filesystem(path: &Path) -> bool {
     }
 }
 
+/// Filesystem copy capabilities for a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsCapabilities {
+    /// APFS whole-directory clonefile(2) support on macOS.
+    pub apfs_clonefile: bool,
+    /// Linux ioctl(FICLONE) reflink support on btrfs/XFS.
+    pub ficlone: bool,
+    /// Linux copy_file_range(2) in-kernel page splicing support.
+    pub copy_file_range: bool,
+}
+
+/// Probe the copy capabilities of the filesystem holding `path`.
+pub fn probe_capabilities(path: &Path) -> FsCapabilities {
+    #[allow(unused_variables)]
+    let (is_primary, is_secondary) = probe_fs_capabilities(path);
+
+    #[cfg(target_os = "macos")]
+    {
+        FsCapabilities {
+            apfs_clonefile: is_primary,
+            ficlone: false,
+            copy_file_range: false,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        FsCapabilities {
+            apfs_clonefile: false,
+            ficlone: is_primary,
+            copy_file_range: is_secondary,
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (is_primary, is_secondary);
+        FsCapabilities {
+            apfs_clonefile: false,
+            ficlone: false,
+            copy_file_range: false,
+        }
+    }
+}
+
 /// Probe reflink and ext4 capabilities for the filesystem holding `path`.
 pub(crate) fn probe_fs_capabilities(path: &Path) -> (bool, bool) {
     let existing = find_existing_ancestor(path);

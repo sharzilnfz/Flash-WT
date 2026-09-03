@@ -56,7 +56,7 @@ pub use selection::{
     CandidateRefusal, SelectionOutcome, SourcePolicy, candidates, select_backend,
     select_backend_detailed,
 };
-pub use sys::{buffered_copy_file, refusal_reason_for_errno};
+pub use sys::{FsCapabilities, buffered_copy_file, probe_capabilities, refusal_reason_for_errno};
 
 use std::io;
 use std::path::Path;

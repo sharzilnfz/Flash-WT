@@ -147,6 +147,14 @@ pub struct SweepData {
     pub leases_reclaimed: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lease_bytes_reclaimed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreferenced_blobs: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dead_leases: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reclaimed_bytes: Option<u64>,
 }
 
 /// Payload for `wt scrub --json`.
@@ -170,6 +178,60 @@ pub struct MigrateData {
     pub gc_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub purged_legacy_refs: Option<usize>,
+}
+
+/// Payload for `wt store du --json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoreDuData {
+    pub store_path: String,
+    pub objects_bytes: u64,
+    pub snapshots_bytes: u64,
+    pub mirrors_bytes: u64,
+    pub refs_bytes: u64,
+    pub caches_bytes: u64,
+    pub total_bytes: u64,
+}
+
+/// Payload for `wt doctor --json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorData {
+    pub store_path: String,
+    pub env_vars: DoctorEnvVars,
+    pub fs_capabilities: DoctorFsCapabilities,
+    pub store_disk_usage: StoreDuData,
+}
+
+/// Environment variable diagnostics in `DoctorData`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorEnvVars {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_store: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_snapshots: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_snapshots_v2: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_verify: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_timing: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_gc_grace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_snapshot_cap: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_max_snapshot_bytes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_hardlink: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_no_hardlink: Option<String>,
+}
+
+/// Probed filesystem capabilities in `DoctorData`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorFsCapabilities {
+    pub apfs_clonefile: bool,
+    pub ficlone: bool,
+    pub copy_file_range: bool,
 }
 
 /// Payload for `wt list --json` / `wt ls --json` (ticket 02).
@@ -362,6 +424,10 @@ mod tests {
             leases_examined: Some(3),
             leases_reclaimed: Some(2),
             lease_bytes_reclaimed: Some(4096),
+            dry_run: None,
+            unreferenced_blobs: None,
+            dead_leases: None,
+            reclaimed_bytes: None,
         };
         let env = Envelope::ok("sweep", data, vec![]);
         let json = serde_json::to_string(&env).expect("serialize sweep json");
@@ -372,6 +438,69 @@ mod tests {
         assert_eq!(parsed["data"]["leases_examined"], 3);
         assert_eq!(parsed["data"]["leases_reclaimed"], 2);
         assert_eq!(parsed["data"]["lease_bytes_reclaimed"], 4096);
+    }
+
+    #[test]
+    fn doctor_envelope_ok_serialization() {
+        let data = DoctorData {
+            store_path: "/tmp/store".into(),
+            env_vars: DoctorEnvVars {
+                wt_store: Some("/tmp/store".into()),
+                wt_snapshots: Some("1".into()),
+                wt_snapshots_v2: None,
+                wt_verify: None,
+                wt_timing: None,
+                wt_gc_grace: Some("15m".into()),
+                wt_snapshot_cap: None,
+                wt_max_snapshot_bytes: None,
+                wt_hardlink: None,
+                wt_no_hardlink: None,
+            },
+            fs_capabilities: DoctorFsCapabilities {
+                apfs_clonefile: true,
+                ficlone: false,
+                copy_file_range: false,
+            },
+            store_disk_usage: StoreDuData {
+                store_path: "/tmp/store".into(),
+                objects_bytes: 1024,
+                snapshots_bytes: 2048,
+                mirrors_bytes: 512,
+                refs_bytes: 0,
+                caches_bytes: 256,
+                total_bytes: 3840,
+            },
+        };
+        let env = Envelope::ok("doctor", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize doctor json");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse doctor json");
+        assert_eq!(parsed["command"], "doctor");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["data"]["store_path"], "/tmp/store");
+        assert_eq!(parsed["data"]["fs_capabilities"]["apfs_clonefile"], true);
+        assert_eq!(parsed["data"]["store_disk_usage"]["total_bytes"], 3840);
+    }
+
+    #[test]
+    fn store_du_envelope_ok_serialization() {
+        let data = StoreDuData {
+            store_path: "/tmp/store".into(),
+            objects_bytes: 1000,
+            snapshots_bytes: 2000,
+            mirrors_bytes: 300,
+            refs_bytes: 50,
+            caches_bytes: 150,
+            total_bytes: 3500,
+        };
+        let env = Envelope::ok("store du", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize store du json");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse store du json");
+        assert_eq!(parsed["command"], "store du");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["data"]["total_bytes"], 3500);
+        assert_eq!(parsed["data"]["objects_bytes"], 1000);
     }
 
     #[test]

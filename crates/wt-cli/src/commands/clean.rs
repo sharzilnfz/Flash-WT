@@ -86,7 +86,7 @@ fn clean_single_worktree(
         )));
     }
 
-    let (sweep_data, mut sw_diags) = gc::sweep(age, &silent_cfg)?;
+    let (sweep_data, mut sw_diags) = gc::sweep(age, false, &silent_cfg)?;
     diagnostics.append(&mut sw_diags);
 
     let reclaimed_bytes = sweep_data.lease_bytes_reclaimed.unwrap_or(0);
@@ -301,7 +301,7 @@ fn clean_batch_worktrees(
     }
 
     // Run sweep once after batch removal
-    let (sweep_data, mut sw_diags) = gc::sweep(age, &silent_cfg)?;
+    let (sweep_data, mut sw_diags) = gc::sweep(age, false, &silent_cfg)?;
     diagnostics.append(&mut sw_diags);
 
     let reclaimed_bytes = sweep_data.lease_bytes_reclaimed.unwrap_or(0);

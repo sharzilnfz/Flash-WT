@@ -52,6 +52,23 @@ impl FsCapabilities {
     }
 }
 
+/// Disk usage breakdown of the store.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StoreDiskUsage {
+    /// Total bytes consumed by stored objects (blobs).
+    pub objects_bytes: u64,
+    /// Total bytes consumed by whole-directory snapshots.
+    pub snapshots_bytes: u64,
+    /// Total bytes consumed by worktree mirrors and leases.
+    pub mirrors_bytes: u64,
+    /// Total bytes consumed by legacy reference counts.
+    pub refs_bytes: u64,
+    /// Total bytes consumed by cache and ledger files.
+    pub caches_bytes: u64,
+    /// Total bytes consumed across the store directory.
+    pub total_bytes: u64,
+}
+
 /// Probe filesystem parameters via `statfs(2)` and `stat(2)`.
 pub fn probe_fs(path: &Path) -> io::Result<FsCapabilities> {
     #[cfg(unix)]
@@ -388,7 +405,66 @@ impl DiskStore {
     /// Deletion order (ref file first) means a kill at any point
     /// leaves only states the next sweep can finish: either both files
     /// present, or an unreferenced object with no ref file.
+    /// Measure the disk usage of the store broken down by subsystem.
+    pub fn disk_usage(&self) -> Result<StoreDiskUsage> {
+        Self::inspect_disk_usage(self.root())
+    }
+
+    /// Measure the disk usage of a store root broken down by subsystem.
+    pub fn inspect_disk_usage(root: &Path) -> Result<StoreDiskUsage> {
+        if !root.exists() {
+            return Ok(StoreDiskUsage::default());
+        }
+        let mut usage = StoreDiskUsage::default();
+        let entries = match fs::read_dir(root) {
+            Ok(e) => e,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(usage),
+            Err(e) => return Err(Error::Io(e)),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            match name_str.as_ref() {
+                "objects" => {
+                    usage.objects_bytes = crate::fsutil::measure_tree_size(&path);
+                }
+                "snapshots" => {
+                    usage.snapshots_bytes = crate::fsutil::measure_tree_size(&path);
+                }
+                "worktrees" => {
+                    usage.mirrors_bytes = crate::fsutil::measure_tree_size(&path);
+                }
+                "refs" => {
+                    usage.refs_bytes = crate::fsutil::measure_tree_size(&path);
+                }
+                "ingest-cache.tsv" | "verified.tsv" | "lru.tsv" | "index.tsv" | "journal.tsv" => {
+                    usage.caches_bytes += crate::fsutil::measure_tree_size(&path);
+                }
+                _ => {
+                    usage.caches_bytes += crate::fsutil::measure_tree_size(&path);
+                }
+            }
+        }
+        usage.total_bytes = usage.objects_bytes
+            + usage.snapshots_bytes
+            + usage.mirrors_bytes
+            + usage.refs_bytes
+            + usage.caches_bytes;
+        Ok(usage)
+    }
+
+    /// Age-based garbage collection (ticket 06): delete every entry
+    /// whose reference count is zero and whose object file was last
+    /// modified before `now - max_age`.
     pub fn sweep(&mut self, max_age: Duration) -> Result<Swept> {
+        self.sweep_ext(max_age, false).map(|(s, _)| s)
+    }
+
+    /// Delete store entries with no live references and older than max_age.
+    /// When dry_run is true, performs the sweep analysis without deleting files.
+    /// Returns (Swept, reclaimed_bytes).
+    pub fn sweep_ext(&mut self, max_age: Duration, dry_run: bool) -> Result<(Swept, u64)> {
         let _ = crate::snapindex::compact_journal(self.root());
         let cutoff = SystemTime::now()
             .checked_sub(max_age)
@@ -396,6 +472,7 @@ impl DiskStore {
         let ids = self.ids()?;
         let examined = ids.len() as u64;
         let mut reclaimed = 0u64;
+        let mut reclaimed_bytes = 0u64;
         for id in ids {
             match fs::metadata(self.ref_path(&id)) {
                 Ok(_) => {
@@ -418,13 +495,19 @@ impl DiskStore {
             if modified > cutoff {
                 continue;
             }
-            self.delete(&id)?;
+            if !dry_run {
+                self.delete(&id)?;
+            }
             reclaimed += 1;
+            reclaimed_bytes += meta.len();
         }
-        Ok(Swept {
-            examined,
-            reclaimed,
-        })
+        Ok((
+            Swept {
+                examined,
+                reclaimed,
+            },
+            reclaimed_bytes,
+        ))
     }
 
     /// Hard-link a verified blob out to `dest`, which must not exist.
