@@ -4,9 +4,9 @@ We considered replacing the filesystem with a database-backed virtual
 filesystem, but every interception mechanism on macOS (FUSE, kernel
 extensions) adds per-operation cost and install friction, likely making
 things slower. Instead, a userspace store holds each unique file content once
-(the source of truth), and the visible project tree is a disposable copy kept
-in sync with it. Expensive operations are avoided at the source rather than
-made faster underneath.
+(the source of truth), and the visible project tree is a disposable projection
+materialized on demand. Expensive operations are avoided at the source rather
+than made faster underneath.
 
 ## Considered options
 
@@ -14,10 +14,14 @@ made faster underneath.
   and is hard to install on macOS.
 - Full bypass where nothing touches disk: rejected, third-party build tools
   require real files.
+- Background sync daemons or filesystem watchers: rejected, adds background
+  resource drain, state desynchronization bugs, and crash complexity.
 
 ## Consequences
 
-- Editors and build tools keep working on real files; only agents may talk to
-  the store directly.
-- A watcher/sync layer must keep the tree coherent with the store when either
-  side changes.
+- Editors and build tools keep working on real files. Both humans and agents
+  interact with normal on-disk files in the projected tree.
+- Explicit hydration (`wt hydrate` or `wt new`) is the sole mechanism for
+  materializing files from the store into trees.
+- There is no background watcher daemon, automatic synchronization layer, or
+  bidirectional tree-store sync. Edits in the tree stay private to that tree.

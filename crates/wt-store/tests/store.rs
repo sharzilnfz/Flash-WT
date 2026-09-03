@@ -9,7 +9,7 @@ use std::fs;
 use std::time::Instant;
 
 use tempfile::TempDir;
-use wt_store::{ContentId, DiskStore, Error};
+use wt_store::{ContentId, DiskStore, Error, stream_hash_file};
 
 fn temp_root() -> TempDir {
     TempDir::new().expect("temp dir")
@@ -281,16 +281,40 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use wt_store::{Entry as CacheEntry, ValidationCache};
 
+fn set_file_mtime(path: &std::path::Path, time: SystemTime) {
+    use std::os::unix::ffi::OsStrExt;
+    let dur = time.duration_since(UNIX_EPOCH).expect("time since epoch");
+    let ts = libc::timespec {
+        tv_sec: dur.as_secs() as _,
+        tv_nsec: dur.subsec_nanos() as _,
+    };
+    let times = [ts, ts];
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("cstring");
+    let ret = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    assert_eq!(ret, 0, "utimensat failed");
+}
+
 /// Stat a file and build the cache entry an ingest would record.
-fn entry_for(path: &std::path::Path) -> (u64, SystemTime) {
+fn entry_for(path: &std::path::Path) -> (u64, SystemTime, u64, SystemTime) {
+    use std::os::unix::fs::MetadataExt;
     let meta = fs::metadata(path).expect("stat source file");
-    (meta.len(), meta.modified().expect("mtime"))
+    let ctime_secs = meta.ctime().max(0) as u64;
+    let ctime_nanos = meta.ctime_nsec().clamp(0, 999_999_999) as u32;
+    let ctime = UNIX_EPOCH + Duration::new(ctime_secs, ctime_nanos);
+    (
+        meta.len(),
+        meta.modified().expect("mtime"),
+        meta.ino(),
+        ctime,
+    )
 }
 
 fn write_source(root: &TempDir, text: &str) -> std::path::PathBuf {
     let path = root.path().join("heavy/file.txt");
     fs::create_dir_all(path.parent().unwrap()).expect("mkdir heavy");
     fs::write(&path, text).expect("write source");
+    // Backdate mtime so it is not near now, simulating normal repo files on disk.
+    set_file_mtime(&path, UNIX_EPOCH + Duration::from_secs(1_700_000_000));
     path
 }
 
@@ -301,8 +325,17 @@ fn record_for(
 ) -> ContentId {
     let bytes = fs::read(path).expect("read source");
     let id = store.put(&bytes).expect("put");
-    let (size, mtime) = entry_for(path);
-    cache.record("heavy/file.txt".to_string(), CacheEntry { size, mtime, id });
+    let (size, mtime, inode, ctime) = entry_for(path);
+    cache.record(
+        "heavy/file.txt".to_string(),
+        CacheEntry {
+            size,
+            mtime,
+            inode,
+            ctime,
+            id,
+        },
+    );
     id
 }
 
@@ -318,13 +351,13 @@ fn cache_hits_on_unchanged_file() {
     let id = record_for(&mut cache, &mut store, &path);
     cache.save().expect("save");
 
-    // Next run, same size and mtime: hit, no read needed.
+    // Next run, same size, mtime, inode, and ctime: hit, no read needed.
     let reopened = ValidationCache::open(store_dir.path());
-    let (size, mtime) = entry_for(&path);
+    let (size, mtime, inode, ctime) = entry_for(&path);
     assert_eq!(
-        reopened.lookup("heavy/file.txt", size, mtime),
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
         Some(id),
-        "unchanged size+mtime must be a hit"
+        "unchanged size+mtime+inode+ctime must be a hit"
     );
 }
 
@@ -340,14 +373,17 @@ fn cache_misses_on_mtime_change_with_same_size() {
     cache.save().expect("save");
 
     let reopened = ValidationCache::open(store_dir.path());
-    let (size, mtime) = entry_for(&path);
+    let (size, mtime, inode, ctime) = entry_for(&path);
     let touched = mtime + Duration::from_secs(1);
     assert_eq!(
-        reopened.lookup("heavy/file.txt", size, touched),
+        reopened.lookup("heavy/file.txt", size, touched, inode, ctime),
         None,
         "a bumped mtime must be re-hashed even at the same size"
     );
-    assert_eq!(reopened.lookup("heavy/file.txt", size, mtime), Some(id));
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
+        Some(id)
+    );
 }
 
 #[test]
@@ -362,13 +398,16 @@ fn cache_misses_on_size_change_with_same_mtime() {
     cache.save().expect("save");
 
     let reopened = ValidationCache::open(store_dir.path());
-    let (size, mtime) = entry_for(&path);
+    let (size, mtime, inode, ctime) = entry_for(&path);
     assert_eq!(
-        reopened.lookup("heavy/file.txt", size + 1, mtime),
+        reopened.lookup("heavy/file.txt", size + 1, mtime, inode, ctime),
         None,
         "a changed size must be re-hashed even at the same mtime"
     );
-    assert_eq!(reopened.lookup("heavy/file.txt", size, mtime), Some(id));
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
+        Some(id)
+    );
 }
 
 #[test]
@@ -384,10 +423,13 @@ fn cache_misses_after_content_change() {
 
     // Edit the content: both size and mtime move in practice.
     fs::write(&path, "after edit, longer\n").expect("edit source");
-    let (size, mtime) = entry_for(&path);
+    let (size, mtime, inode, ctime) = entry_for(&path);
 
     let reopened = ValidationCache::open(store_dir.path());
-    assert_eq!(reopened.lookup("heavy/file.txt", size, mtime), None);
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
+        None
+    );
     assert_ne!(store.put(b"after edit, longer\n").expect("put"), old_id);
 }
 
@@ -407,9 +449,12 @@ fn pre_existing_store_without_cache_opens_empty_and_populates() {
 
     // The next run finds it populated.
     let reopened = ValidationCache::open(dir.path());
-    let (size, mtime) = entry_for(&path);
+    let (size, mtime, inode, ctime) = entry_for(&path);
     assert_eq!(reopened.len(), 1);
-    assert_eq!(reopened.lookup("heavy/file.txt", size, mtime), Some(id));
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
+        Some(id)
+    );
 }
 
 #[test]
@@ -427,7 +472,13 @@ fn deleted_cache_degrades_to_empty_not_error() {
     let reopened = ValidationCache::open(dir.path());
     assert!(reopened.is_empty(), "deleted cache must fall back to cold");
     assert_eq!(
-        reopened.lookup("heavy/file.txt", 0, SystemTime::UNIX_EPOCH),
+        reopened.lookup(
+            "heavy/file.txt",
+            0,
+            SystemTime::UNIX_EPOCH,
+            0,
+            SystemTime::UNIX_EPOCH
+        ),
         None
     );
 }
@@ -460,6 +511,8 @@ fn save_is_atomic_enough_to_round_trip() {
         CacheEntry {
             size: 3,
             mtime: UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(42),
+            inode: 12345,
+            ctime: UNIX_EPOCH + Duration::from_secs(1_700_000_001),
             id: ContentId([7u8; 32]),
         },
     );
@@ -468,6 +521,8 @@ fn save_is_atomic_enough_to_round_trip() {
         CacheEntry {
             size: 9,
             mtime: UNIX_EPOCH + Duration::from_secs(1),
+            inode: 67890,
+            ctime: UNIX_EPOCH + Duration::from_secs(2),
             id: ContentId([8u8; 32]),
         },
     );
@@ -479,10 +534,12 @@ fn save_is_atomic_enough_to_round_trip() {
         reopened.lookup(
             "heavy/a.txt",
             3,
-            UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(42)
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(42),
+            12345,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_001),
         ),
         Some(ContentId([7u8; 32])),
-        "sub-second mtime precision must survive the round trip"
+        "sub-second mtime precision and inode/ctime must survive the round trip"
     );
 }
 
@@ -602,6 +659,74 @@ fn ingest_tree_rehashes_changed_content_and_feeds_the_cache() {
         cache.len() >= 2,
         "ingest must populate the validation cache"
     );
+}
+
+#[test]
+fn forced_mtime_collision_and_identical_size_rehashes_fresh_content() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let heavy = src.path().join("heavy");
+    fs::create_dir_all(&heavy).expect("mkdir");
+    let file = heavy.join("item.txt");
+    fs::write(&file, "initial content\n").expect("write initial");
+
+    let t0 = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    set_file_mtime(&file, t0);
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let first = store
+        .ingest_tree(src.path(), &heavy, &no_excludes())
+        .expect("first ingest");
+    let id1 = first.files["heavy/item.txt"];
+
+    // Overwrite in-place with different content of the exact same byte length (16 bytes).
+    fs::write(&file, "updated content\n").expect("write updated");
+    // Force mtime collision with the prior cached timestamp.
+    set_file_mtime(&file, t0);
+
+    // Ingest again: despite identical size and forced mtime collision,
+    // ctime (or inode) changed so it must not reuse id1.
+    let second = store
+        .ingest_tree(src.path(), &heavy, &no_excludes())
+        .expect("second ingest");
+    let id2 = second.files["heavy/item.txt"];
+    assert_ne!(
+        id1, id2,
+        "fresh content must be re-hashed despite mtime and size collision"
+    );
+    assert_eq!(
+        store.get(&id2).expect("get updated blob"),
+        b"updated content\n"
+    );
+}
+
+#[test]
+fn near_now_mtime_rehashes_even_with_identical_size_and_mtime() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let heavy = src.path().join("heavy");
+    fs::create_dir_all(&heavy).expect("mkdir");
+    let file = heavy.join("fast.txt");
+    fs::write(&file, "rapid write 1\n").expect("write 1");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let first = store
+        .ingest_tree(src.path(), &heavy, &no_excludes())
+        .expect("first ingest");
+    let id1 = first.files["heavy/fast.txt"];
+
+    // Immediate rewrite within the same time window (< 2s) with identical size (14 bytes).
+    fs::write(&file, "rapid write 2\n").expect("write 2");
+
+    let second = store
+        .ingest_tree(src.path(), &heavy, &no_excludes())
+        .expect("second ingest");
+    let id2 = second.files["heavy/fast.txt"];
+    assert_ne!(
+        id1, id2,
+        "near-now rewrite must rehash rather than serving stale blob"
+    );
+    assert_eq!(store.get(&id2).expect("get"), b"rapid write 2\n");
 }
 
 #[test]
@@ -986,4 +1111,229 @@ fn save_without_changes_is_a_noop_not_a_rewrite() {
         .modified()
         .expect("mtime");
     assert_eq!(before, after, "clean save must not rewrite the TSV");
+}
+
+#[test]
+fn stream_hash_file_matches_for_bytes_across_sizes() {
+    let dir = TempDir::new().expect("tempdir");
+
+    let empty_path = dir.path().join("empty.txt");
+    fs::write(&empty_path, b"").expect("write empty");
+    assert_eq!(
+        stream_hash_file(&empty_path).expect("hash empty"),
+        ContentId::for_bytes(b"")
+    );
+
+    let small_path = dir.path().join("small.txt");
+    let small_data = b"hello streaming ingest world\n";
+    fs::write(&small_path, small_data).expect("write small");
+    assert_eq!(
+        stream_hash_file(&small_path).expect("hash small"),
+        ContentId::for_bytes(small_data)
+    );
+
+    let large_path = dir.path().join("large.bin");
+    let large_data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+    fs::write(&large_path, &large_data).expect("write large");
+    assert_eq!(
+        stream_hash_file(&large_path).expect("hash large"),
+        ContentId::for_bytes(&large_data)
+    );
+}
+
+#[test]
+fn put_file_streams_into_store_and_deduplicates() {
+    let store_dir = temp_root();
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let src = TempDir::new().expect("tempdir");
+
+    let file_path = src.path().join("chunked.bin");
+    let data: Vec<u8> = (0..128 * 1024).map(|i| (i % 173) as u8).collect();
+    fs::write(&file_path, &data).expect("write data");
+
+    let id = store.put_file(&file_path).expect("put_file");
+    assert_eq!(id, ContentId::for_bytes(&data));
+    assert_eq!(store.get(&id).expect("get"), data);
+
+    let duplicate_path = src.path().join("duplicate.bin");
+    fs::write(&duplicate_path, &data).expect("write duplicate");
+    let id2 = store.put_file(&duplicate_path).expect("put duplicate");
+    assert_eq!(id2, id);
+}
+
+#[test]
+fn parallel_cold_ingest_produces_identical_blob_ids_and_manifest_bytes() {
+    let src = TempDir::new().expect("tempdir");
+    let heavy = src.path().join("heavy");
+    fs::create_dir_all(&heavy).expect("mkdir heavy");
+
+    for dir_idx in 0..4 {
+        let sub = heavy.join(format!("pkg_{dir_idx}"));
+        fs::create_dir_all(&sub).expect("mkdir sub");
+        for file_idx in 0..30 {
+            let file_path = sub.join(format!("file_{file_idx}.dat"));
+            if file_idx % 5 == 0 {
+                let large_bytes: Vec<u8> = (0..80 * 1024)
+                    .map(|b| ((dir_idx * 31 + file_idx * 7 + b) % 256) as u8)
+                    .collect();
+                fs::write(&file_path, &large_bytes).expect("write large");
+            } else if file_idx % 3 == 0 {
+                fs::write(&file_path, b"shared duplicate file content\n").expect("write duplicate");
+            } else {
+                let content = format!("package {dir_idx} item {file_idx}\n");
+                fs::write(&file_path, content.as_bytes()).expect("write");
+            }
+        }
+    }
+
+    let store1_dir = temp_root();
+    let mut store1 = DiskStore::open(store1_dir.path()).expect("open store 1");
+    let options = IngestOptions {
+        snapshots: true,
+        exclude: &|_| false,
+    };
+    let ingested1 = store1
+        .ingest_tree(src.path(), &heavy, &options)
+        .expect("ingest 1");
+    let manifest1 = ingested1
+        .to_snapshot_manifest("heavy", None)
+        .expect("manifest 1");
+
+    let store2_dir = temp_root();
+    let mut store2 = DiskStore::open(store2_dir.path()).expect("open store 2");
+    let ingested2 = store2
+        .ingest_tree(src.path(), &heavy, &options)
+        .expect("ingest 2");
+    let manifest2 = ingested2
+        .to_snapshot_manifest("heavy", None)
+        .expect("manifest 2");
+
+    assert_eq!(ingested1.files, ingested2.files);
+    assert_eq!(ingested1.file_sizes, ingested2.file_sizes);
+    assert_eq!(ingested1.dirs, ingested2.dirs);
+    assert_eq!(ingested1.dir_modes, ingested2.dir_modes);
+    assert_eq!(ingested1.modes, ingested2.modes);
+
+    let bytes1 = manifest1.serialize();
+    let bytes2 = manifest2.serialize();
+    assert_eq!(
+        bytes1, bytes2,
+        "manifest bytes must be identical for identical inputs"
+    );
+    assert_eq!(manifest1.entries.len(), manifest2.entries.len());
+    assert_eq!(manifest1.total_size, manifest2.total_size);
+}
+
+#[test]
+fn put_batch_stores_and_deduplicates_blobs() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open store");
+
+    let items: Vec<&[u8]> = vec![
+        b"alpha payload",
+        b"beta payload",
+        b"alpha payload",
+        b"gamma payload",
+    ];
+
+    let ids = store.put_batch(&items).expect("put_batch");
+    assert_eq!(ids.len(), 4);
+    assert_eq!(ids[0], ids[2]);
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(ids[1], ids[3]);
+
+    assert_eq!(store.get(&ids[0]).expect("get alpha"), b"alpha payload");
+    assert_eq!(store.get(&ids[1]).expect("get beta"), b"beta payload");
+    assert_eq!(store.get(&ids[3]).expect("get gamma"), b"gamma payload");
+
+    let empty = store.put_batch(&[]).expect("put_batch empty");
+    assert!(empty.is_empty());
+
+    let delta = store
+        .put_batch(&[b"alpha payload", b"delta payload"])
+        .expect("put_batch delta");
+    assert_eq!(delta[0], ids[0]);
+    assert_eq!(store.get(&delta[1]).expect("get delta"), b"delta payload");
+}
+
+#[test]
+fn put_files_batch_streams_and_deduplicates() {
+    let store_dir = temp_root();
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let src = TempDir::new().expect("tempdir");
+
+    let path_a = src.path().join("file_a.bin");
+    let path_b = src.path().join("file_b.bin");
+    let path_c = src.path().join("file_c.bin");
+
+    let data_a = b"content for file A".to_vec();
+    let data_b = b"content for file B which is different".to_vec();
+    let data_c = data_a.clone();
+
+    fs::write(&path_a, &data_a).expect("write a");
+    fs::write(&path_b, &data_b).expect("write b");
+    fs::write(&path_c, &data_c).expect("write c");
+
+    let id_a = ContentId::for_bytes(&data_a);
+    let id_b = ContentId::for_bytes(&data_b);
+    let id_c = ContentId::for_bytes(&data_c);
+
+    let batch = vec![
+        (path_a.as_path(), id_a),
+        (path_b.as_path(), id_b),
+        (path_c.as_path(), id_c),
+    ];
+
+    let ids = store.put_files_batch(&batch).expect("put_files_batch");
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids[0], id_a);
+    assert_eq!(ids[1], id_b);
+    assert_eq!(ids[2], id_a);
+
+    assert_eq!(store.get(&id_a).expect("get a"), data_a);
+    assert_eq!(store.get(&id_b).expect("get b"), data_b);
+}
+
+#[test]
+fn batch_durability_hardware_sync_enabled() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open store");
+
+    unsafe {
+        std::env::set_var("WT_TEST_FORCE_SYNC", "1");
+    }
+    let res = store.put_batch(&[b"durability item 1", b"durability item 2"]);
+    unsafe {
+        std::env::remove_var("WT_TEST_FORCE_SYNC");
+    }
+
+    let ids = res.expect("put_batch with sync");
+    assert_eq!(ids.len(), 2);
+    assert_eq!(store.get(&ids[0]).expect("get 1"), b"durability item 1");
+    assert_eq!(store.get(&ids[1]).expect("get 2"), b"durability item 2");
+}
+
+#[test]
+fn interrupted_write_debris_leaves_no_partial_truth() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open store");
+
+    let content = b"resilient payload";
+    let id = ContentId::for_bytes(content);
+    let hex = id.to_string();
+    let shard_dir = dir.path().join("objects").join(&hex[..2]);
+    fs::create_dir_all(&shard_dir).expect("create shard dir");
+
+    let debris_path = shard_dir.join(".tmp_interrupted_write");
+    fs::write(&debris_path, b"incomplete bytes").expect("write debris");
+
+    assert!(!store.contains(&id));
+    assert!(matches!(store.get(&id), Err(Error::UnknownContent(_))));
+    let stored_ids = store.ids().expect("ids");
+    assert!(!stored_ids.contains(&id));
+
+    let final_id = store.put(content).expect("put");
+    assert_eq!(final_id, id);
+    assert!(store.contains(&id));
+    assert_eq!(store.get(&id).expect("get"), content);
 }

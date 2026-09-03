@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::receipt::{OperationReceipt, ReceiptState};
+
 /// Current JSON output schema version (ticket 01).
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -69,7 +71,7 @@ impl<T: Serialize> Envelope<T> {
 }
 
 /// Payload for `wt create --json`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CreateData {
     pub worktree_path: String,
     pub branch: String,
@@ -79,10 +81,24 @@ pub struct CreateData {
     pub bytes_shared_cow: u64,
     pub bytes_copied: u64,
     pub files_hydrated: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental_decision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental_fallback_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental_hit_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_mechanism: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_fallback_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resumed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_path: Option<String>,
 }
 
 /// Payload for `wt hydrate --json`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HydrateData {
     pub destination_path: String,
     pub source_path: String,
@@ -93,6 +109,18 @@ pub struct HydrateData {
     pub bytes_copied: u64,
     pub files_hydrated: usize,
     pub dirs_hydrated: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental_decision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental_fallback_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental_hit_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_mechanism: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_fallback_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_path: Option<String>,
 }
 
 /// Payload for `wt init --json`.
@@ -131,6 +159,14 @@ pub struct SweepData {
     pub leases_reclaimed: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lease_bytes_reclaimed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreferenced_blobs: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dead_leases: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reclaimed_bytes: Option<u64>,
 }
 
 /// Payload for `wt scrub --json`.
@@ -154,6 +190,64 @@ pub struct MigrateData {
     pub gc_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub purged_legacy_refs: Option<usize>,
+}
+
+/// Payload for `wt store du --json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoreDuData {
+    pub store_path: String,
+    pub objects_bytes: u64,
+    pub snapshots_bytes: u64,
+    pub mirrors_bytes: u64,
+    pub refs_bytes: u64,
+    pub caches_bytes: u64,
+    pub total_bytes: u64,
+}
+
+/// Payload for `wt doctor --json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorData {
+    pub store_path: String,
+    pub env_vars: DoctorEnvVars,
+    pub fs_capabilities: DoctorFsCapabilities,
+    pub store_disk_usage: StoreDuData,
+}
+
+/// Environment variable diagnostics in `DoctorData`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorEnvVars {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_store: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_snapshots: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_snapshots_v2: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_verify: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_timing: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_gc_grace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_snapshot_cap: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_max_snapshot_bytes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_hardlink: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_no_hardlink: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_tiny_bypass: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wt_no_tiny_bypass: Option<String>,
+}
+
+/// Probed filesystem capabilities in `DoctorData`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorFsCapabilities {
+    pub apfs_clonefile: bool,
+    pub ficlone: bool,
+    pub copy_file_range: bool,
 }
 
 /// Payload for `wt list --json` / `wt ls --json` (ticket 02).
@@ -196,6 +290,10 @@ pub struct LeaseEntry {
     pub expires_at: u64,
     pub ttl_remaining_secs: u64,
     pub is_expired: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_dir: Option<String>,
 }
 
 /// Payload for `wt scratch --json` / `wt isolate --json` (ticket 03).
@@ -249,6 +347,14 @@ pub struct CleanData {
     pub sweep_reclaimed: usize,
 }
 
+/// Payload for `wt lease show --json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LeaseData {
+    pub leases: Vec<LeaseEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_lease: Option<LeaseEntry>,
+}
+
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
@@ -294,6 +400,13 @@ mod tests {
             bytes_shared_cow: 1024,
             bytes_copied: 0,
             files_hydrated: 10,
+            incremental_decision: None,
+            incremental_fallback_reason: None,
+            incremental_hit_rate: None,
+            copy_mechanism: None,
+            copy_fallback_reason: None,
+            resumed: None,
+            receipt_path: None,
         };
         let env = Envelope::ok("create", data, vec![]);
         let json = serde_json::to_string(&env).expect("serialize");
@@ -307,6 +420,9 @@ mod tests {
         assert_eq!(parsed["data"]["hydration_method"], "clone");
         assert_eq!(parsed["data"]["bytes_shared_cow"], 1024);
         assert_eq!(parsed["data"]["bytes_copied"], 0);
+        assert!(parsed["data"].get("incremental_decision").is_none());
+        assert!(parsed["data"].get("incremental_fallback_reason").is_none());
+        assert!(parsed["data"].get("copy_mechanism").is_none());
         assert_eq!(parsed["diagnostics"], serde_json::json!([]));
     }
 
@@ -339,6 +455,10 @@ mod tests {
             leases_examined: Some(3),
             leases_reclaimed: Some(2),
             lease_bytes_reclaimed: Some(4096),
+            dry_run: None,
+            unreferenced_blobs: None,
+            dead_leases: None,
+            reclaimed_bytes: None,
         };
         let env = Envelope::ok("sweep", data, vec![]);
         let json = serde_json::to_string(&env).expect("serialize sweep json");
@@ -349,6 +469,71 @@ mod tests {
         assert_eq!(parsed["data"]["leases_examined"], 3);
         assert_eq!(parsed["data"]["leases_reclaimed"], 2);
         assert_eq!(parsed["data"]["lease_bytes_reclaimed"], 4096);
+    }
+
+    #[test]
+    fn doctor_envelope_ok_serialization() {
+        let data = DoctorData {
+            store_path: "/tmp/store".into(),
+            env_vars: DoctorEnvVars {
+                wt_store: Some("/tmp/store".into()),
+                wt_snapshots: Some("1".into()),
+                wt_snapshots_v2: None,
+                wt_verify: None,
+                wt_timing: None,
+                wt_gc_grace: Some("15m".into()),
+                wt_snapshot_cap: None,
+                wt_max_snapshot_bytes: None,
+                wt_hardlink: None,
+                wt_no_hardlink: None,
+                wt_tiny_bypass: None,
+                wt_no_tiny_bypass: None,
+            },
+            fs_capabilities: DoctorFsCapabilities {
+                apfs_clonefile: true,
+                ficlone: false,
+                copy_file_range: false,
+            },
+            store_disk_usage: StoreDuData {
+                store_path: "/tmp/store".into(),
+                objects_bytes: 1024,
+                snapshots_bytes: 2048,
+                mirrors_bytes: 512,
+                refs_bytes: 0,
+                caches_bytes: 256,
+                total_bytes: 3840,
+            },
+        };
+        let env = Envelope::ok("doctor", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize doctor json");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse doctor json");
+        assert_eq!(parsed["command"], "doctor");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["data"]["store_path"], "/tmp/store");
+        assert_eq!(parsed["data"]["fs_capabilities"]["apfs_clonefile"], true);
+        assert_eq!(parsed["data"]["store_disk_usage"]["total_bytes"], 3840);
+    }
+
+    #[test]
+    fn store_du_envelope_ok_serialization() {
+        let data = StoreDuData {
+            store_path: "/tmp/store".into(),
+            objects_bytes: 1000,
+            snapshots_bytes: 2000,
+            mirrors_bytes: 300,
+            refs_bytes: 50,
+            caches_bytes: 150,
+            total_bytes: 3500,
+        };
+        let env = Envelope::ok("store du", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize store du json");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse store du json");
+        assert_eq!(parsed["command"], "store du");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["data"]["total_bytes"], 3500);
+        assert_eq!(parsed["data"]["objects_bytes"], 1000);
     }
 
     #[test]
@@ -419,11 +604,17 @@ mod tests {
             source_path: "/tmp/src".into(),
             cache_hit: true,
             duration_ms: 12,
-            hydration_method: "clone".into(),
-            bytes_shared_cow: 4096,
-            bytes_copied: 0,
+            hydration_method: "byte_copy".into(),
+            bytes_shared_cow: 0,
+            bytes_copied: 4096,
             files_hydrated: 50,
             dirs_hydrated: vec!["node_modules".into()],
+            incremental_decision: None,
+            incremental_fallback_reason: None,
+            incremental_hit_rate: None,
+            copy_mechanism: Some("byte-copy".into()),
+            copy_fallback_reason: Some("cross-device mount".into()),
+            receipt_path: None,
         };
         let env = Envelope::ok("hydrate", data, vec![]);
         let json = serde_json::to_string(&env).expect("serialize hydrate json");
@@ -434,7 +625,43 @@ mod tests {
         assert_eq!(parsed["data"]["destination_path"], "/tmp/dest");
         assert_eq!(parsed["data"]["source_path"], "/tmp/src");
         assert_eq!(parsed["data"]["files_hydrated"], 50);
+        assert_eq!(parsed["data"]["copy_mechanism"], "byte-copy");
+        assert_eq!(parsed["data"]["copy_fallback_reason"], "cross-device mount");
         assert_eq!(parsed["data"]["dirs_hydrated"][0], "node_modules");
+        assert!(parsed["data"].get("incremental_decision").is_none());
+        assert!(parsed["data"].get("incremental_fallback_reason").is_none());
+    }
+
+    #[test]
+    fn incremental_decision_fields_serialized_when_present() {
+        let data = CreateData {
+            worktree_path: "/tmp/wt-incr".into(),
+            branch: "incr-feature".into(),
+            cache_hit: false,
+            duration_ms: 105,
+            hydration_method: "clone".into(),
+            bytes_shared_cow: 8192,
+            bytes_copied: 0,
+            files_hydrated: 40,
+            incremental_decision: Some("diff_too_wide".into()),
+            incremental_fallback_reason: Some(
+                "changed entries ratio 15.00% (6 of 40) exceeds maximum threshold 10.00%".into(),
+            ),
+            incremental_hit_rate: Some(0.85),
+            copy_mechanism: None,
+            copy_fallback_reason: None,
+            resumed: None,
+            receipt_path: None,
+        };
+        let env = Envelope::ok("create", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize create json");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        assert_eq!(parsed["data"]["incremental_decision"], "diff_too_wide");
+        assert_eq!(
+            parsed["data"]["incremental_fallback_reason"],
+            "changed entries ratio 15.00% (6 of 40) exceeds maximum threshold 10.00%"
+        );
+        assert_eq!(parsed["data"]["incremental_hit_rate"], 0.85);
     }
 
     #[test]
@@ -451,5 +678,65 @@ mod tests {
         assert_eq!(parsed["status"], "ok");
         assert_eq!(parsed["data"]["manifest_path"], "/tmp/repo/.wtinclude");
         assert_eq!(parsed["data"]["created"], true);
+    }
+
+    #[test]
+    fn lease_envelope_ok_serialization() {
+        let entry = LeaseEntry {
+            lease_id: "scratch-demo1".into(),
+            pid: 1234,
+            pid_alive: true,
+            expires_at: 1900000000,
+            ttl_remaining_secs: 1800,
+            is_expired: false,
+            worktree_path: Some("/tmp/wt/repo-scratch-demo1".into()),
+            git_dir: Some("/tmp/repo/.git/worktrees/scratch-demo1".into()),
+        };
+        let data = LeaseData {
+            leases: vec![entry.clone()],
+            matched_lease: Some(entry),
+        };
+        let env = Envelope::ok("lease", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize lease json");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse lease json");
+        assert_eq!(parsed["command"], "lease");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["data"]["leases"][0]["lease_id"], "scratch-demo1");
+        assert_eq!(
+            parsed["data"]["leases"][0]["worktree_path"],
+            "/tmp/wt/repo-scratch-demo1"
+        );
+        assert_eq!(parsed["data"]["matched_lease"]["lease_id"], "scratch-demo1");
+    }
+
+    #[test]
+    fn create_envelope_resumed_serialization() {
+        let data = CreateData {
+            worktree_path: "/tmp/wt-demo".into(),
+            branch: "demo".into(),
+            cache_hit: true,
+            duration_ms: 42,
+            hydration_method: "clone".into(),
+            bytes_shared_cow: 1024,
+            bytes_copied: 0,
+            files_hydrated: 10,
+            incremental_decision: None,
+            incremental_fallback_reason: None,
+            incremental_hit_rate: None,
+            copy_mechanism: None,
+            copy_fallback_reason: None,
+            resumed: Some(true),
+            receipt_path: Some("/tmp/repo/.git/worktrees/demo/wt-receipt.json".into()),
+        };
+        let env = Envelope::ok("create", data, vec![]);
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        assert_eq!(parsed["data"]["resumed"], true);
+        assert_eq!(
+            parsed["data"]["receipt_path"],
+            "/tmp/repo/.git/worktrees/demo/wt-receipt.json"
+        );
     }
 }

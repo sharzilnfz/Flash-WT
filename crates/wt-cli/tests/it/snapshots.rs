@@ -652,6 +652,7 @@ fn concurrent_identical_creates_one_publish_wins_loser_consumes_winner() {
                     .arg(&one)
                     .env("WT_STORE", &store)
                     .env("WT_SNAPSHOTS", "1")
+                    .env("WT_NO_TINY_BYPASS", "1")
                     .current_dir(&repo)
                     .output()
                     .expect("run wt binary")
@@ -664,6 +665,7 @@ fn concurrent_identical_creates_one_publish_wins_loser_consumes_winner() {
                 .arg(&two)
                 .env("WT_STORE", &store)
                 .env("WT_SNAPSHOTS", "1")
+                .env("WT_NO_TINY_BYPASS", "1")
                 .current_dir(&repo)
                 .output()
                 .expect("run wt binary")
@@ -693,6 +695,222 @@ fn concurrent_identical_creates_one_publish_wins_loser_consumes_winner() {
     assert_tree_matches_source(
         &fx.repo.join("heavy"),
         &fx.worktree_path("race-two").join("heavy"),
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn bump_source_wide(heavy: &Path) {
+    for pkg in 0..4 {
+        for f in 0..9 {
+            let p = heavy.join(format!("pkg0{pkg}/file-{f:03}.txt"));
+            fs::write(&p, format!("package {pkg} file {f} WIDE EDIT\n")).unwrap();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn incremental_rebuild_guard_narrow_diff_surfaces_hit_in_json_and_timing() {
+    let fx = Fixture::v2_repo(5, 50);
+
+    assert_created(&fx.wt_env(
+        &[
+            "create",
+            "one",
+            "--dir",
+            &fx.worktree_path("origin-one").to_string_lossy(),
+        ],
+        BOTH_GATES,
+    ));
+
+    bump_source(&fx.repo.join("heavy"));
+
+    // Verify JSON output on first rebuild of this new manifest
+    let out_json = fx.wt_env(
+        &[
+            "create",
+            "two-json",
+            "--json",
+            "--dir",
+            &fx.worktree_path("origin-two-json").to_string_lossy(),
+        ],
+        BOTH_GATES,
+    );
+    assert!(out_json.status.success());
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out_json.stdout).trim()).expect("parse JSON");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["cache_hit"], true);
+    assert_eq!(json["data"]["incremental_decision"], "hit");
+    assert!(json["data"]["incremental_fallback_reason"].is_null());
+
+    // Bump again to create a fresh narrow diff (file 1 in pkg02)
+    fs::write(
+        fx.repo.join("heavy/pkg02/file-001.txt"),
+        "package 2 file 1 FRESH NARROW EDIT\n",
+    )
+    .unwrap();
+
+    // Verify WT_TIMING=1 emission on fresh incremental rebuild
+    let out_timing = fx.wt_env(
+        &[
+            "create",
+            "two-timing",
+            "--dir",
+            &fx.worktree_path("origin-two-timing").to_string_lossy(),
+        ],
+        &[BOTH_GATES, &[("WT_TIMING", "1")]].concat(),
+    );
+    assert!(out_timing.status.success());
+    let stderr = String::from_utf8_lossy(&out_timing.stderr);
+    assert!(
+        stderr.contains("wt-stage snapshot-mode=v2"),
+        "narrow diff must rebuild incrementally in timing: {stderr}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn incremental_rebuild_guard_wide_diff_surfaces_fallback_in_json_and_timing() {
+    let fx = Fixture::v2_repo(5, 50);
+
+    assert_created(&fx.wt_env(
+        &[
+            "create",
+            "one",
+            "--dir",
+            &fx.worktree_path("origin-one").to_string_lossy(),
+        ],
+        BOTH_GATES,
+    ));
+
+    bump_source_wide(&fx.repo.join("heavy"));
+
+    // Verify JSON output on first rebuild of this wide diff
+    let out_json = fx.wt_env(
+        &[
+            "create",
+            "two-json",
+            "--json",
+            "--dir",
+            &fx.worktree_path("origin-two-json").to_string_lossy(),
+        ],
+        BOTH_GATES,
+    );
+    assert!(out_json.status.success());
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out_json.stdout).trim()).expect("parse JSON");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["cache_hit"], false);
+    assert_eq!(json["data"]["incremental_decision"], "diff_too_wide");
+    let reason = json["data"]["incremental_fallback_reason"]
+        .as_str()
+        .expect("fallback reason present");
+    assert!(
+        reason.contains("exceeds maximum threshold"),
+        "expected fallback reason to mention threshold: {reason}"
+    );
+
+    // Bump wide again to create a fresh wide diff
+    for pkg in 0..4 {
+        for f in 10..19 {
+            let p = fx
+                .repo
+                .join("heavy")
+                .join(format!("pkg0{pkg}/file-{f:03}.txt"));
+            fs::write(&p, format!("package {pkg} file {f} FRESH WIDE EDIT\n")).unwrap();
+        }
+    }
+
+    // Verify WT_TIMING=1 emission on fresh wide diff fallback
+    let out_timing = fx.wt_env(
+        &[
+            "create",
+            "two-timing",
+            "--dir",
+            &fx.worktree_path("origin-two-timing").to_string_lossy(),
+        ],
+        &[BOTH_GATES, &[("WT_TIMING", "1")]].concat(),
+    );
+    assert!(out_timing.status.success());
+    let stderr = String::from_utf8_lossy(&out_timing.stderr);
+    assert!(
+        stderr.contains("wt-stage snapshot-mode=build"),
+        "wide diff must fall back to full build in timing: {stderr}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn incremental_rebuild_guard_lockfile_miss_surfaces_fallback_in_json_and_timing() {
+    let fx = Fixture::v2_repo(5, 50);
+
+    // Initial lockfile
+    fs::write(fx.repo.join("package-lock.json"), PINNED_LOCKFILE).unwrap();
+
+    assert_created(&fx.wt_env(
+        &[
+            "create",
+            "one",
+            "--dir",
+            &fx.worktree_path("origin-one").to_string_lossy(),
+        ],
+        BOTH_GATES,
+    ));
+
+    // Narrow bump to heavy, but lockfile changed to V2!
+    bump_source(&fx.repo.join("heavy"));
+    fs::write(fx.repo.join("package-lock.json"), PINNED_LOCKFILE_V2).unwrap();
+
+    // Verify JSON output on first rebuild with lockfile miss
+    let out_json = fx.wt_env(
+        &[
+            "create",
+            "two-json",
+            "--json",
+            "--dir",
+            &fx.worktree_path("origin-two-json").to_string_lossy(),
+        ],
+        BOTH_GATES,
+    );
+    assert!(out_json.status.success());
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out_json.stdout).trim()).expect("parse JSON");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["cache_hit"], false);
+    assert_eq!(json["data"]["incremental_decision"], "lockfile_miss");
+    let reason = json["data"]["incremental_fallback_reason"]
+        .as_str()
+        .expect("fallback reason present");
+    assert!(
+        reason.contains("lockfile hash mismatch"),
+        "expected fallback reason to mention lockfile hash mismatch: {reason}"
+    );
+
+    // Bump again with a fresh lockfile change (version 1.0.2)
+    fs::write(
+        fx.repo.join("heavy/pkg02/file-001.txt"),
+        "package 2 file 1 FRESH LOCKFILE EDIT\n",
+    )
+    .unwrap();
+    let lockfile_v3 = PINNED_LOCKFILE_V2.replace("1.0.1", "1.0.2");
+    fs::write(fx.repo.join("package-lock.json"), lockfile_v3).unwrap();
+
+    // Verify WT_TIMING=1 emission on fresh lockfile miss fallback
+    let out_timing = fx.wt_env(
+        &[
+            "create",
+            "two-timing",
+            "--dir",
+            &fx.worktree_path("origin-two-timing").to_string_lossy(),
+        ],
+        &[BOTH_GATES, &[("WT_TIMING", "1")]].concat(),
+    );
+    assert!(out_timing.status.success());
+    let stderr = String::from_utf8_lossy(&out_timing.stderr);
+    assert!(
+        stderr.contains("wt-stage snapshot-mode=build"),
+        "lockfile miss must fall back to full build in timing: {stderr}"
     );
 }
 

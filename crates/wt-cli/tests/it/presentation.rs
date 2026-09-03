@@ -1,6 +1,7 @@
 //! Integration tests for presentation, formatting, listing, and JSON output envelopes.
 
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::common::Fixture;
@@ -558,4 +559,393 @@ fn human_duration_and_table_rendering_via_list_ttl() {
         Some('/'),
         "path cell must start under the PATH header:\nheader: {header}\nrow: {row}"
     );
+}
+
+// =========================================================================
+// Ticket 11: Schema Conformance, Execution Receipts, and Lease Show
+// =========================================================================
+
+#[test]
+fn schema_v1_json_contract_conformance() {
+    let schema_text = include_str!("../../../../schema/v1.json");
+    let schema: serde_json::Value =
+        serde_json::from_str(schema_text).expect("schema/v1.json must be valid JSON");
+
+    assert_eq!(schema["title"], "WT Envelope v1 Schema");
+    assert_eq!(schema["properties"]["schema_version"]["const"], 1);
+
+    let defs = &schema["definitions"];
+    let required_defs = [
+        "Diagnostic",
+        "CreateData",
+        "HydrateData",
+        "InitData",
+        "RemoveData",
+        "SweepData",
+        "ScrubData",
+        "MigrateData",
+        "ListData",
+        "WorktreeEntry",
+        "LeaseEntry",
+        "ScratchData",
+        "DemoData",
+        "CleanData",
+        "LeaseData",
+        "OperationReceipt",
+        "DoctorData",
+        "DoctorEnvVars",
+        "DoctorFsCapabilities",
+        "StoreDuData",
+    ];
+
+    for def in required_defs {
+        assert!(
+            defs[def].is_object(),
+            "missing {def} definition in schema/v1.json"
+        );
+    }
+
+    let cmd_enum = schema["properties"]["command"]["enum"]
+        .as_array()
+        .expect("command enum array");
+    let cmd_names: Vec<&str> = cmd_enum.iter().filter_map(|v| v.as_str()).collect();
+    assert!(cmd_names.contains(&"doctor"));
+
+    // Verify required envelope root properties
+    let req = schema["required"].as_array().expect("required array");
+    let req_names: Vec<&str> = req.iter().filter_map(|v| v.as_str()).collect();
+    assert!(req_names.contains(&"wt_version"));
+    assert!(req_names.contains(&"schema_version"));
+    assert!(req_names.contains(&"command"));
+    assert!(req_names.contains(&"status"));
+    assert!(req_names.contains(&"data"));
+    assert!(req_names.contains(&"diagnostics"));
+}
+
+#[test]
+fn mutating_command_receipt_written_and_crash_resume() {
+    let fx = Fixture::heavy_repo(10);
+    fs::write(fx.repo.join(".wtinclude"), "heavy/\n").expect("write .wtinclude");
+
+    let branch = "crash-resume-feat";
+    let dest = fx.repo.parent().unwrap().join(format!("origin-{branch}"));
+
+    // Simulate an interrupted/crashed create:
+    // git worktree add creates dest and branch, but heavy files are unhydrated.
+    let status = Command::new("git")
+        .args(["worktree", "add", "-b", branch])
+        .arg(&dest)
+        .arg("HEAD")
+        .current_dir(&fx.repo)
+        .status()
+        .expect("git worktree add");
+    assert!(status.success());
+
+    assert!(dest.exists());
+    assert!(
+        !dest.join("heavy").exists(),
+        "heavy must not be hydrated yet"
+    );
+
+    // Resolve the git dir for the worktree (git creates .git/worktrees/<dest-basename>)
+    let git_dir = if dest.join(".git").is_file() {
+        let content = fs::read_to_string(dest.join(".git")).expect("read dot git");
+        let line = content
+            .lines()
+            .find(|l| l.starts_with("gitdir:"))
+            .expect("gitdir line");
+        let raw_path = PathBuf::from(line.strip_prefix("gitdir:").unwrap().trim());
+        if raw_path.is_absolute() {
+            raw_path
+        } else {
+            dest.join(raw_path)
+        }
+    } else {
+        dest.join(".git")
+    };
+
+    fs::create_dir_all(&git_dir).expect("create git_dir");
+    let receipt_file = git_dir.join("wt-receipt.json");
+
+    let in_progress_receipt = serde_json::json!({
+        "operation": "create",
+        "state": "in_progress",
+        "timestamp": 123456789,
+        "source_root": fx.repo.display().to_string(),
+        "dest": dest.display().to_string(),
+        "hydrated_dirs": [],
+        "branch": branch
+    });
+    fs::write(&receipt_file, in_progress_receipt.to_string()).expect("write in-progress receipt");
+
+    // Now invoke `wt create` on the interrupted worktree.
+    // Previously, this would fail with "<dest> already exists".
+    // With receipt detection, it must detect in-progress state and resume.
+    let out = fx.wt(&["create", branch, "--json"]);
+    assert!(
+        out.status.success(),
+        "resuming crashed create should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).expect("parse json");
+    assert_eq!(json["command"], "create");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["branch"], branch);
+    assert_eq!(json["data"]["resumed"], true);
+    assert_eq!(json["data"]["files_hydrated"], 10);
+
+    // Verify files were actually hydrated
+    assert!(dest.join("heavy").exists());
+    assert!(dest.join("heavy/pkg00/nested/file-0.txt").exists());
+
+    // Verify the receipt file was updated to "completed"
+    let receipt_content = fs::read_to_string(&receipt_file).expect("read updated receipt");
+    let completed_receipt: serde_json::Value =
+        serde_json::from_str(&receipt_content).expect("parse receipt");
+    assert_eq!(completed_receipt["state"], "completed");
+    assert_eq!(completed_receipt["branch"], branch);
+    let hydrated_dirs = completed_receipt["hydrated_dirs"]
+        .as_array()
+        .expect("hydrated_dirs array");
+    assert!(!hydrated_dirs.is_empty());
+
+    // Rerunning create on the already completed worktree should now report already exists
+    let rerun = fx.wt(&["create", branch, "--json"]);
+    assert!(!rerun.status.success());
+    let rerun_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&rerun.stdout).trim()).expect("parse json");
+    assert_eq!(rerun_json["status"], "error");
+    assert!(
+        rerun_json["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already exists")
+    );
+}
+
+#[test]
+fn lease_show_machine_readable_json() {
+    let fx = Fixture::heavy_repo(5);
+    fs::write(fx.repo.join(".wtinclude"), "heavy/\n").expect("write .wtinclude");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    // Spawn an active scratch worktree with a lease
+    let scratch_out = fx.wt_with_store(
+        &["scratch", "--ttl", "1h", "active-lease-demo"],
+        store_dir.path(),
+    );
+    assert!(scratch_out.status.success());
+
+    // 1. Query all active leases in JSON
+    let show_all_out = fx.wt_with_store(&["lease", "show", "--json"], store_dir.path());
+    assert!(show_all_out.status.success());
+
+    let all_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&show_all_out.stdout).trim())
+            .expect("parse all leases json");
+    assert_eq!(all_json["command"], "lease");
+    assert_eq!(all_json["status"], "ok");
+
+    let leases = all_json["data"]["leases"].as_array().expect("leases array");
+    assert!(!leases.is_empty(), "expected at least one active lease");
+
+    let found = leases
+        .iter()
+        .find(|l| {
+            l["lease_id"]
+                .as_str()
+                .map(|id| id.contains("active-lease-demo"))
+                .unwrap_or(false)
+        })
+        .expect("find active-lease-demo");
+
+    assert_eq!(found["pid_alive"], true);
+    assert_eq!(found["is_expired"], false);
+    assert!(found["ttl_remaining_secs"].as_u64().unwrap() > 0);
+    assert!(found["worktree_path"].is_string());
+    assert!(found["git_dir"].is_string());
+
+    // 2. Query a specific lease ID in JSON
+    let lease_id = found["lease_id"].as_str().unwrap();
+    let show_one_out = fx.wt_with_store(&["lease", "show", lease_id, "--json"], store_dir.path());
+    assert!(show_one_out.status.success());
+
+    let one_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&show_one_out.stdout).trim())
+            .expect("parse specific lease json");
+    assert_eq!(one_json["status"], "ok");
+    assert_eq!(one_json["data"]["matched_lease"]["lease_id"], lease_id);
+
+    // 3. Query nonexistent lease in JSON returns error envelope
+    let not_found_out = fx.wt_with_store(
+        &["lease", "show", "nonexistent-lease-xyz", "--json"],
+        store_dir.path(),
+    );
+    assert!(!not_found_out.status.success());
+    let err_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&not_found_out.stdout).trim())
+            .expect("parse not found json");
+    assert_eq!(err_json["status"], "error");
+    assert_eq!(err_json["diagnostics"][0]["code"], "ERROR");
+    assert!(
+        err_json["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not found")
+    );
+
+    // 4. Human-readable format
+    let human_out = fx.wt_with_store(&["lease", "show"], store_dir.path());
+    assert!(human_out.status.success());
+    let human_stdout = String::from_utf8_lossy(&human_out.stdout);
+    assert!(human_stdout.contains("LEASE ID"));
+    assert!(human_stdout.contains("TTL REMAINING"));
+    assert!(human_stdout.contains(lease_id));
+}
+
+#[test]
+fn doctor_json_golden_output() {
+    let fx = Fixture::heavy_repo(5);
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let out = fx.wt_with_store(&["doctor", "--json"], store_dir.path());
+    assert!(
+        out.status.success(),
+        "doctor --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("parse doctor json");
+
+    assert_eq!(json["wt_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["command"], "doctor");
+    assert_eq!(json["status"], "ok");
+    assert!(json["diagnostics"].is_array());
+
+    let data = &json["data"];
+    assert!(data["store_path"].is_string());
+    assert_eq!(
+        data["store_path"].as_str().unwrap(),
+        store_dir.path().to_string_lossy()
+    );
+
+    let env_vars = &data["env_vars"];
+    assert!(env_vars.is_object());
+    assert_eq!(
+        env_vars["wt_store"].as_str(),
+        Some(store_dir.path().to_str().unwrap())
+    );
+
+    let fs_caps = &data["fs_capabilities"];
+    assert!(fs_caps["apfs_clonefile"].is_boolean());
+    assert!(fs_caps["ficlone"].is_boolean());
+    assert!(fs_caps["copy_file_range"].is_boolean());
+
+    let du = &data["store_disk_usage"];
+    assert!(du["store_path"].is_string());
+    assert!(du["objects_bytes"].is_number());
+    assert!(du["snapshots_bytes"].is_number());
+    assert!(du["mirrors_bytes"].is_number());
+    assert!(du["refs_bytes"].is_number());
+    assert!(du["caches_bytes"].is_number());
+    assert!(du["total_bytes"].is_number());
+}
+
+#[test]
+fn lease_show_json_golden_output() {
+    let fx = Fixture::heavy_repo(5);
+    fs::write(fx.repo.join(".wtinclude"), "heavy/\n").expect("write .wtinclude");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let scratch_out = fx.wt_with_store(
+        &["scratch", "--ttl", "1h", "golden-lease"],
+        store_dir.path(),
+    );
+    assert!(scratch_out.status.success());
+
+    let out = fx.wt_with_store(&["lease", "show", "--json"], store_dir.path());
+    assert!(out.status.success());
+
+    let json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
+        .expect("parse lease show json");
+    assert_eq!(json["wt_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["command"], "lease");
+    assert_eq!(json["status"], "ok");
+    assert!(json["diagnostics"].is_array());
+
+    let leases = json["data"]["leases"].as_array().expect("leases array");
+    assert!(!leases.is_empty());
+    let lease = &leases[0];
+    assert!(lease["lease_id"].is_string());
+    assert!(lease["pid"].is_number());
+    assert_eq!(lease["pid_alive"], true);
+    assert!(lease["expires_at"].is_number());
+    assert!(lease["ttl_remaining_secs"].is_number());
+    assert_eq!(lease["is_expired"], false);
+    assert!(lease["worktree_path"].is_string());
+    assert!(lease["git_dir"].is_string());
+}
+
+#[test]
+fn execution_receipt_json_golden_output() {
+    let fx = Fixture::heavy_repo(5);
+    fs::write(fx.repo.join(".wtinclude"), "heavy/\n").expect("write .wtinclude");
+
+    let out = fx.wt(&["create", "golden-rcpt", "--json"]);
+    assert!(out.status.success());
+
+    let json: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
+        .expect("parse create json");
+    assert_eq!(json["command"], "create");
+    assert_eq!(json["status"], "ok");
+
+    let receipt_path_str = json["data"]["receipt_path"]
+        .as_str()
+        .expect("receipt_path must be present in create data");
+    let receipt_path = PathBuf::from(receipt_path_str);
+    assert!(receipt_path.exists(), "receipt file must exist on disk");
+
+    let content = fs::read_to_string(&receipt_path).expect("read receipt");
+    let receipt: serde_json::Value = serde_json::from_str(&content).expect("parse receipt json");
+
+    assert_eq!(receipt["operation"], "create");
+    assert_eq!(receipt["state"], "completed");
+    assert!(receipt["timestamp"].is_number());
+    assert!(receipt["source_root"].is_string());
+    assert!(receipt["dest"].is_string());
+    assert!(receipt["hydrated_dirs"].is_array());
+    assert_eq!(receipt["branch"], "golden-rcpt");
+    assert!(receipt["pid"].is_number());
+
+    // Also verify hydrate writes an execution receipt
+    let dest = PathBuf::from(json["data"]["worktree_path"].as_str().unwrap());
+    let hyd_out = fx.wt(&["hydrate", &dest.to_string_lossy(), "--json"]);
+    assert!(
+        hyd_out.status.success(),
+        "hydrate --json failed: {}",
+        String::from_utf8_lossy(&hyd_out.stderr)
+    );
+
+    let hyd_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&hyd_out.stdout).trim())
+            .expect("parse hydrate json");
+    assert_eq!(hyd_json["command"], "hydrate");
+    assert_eq!(hyd_json["status"], "ok");
+
+    let hyd_receipt_path_str = hyd_json["data"]["receipt_path"]
+        .as_str()
+        .expect("receipt_path in hydrate data");
+    let hyd_receipt_content =
+        fs::read_to_string(hyd_receipt_path_str).expect("read hydrate receipt");
+    let hyd_receipt: serde_json::Value =
+        serde_json::from_str(&hyd_receipt_content).expect("parse hydrate receipt json");
+    assert_eq!(hyd_receipt["operation"], "hydrate");
+    assert_eq!(hyd_receipt["state"], "completed");
+    assert!(hyd_receipt["timestamp"].is_number());
+    assert!(hyd_receipt["dest"].is_string());
 }

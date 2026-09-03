@@ -131,6 +131,16 @@ pub struct HydrationReceipt {
     pub v2_cloned: usize,
     /// Incremental rebuild freshly linked files count.
     pub v2_linked: usize,
+    /// Incremental decision if evaluated.
+    pub incremental_decision: Option<crate::snapshot::IncrementalDecision>,
+    /// Diagnostic reason if incremental rebuild fell back.
+    pub incremental_fallback_reason: Option<String>,
+    /// Incremental hit rate if evaluated.
+    pub incremental_hit_rate: Option<f64>,
+    /// The concrete copy backend selected for materialization, if determined.
+    pub copy_backend: Option<String>,
+    /// Refusal reason when accelerated placement falls back to byte copy.
+    pub refusal_reason: Option<String>,
 }
 
 impl DiskStore {
@@ -175,8 +185,23 @@ impl DiskStore {
             policy.verify,
         ) {
             SnapshotOutcome::Hydrated(info) => {
-                append_ledger(dest.git_dir, &BTreeMap::new(), Some(&info.hash))?;
                 let manifest_id = info.hash;
+                if self.gc_mode() != GcMode::MarkSweepNoRefs {
+                    if let Some(manifest) =
+                        crate::snapshot::read_published(self.root(), &manifest_id)
+                    {
+                        let mut distinct_blobs = BTreeSet::new();
+                        for entry in &manifest.entries {
+                            if let Some(blob) = entry.blob {
+                                distinct_blobs.insert(blob);
+                            }
+                        }
+                        for id in &distinct_blobs {
+                            self.add_ref(id)?;
+                        }
+                    }
+                }
+                append_ledger(dest.git_dir, &BTreeMap::new(), Some(&info.hash))?;
                 self.publish_worktree_mirror(
                     dest.worktree_root,
                     dest.git_dir,
@@ -186,7 +211,7 @@ impl DiskStore {
                     dest.base_commit,
                 )?;
                 Ok(HydrateOutcome::Hydrated(HydrationReceipt {
-                    strategy: format!("snapshot-{}", info.mode),
+                    strategy: "snapshot-hit".to_string(),
                     files_total: info.files,
                     files_copied: 0,
                     bytes_shared: 0,
@@ -196,6 +221,11 @@ impl DiskStore {
                     diagnostics: Vec::new(),
                     v2_cloned: 0,
                     v2_linked: 0,
+                    incremental_decision: None,
+                    incremental_fallback_reason: None,
+                    incremental_hit_rate: None,
+                    copy_backend: Some("clonefile".to_string()),
+                    refusal_reason: None,
                 }))
             }
             SnapshotOutcome::FellBack(reason) => {
@@ -242,8 +272,7 @@ impl DiskStore {
 
             match SnapshotProjectionEngine::hydrate(self, &proj_req) {
                 SnapshotOutcome::Hydrated(info) => {
-                    let distinct_blobs: BTreeSet<&ContentId> =
-                        ingested.files.values().collect();
+                    let distinct_blobs: BTreeSet<&ContentId> = ingested.files.values().collect();
                     if self.gc_mode() != GcMode::MarkSweepNoRefs {
                         for id in &distinct_blobs {
                             self.add_ref(id)?;
@@ -274,6 +303,11 @@ impl DiskStore {
                         diagnostics,
                         v2_cloned: info.cloned_units,
                         v2_linked: info.linked_files,
+                        incremental_decision: info.incremental_decision,
+                        incremental_fallback_reason: info.incremental_fallback_reason,
+                        incremental_hit_rate: info.incremental_hit_rate,
+                        copy_backend: Some("clonefile".to_string()),
+                        refusal_reason: None,
                     });
                 }
                 SnapshotOutcome::FellBack(diag) => {
@@ -366,6 +400,14 @@ impl DiskStore {
             wt_copy::StrategyPolicy::ForceByteCopy => "byte-copy",
         };
 
+        let copy_backend = Some(batch.backend_name.to_string());
+        let refusal_reason = batch.refusal_reason.clone();
+        if let Some(refusal) = &refusal_reason {
+            diagnostics.push(format!(
+                "acceleration refused ({refusal}); falling back to byte copies"
+            ));
+        }
+
         Ok(HydrationReceipt {
             strategy: strategy_str.to_string(),
             files_total: ingested.files.len(),
@@ -377,6 +419,11 @@ impl DiskStore {
             diagnostics,
             v2_cloned: 0,
             v2_linked: 0,
+            incremental_decision: None,
+            incremental_fallback_reason: None,
+            incremental_hit_rate: None,
+            copy_backend,
+            refusal_reason,
         })
     }
 }

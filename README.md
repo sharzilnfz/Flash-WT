@@ -23,7 +23,7 @@ Standard `git worktree add` checks out tracked source files instantly, but leave
 
 ## Why wt
 
-`wt` stores each unique file once in a central content-addressed store. When you create a worktree, `wt` materializes heavy directories using APFS copy-on-write clones on macOS or hardlinks on Linux.
+`wt` stores each unique file once in a central content-addressed store. When you create a worktree, `wt` materializes heavy directories using APFS copy-on-write clones on macOS, reflink or `copy_file_range` on Linux, or optional hardlinks.
 
 Files in your worktree share storage blocks with the store until modified. They are private, fully writable, normal files. Editors, compilers, and language servers treat them like regular files on disk.
 
@@ -49,15 +49,17 @@ Measured via volume free-space probes (`df -k`) on macOS APFS across 40,000 file
 | 3 worktrees | 468.75 MB | ~120.76 MB | ~3.9x | 0 MB additional dirty blocks |
 | 5 worktrees | **781.25 MB** | **120.76 MB** | **4.37x** | 5 worktrees share identical disk blocks |
 
-When you edit, create, or delete files in one worktree, the operating system writes changes to new disk blocks for that worktree only. Other worktrees and the central store remain untouched.
+When you edit, create, or delete files in one worktree, the operating system writes changes to new disk blocks for that worktree only. Other worktrees and the central store remain untouched. `wt` runs no background sync daemons and no filesystem watchers. Explicit hydration (`wt hydrate` / `wt new`) is the sole mechanism for materializing and updating dependencies.
 
 ### Performance characteristics by workload scale
 
-`wt` carries a fixed ~1.3-second baseline cost for subprocess coordination, git worktree creation, store verification, and GC root registration. Because of this fixed floor, `wt` is engineered for medium to large dependency trees:
+`wt` automatically applies a **tiny repository bypass** policy for projects under 500 files and 8 MB: it skips store ingestion and snapshot indexing, executing `git worktree add` with direct recursive copy-on-write materialization. This brings tiny worktree creation down from ~1.3s to **~0.05s**, matching bare `cp -Rc`.
+
+For medium and large projects, `wt`'s content-addressed store, snapshot caching, parallel streaming ingestion, and batch durability provide up to 20x speedups over package installations and 5x over recursive copies:
 
 | Workload size | Raw `cp -Rc` | `wt new` | Package manager install | Best fit |
 |---|---|---|---|---|
-| Tiny (<500 files) | ~0.05s | ~1.3s | ~2.0s | Direct copy |
+| Tiny (<500 files, <8 MB) | ~0.05s | **~0.05s** (tiny bypass) | ~2.0s | `wt new` or direct copy |
 | Medium (5,000 files) | ~1.2s | ~1.3s | ~12.0s | `wt` |
 | Large (40,000+ files) | ~7.9s | ~1.5s | ~35.0s+ | `wt` (20x faster than install, 5x faster than `cp`) |
 
@@ -121,8 +123,20 @@ wt new feature
 # Inspect active worktrees, their disk usage, and shared savings
 wt list
 
+# Diagnose environment variables, store health, and filesystem copy acceleration
+wt doctor
+
+# Inspect storage breakdown across CAS blobs, snapshots, mirrors, and caches
+wt store du
+
 # Run a test or command inside an ephemeral sandbox; cleans up automatically on exit
 wt scratch --run "pnpm test"
+
+# Inspect active ephemeral scratch leases and remaining TTL
+wt lease show
+
+# Preview unreferenced objects and disk space that sweep would reclaim without deleting
+wt sweep --dry-run
 
 # Remove the worktree, release its store references, and reclaim freed space
 wt clean feature
@@ -133,20 +147,23 @@ wt clean --all
 
 ### Complete command reference
 
-`wt` provides 11 subcommands covering worktree creation, storage inspection, sandboxing, and maintenance:
+`wt` provides 14 subcommands and administrative actions covering worktree creation, storage inspection, sandboxing, and maintenance:
 
 | Command | Purpose | Example |
 |---|---|---|
 | `wt new` (alias `wt create`) | Create a new worktree with hydrated heavy folders | `wt new feat-auth --base main` |
 | `wt hydrate` | Hydrate an existing directory in place without creating a branch | `wt hydrate ./my-dir` |
 | `wt list` (alias `wt ls`) | Display all active worktrees, branches, and shared disk savings | `wt list --json` |
-| `wt scratch` (alias `wt isolate`) | Run a command in an isolated ephemeral worktree | `wt scratch --run "cargo test"` |
+| `wt scratch` (alias `wt isolate`) | Run a command in an isolated ephemeral worktree with lease persistence | `wt scratch --run "cargo test"` |
 | `wt clean` (alias `wt remove`) | Reclaim a worktree and release store references | `wt clean feat-auth` or `wt clean --all` |
-| `wt sweep` | Run mark-and-sweep garbage collection on unreferenced objects | `wt sweep --age 0s` |
-| `wt scrub` | Audit store integrity; detect and delete corrupted objects | `wt scrub --dry-run` |
+| `wt doctor` | Inspect environment variables, store configuration, filesystem capabilities, and disk usage | `wt doctor` |
+| `wt store du` (alias `wt store disk-usage`) | Print breakdown of disk usage in the store | `wt store du` |
 | `wt store migrate` | Migrate store schema and activate mark-sweep GC | `wt store migrate --activate-mark-sweep` |
+| `wt sweep` | Run mark-and-sweep garbage collection on unreferenced objects | `wt sweep --age 0s` or `wt sweep --dry-run` |
+| `wt scrub` | Audit store integrity; detect and delete corrupted objects | `wt scrub --dry-run` |
+| `wt lease show` (alias `wt lease ls`) | Inspect active ephemeral scratch leases, PID liveness, and remaining TTL | `wt lease show` |
 | `wt init` | Generate a starter `.wtinclude` configuration | `wt init --force` |
-| `wt demo` | Run self-contained 10,000-file benchmark verifying speed and isolation | `wt demo` |
+| `wt demo` (alias `wt test-drive`) | Run self-contained 10,000-file benchmark verifying speed and isolation | `wt demo` |
 | `wt completions` | Generate completion scripts for your shell | `wt completions zsh` |
 
 ### Multi-ecosystem fidelity
@@ -170,7 +187,7 @@ wt demo
 
 ### Configure what gets hydrated
 
-`wt` reads `.wtinclude` in your repository root using gitignore pattern syntax. If no `.wtinclude` file exists, `wt` creates one with sensible defaults:
+`wt` works immediately in any repository without manual configuration. If no `.wtinclude` manifest is present, `wt` automatically applies standard defaults:
 
 ```gitignore
 node_modules/
@@ -182,11 +199,23 @@ build/
 __pycache__/
 ```
 
-Edit `.wtinclude` to match your project's heaviest rebuild artifacts.
+If no matching heavy directories exist or matched directories contain zero files to hydrate, `wt` provides explicit zero-savings feedback (`0 bytes saved (no matching heavy directories found and the worktree relies strictly on git tracking)`) rather than failing.
+
+To customize what gets hydrated or add exclusions, create a `.wtinclude` file in your repository root using gitignore pattern syntax (or run `wt init` to generate a starter template):
+
+```gitignore
+# Include heavy directories
+node_modules/
+target/
+.venv/
+
+# Exclude volatile subdirectories with standard negation syntax
+!node_modules/.cache/
+```
 
 ### Fast path on macOS (APFS)
 
-On macOS, whole-directory snapshots and diff-based incremental rebuilds are enabled automatically. `wt` probes the filesystem at startup: on APFS it hydrates by cloning whole directory trees (~0.45s for 40,000 files), and when dependencies change slightly it clones the previous snapshot and patches only the modified files. No environment variables required.
+On macOS, whole-directory snapshots and diff-based incremental rebuilds are enabled automatically. `wt` probes the filesystem at startup: on APFS it hydrates by cloning whole directory trees (~0.45s for 40,000 files), and when dependencies change slightly it clones the previous snapshot and patches only the modified files. Diff-based incremental snapshot rebuilds (`WT_SNAPSHOTS_V2`) include an automatic guard: if modifications exceed 10% of entries or on lockfile miss, `wt` automatically falls back to a clean full snapshot clone, ensuring wide diffs never execute slower than fresh clones. No environment variables required.
 
 To opt out and force per-file hydration:
 
@@ -195,14 +224,64 @@ export WT_SNAPSHOTS=0
 export WT_SNAPSHOTS_V2=0
 ```
 
+### Platform acceleration: macOS versus Linux
+
+`wt` automatically probes host filesystem capabilities at startup to select the fastest supported copy acceleration backend.
+
+| Capability | macOS (APFS) | Linux (Btrfs / XFS) | Linux (ext4) | Linux (generic / cross-device) |
+|---|---|---|---|---|
+| Primary backend | `clonefile(2)` | `ioctl(FICLONE)` reflink | `copy_file_range(2)` | Buffered byte copy |
+| Directory snapshots | Whole-tree APFS clone (~1.3s warm) | Per-file placement ladder | Per-file placement ladder | Per-file placement ladder |
+| Incremental rebuilds | Tree clone + selective relink | Per-file delta placement | Per-file delta placement | Per-file delta placement |
+| Storage deduplication | Zero-copy CoW extents | Zero-copy CoW extents | Physical disk consumption | Physical disk consumption |
+| Hardlink mode (`WT_HARDLINK=1`) | Read-only shared inodes | Read-only shared inodes | Read-only shared inodes | Refused across mounts |
+| Fallback diagnostics | Surfaces reason on non-APFS | Reports backend and refusal reason | Reports backend and refusal reason | Reports backend and refusal reason |
+
+When acceleration is unavailable or refused (such as across different mount points or on filesystems lacking reflink support), `wt` falls back safely to byte copies. Both human terminal output and JSON envelopes report the chosen copy mechanism along with the specific refusal reason.
+
+### Machine-readable JSON contract and agent automation
+
+`wt` is engineered for automated orchestration and AI coding agents. Every subcommand supports a global `--json` flag producing a frozen single-line NDJSON envelope adhering to `schema/v1.json` (see `schema/CHANGELOG.md`):
+
+```json
+{
+  "wt_version": "0.1.0",
+  "schema_version": 1,
+  "command": "create",
+  "status": "ok",
+  "data": {
+    "branch": "feat-auth",
+    "worktree_path": "/path/to/repo-feat-auth",
+    "cache_hit": true,
+    "hydration_method": "clone",
+    "bytes_shared_cow": 126615552,
+    "bytes_copied": 0,
+    "total_files": 40000,
+    "duration_ms": 1317
+  },
+  "diagnostics": []
+}
+```
+
+Key capabilities for agent fleets:
+- **Stable diagnostic codes**: Errors and warnings return structured uppercase codes (e.g., `ZERO_SAVINGS`, `CROSS_DEVICE_COPY_DEGRADATION`, `CORRUPT_BLOB`, `UNREFERENCED_OBJECTS`) instead of unstructured text.
+- **Execution receipts & atomic crash recovery**: Mutating commands persist atomic receipt files (`wt-receipt.json`) in the worktree's git directory tracking lifecycle state (`in_progress`, `completed`, `failed`). If a command is interrupted by `SIGKILL` or an abrupt termination, subsequent `wt new` or `wt clean` invocations detect the receipt and resume hydration or clean up without manual intervention.
+- **Scratch lease management**: Ephemeral sandbox worktrees persist leases with PID tracking and TTL expiration, inspectable via `wt lease show --json`.
+
 ## How it works
 
 - **Content-addressed store**: Unique file contents live once under `~/.cache/wt/store`, addressed by SHA-256 hash.
-- **Copy-on-write hydration**: Files materialize through `clonefile(2)` on APFS or hardlinks. They share storage with the store until written.
-- **Directory snapshots**: Whole directory trees are cached by manifest hash. Hydration is a single recursive APFS clone.
-- **Incremental rebuilds**: A flat manifest diff engine identifies unchanged subtrees, cloning stable packages and relinking only changed files.
-- **Crash-safe garbage collection**: Mark-and-sweep GC uses store-local mirror files as roots. A default 15-minute grace period (`WT_GC_GRACE`) ensures concurrent builds and unexpected interruptions never delete live data.
-- **Integrity verification**: Blobs are verified on ingest and tracked via a verification ledger. `WT_VERIFY=1` forces full cryptographic re-hashing on every run.
+- **Parallel streaming ingest & batch durability**: Ingestion streams files in 64 KB chunks across worker threads with batched parent-directory syncs, eliminating per-file fsync bottlenecks on cold ingest.
+- **Copy-on-write hydration**: Files materialize through `clonefile(2)` on APFS, reflink or `copy_file_range` on Linux, or optional hardlinks. They share physical storage blocks until written.
+- **Directory snapshots & incremental rebuild guard**: Whole directory trees are cached by manifest hash. Incremental rebuilds diff and relink modified subtrees, with an automatic guard falling back to full snapshot clones when diffs exceed 10% or lockfiles mismatch.
+- **Tiny repository bypass**: Repositories under 500 files and 8 MB automatically bypass the CAS and clone directly via recursive CoW, completing in ~50ms.
+- **Validation cache alias protection**: The validation cache mixes inode and ctime alongside file size and mtime, rehashing near-now mtimes to prevent stale cache hits on rapid same-size file edits.
+- **Post-hydration sanitization**: Automatically purges volatile compiler caches (`incremental/`, `CACHEDIR.TAG`, `.fingerprint`) during hydration so toolchains rebuild reliably without state corruption.
+- **Execution receipts & crash safety**: Atomic receipts (`wt-receipt.json`) record operation progress, allowing interrupted worktree creations to cleanly resume.
+- **Crash-safe garbage collection**: Mark-and-sweep GC uses store-local mirror files as roots with a default 15-minute grace period (`WT_GC_GRACE`), dual-writing snapshot member references during migration to safeguard live objects.
+- **Integrity verification & scrub**: Blobs are verified on ingest and tracked via a verification ledger. `wt scrub` re-verifies all CAS blobs against bit rot.
+- **Coalesced git operations**: Process-level rev-parse query caching eliminates redundant subprocess spawning.
+- **Explicit hydration only**: `wt` runs no background daemons, filesystem watchers, or automatic synchronization loops. Explicit CLI commands (`wt new`, `wt hydrate`) are the sole mechanism for populating and updating worktree files from the store.
 
 Read [docs/archive/product-handoff.md](docs/archive/product-handoff.md) and the [Architecture Decision Records](docs/adr/) for full implementation details.
 
@@ -213,16 +292,20 @@ Read [docs/archive/product-handoff.md](docs/archive/product-handoff.md) and the 
 | `WT_STORE` | `~/.cache/wt/store` | Directory for the content-addressed object store |
 | `WT_SNAPSHOTS` | `1` on APFS, `0` elsewhere | Enable whole-directory APFS snapshot caching; `WT_SNAPSHOTS=0` opts out |
 | `WT_SNAPSHOTS_V2` | `1` on APFS, `0` elsewhere | Enable diff-based incremental snapshot rebuilds; `WT_SNAPSHOTS_V2=0` opts out |
+| `WT_TINY_BYPASS` | `1` | Bypass store for repos under 500 files and 8 MB; `WT_TINY_BYPASS=0` opts out |
+| `WT_NO_TINY_BYPASS` | `0` | Force all repos through the store, disabling tiny repo bypass |
 | `WT_VERIFY` | `0` | Force full cryptographic re-verification of all blobs |
 | `WT_HARDLINK` | `0` | Enable hardlink materialization mode |
 | `WT_NO_HARDLINK` | `0` | Force byte-by-byte copies instead of links |
 | `WT_GC_GRACE` | `15m` | Retention grace period before unreferenced data is collected |
+| `WT_SNAPSHOT_CAP` | `50` | Maximum number of snapshot rings retained per heavy directory |
+| `WT_MAX_SNAPSHOT_BYTES` | *unset* | Byte cap on snapshot creation before falling back to per-file placement |
 | `WT_TIMING` | `0` | Emit stage timing breakdowns to stderr |
 
 ## Development and testing
 
 ```sh
-# Run all unit, integration, and crash recovery tests (167 tests)
+# Run all unit, integration, and crash recovery tests (300+ tests)
 cargo test
 
 # Run linter checks
@@ -241,7 +324,7 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 The verification rig executes five automated suites:
-- `01_cli_matrix`: Tests all 11 subcommands, flags, and JSON output contracts.
+- `01_cli_matrix`: Tests all 14 subcommands, flags, and frozen v1 JSON envelope contracts.
 - `02_flash_apfs`: Benchmarks cold vs warm snapshot hydration, incremental rebuilds, and per-file fallback.
 - `03_real_repos`: Verifies byte-for-byte SHA-256 parity and symlinks for Node.js, Rust, Python, and Monorepos.
 - `04_isolation_storage`: Probes physical disk allocation across 1, 3, and 5 concurrent worktrees via `df -k`.

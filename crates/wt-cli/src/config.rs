@@ -96,6 +96,9 @@ pub struct RunConfig {
     pub timing: bool,
     /// `--json`: emit single-line NDJSON output envelope.
     pub json: bool,
+    /// `WT_TINY_BYPASS`: bypass store on repositories under 500 files and under 8 MB.
+    /// Defaults to enabled; explicit `WT_TINY_BYPASS=0` or `WT_NO_TINY_BYPASS=1` opts out.
+    pub tiny_bypass: bool,
 }
 
 impl RunConfig {
@@ -111,6 +114,11 @@ impl RunConfig {
         let apfs_default = probe_apfs_default();
         let snapshots = flag_with_default("WT_SNAPSHOTS", apfs_default);
         let v2 = flag_with_default("WT_SNAPSHOTS_V2", apfs_default);
+        let tiny_bypass = if flag("WT_NO_TINY_BYPASS") {
+            false
+        } else {
+            flag_with_default("WT_TINY_BYPASS", true)
+        };
 
         RunConfig {
             strategy_policy,
@@ -119,6 +127,7 @@ impl RunConfig {
             v2,
             timing: flag("WT_TIMING"),
             json: false,
+            tiny_bypass,
         }
     }
 }
@@ -205,5 +214,26 @@ mod tests {
         assert_eq!(cfg.snapshots, probe_apfs_default());
         // cleanup
         set("WT_SNAPSHOTS", None);
+    }
+
+    #[test]
+    fn tiny_bypass_flag_semantics() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set("WT_NO_TINY_BYPASS", None);
+        set("WT_TINY_BYPASS", None);
+        let cfg = RunConfig::from_env();
+        assert!(cfg.tiny_bypass, "tiny bypass must default to true");
+
+        set("WT_TINY_BYPASS", Some("0"));
+        let cfg = RunConfig::from_env();
+        assert!(!cfg.tiny_bypass, "WT_TINY_BYPASS=0 must disable");
+
+        set("WT_TINY_BYPASS", Some("1"));
+        set("WT_NO_TINY_BYPASS", Some("1"));
+        let cfg = RunConfig::from_env();
+        assert!(!cfg.tiny_bypass, "WT_NO_TINY_BYPASS=1 must take precedence");
+
+        set("WT_NO_TINY_BYPASS", None);
+        set("WT_TINY_BYPASS", None);
     }
 }

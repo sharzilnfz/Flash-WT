@@ -5,11 +5,14 @@ pub mod clean;
 pub mod completions;
 pub mod create;
 pub mod demo;
+pub mod doctor;
 pub mod hydrate;
 pub mod init;
+pub mod lease;
 pub mod list;
 pub mod scratch;
 pub mod scrub;
+pub mod sweep;
 
 use crate::cli::{StoreAction, WtCommand};
 use crate::config::RunConfig;
@@ -35,6 +38,13 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
     match command {
         WtCommand::List => {
             let (data, diags) = list::run(cfg)?;
+            if cfg.json {
+                emit_json(command_name, data, diags)?;
+            }
+            Ok(None)
+        }
+        WtCommand::Doctor => {
+            let (data, diags) = doctor::run(cfg)?;
             if cfg.json {
                 emit_json(command_name, data, diags)?;
             }
@@ -97,8 +107,8 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
             }
             Ok(None)
         }
-        WtCommand::Sweep { age } => {
-            let (data, diags) = gc::sweep(age, cfg)?;
+        WtCommand::Sweep { age, dry_run } => {
+            let (data, diags) = sweep::run(age, dry_run, cfg)?;
             if cfg.json {
                 emit_json(command_name, data, diags)?;
             }
@@ -112,6 +122,13 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
             Ok(None)
         }
         WtCommand::Store { action } => match action {
+            StoreAction::Du => {
+                let (data, diags) = doctor::store_du(cfg)?;
+                if cfg.json {
+                    emit_json("store du", data, diags)?;
+                }
+                Ok(None)
+            }
             StoreAction::Migrate {
                 activate_mark_sweep,
                 drop_legacy_refs,
@@ -152,6 +169,13 @@ pub fn run(command: WtCommand, cfg: &RunConfig) -> Result<Option<i32>> {
         }
         WtCommand::Completions { shell } => {
             completions::run(shell)?;
+            Ok(None)
+        }
+        WtCommand::Lease { action } => {
+            let (data, diags) = lease::run(action, cfg)?;
+            if cfg.json {
+                emit_json(command_name, data, diags)?;
+            }
             Ok(None)
         }
     }

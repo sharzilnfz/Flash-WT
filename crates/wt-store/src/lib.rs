@@ -22,7 +22,7 @@ pub mod bulkwalk;
 pub mod hydrate;
 pub mod lockfile;
 pub mod mirror;
-pub use disk::{DiskStore, FsCapabilities, probe_fs};
+pub use disk::{DiskStore, FsCapabilities, StoreDiskUsage, probe_fs};
 pub use fsutil::FlockGuard;
 pub use gc::{
     GcMode, MarkReport, MarkSwept, PendingCleanup, RetirementReceipt, StoreReclaimer, SweepPolicy,
@@ -32,7 +32,7 @@ pub use hydrate::{
     HydrateDest, HydrateOutcome, HydratePinned, HydratePolicy, HydrateReq, HydrateSrc, HydrateTree,
     HydrationReceipt,
 };
-pub use ingest::{IngestOptions, Ingested};
+pub use ingest::{IngestOptions, Ingested, stream_hash_file};
 pub use lease::{
     DEFAULT_LEASE_TTL_SECS, ReadLease, WorktreeLease, current_process_start_time, is_lease_expired,
     is_process_alive, lease_path, process_start_time, publish as publish_lease,
@@ -51,10 +51,10 @@ pub use snapindex::{
     record_publish as record_snapshot_publish, record_snapshot_lru_touch, select_old_snapshot,
 };
 pub use snapshot::{
-    BuildError, EntryKind, Manifest, PublishOptions, PublishOutcome, PublishReceipt,
-    SnapshotBuildTiming, SnapshotEntry, SnapshotHydration, SnapshotOutcome,
-    SnapshotProjectionEngine, SnapshotProjectionRequest, read_published as read_published_snapshot,
-    snapshot_path, snapshot_tree_path,
+    BuildError, EntryKind, INCREMENTAL_DIFF_RATIO_MAX, IncrementalDecision, IncrementalResult,
+    Manifest, PublishOptions, PublishOutcome, PublishReceipt, SnapshotBuildTiming, SnapshotEntry,
+    SnapshotHydration, SnapshotOutcome, SnapshotProjectionEngine, SnapshotProjectionRequest,
+    read_published as read_published_snapshot, snapshot_path, snapshot_tree_path, try_incremental,
 };
 pub use validation::{Entry, ValidationCache};
 pub use verified::{Fingerprint, VerifiedLedger};

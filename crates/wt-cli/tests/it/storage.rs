@@ -281,6 +281,7 @@ fn cow_unavailable_falls_back_to_byte_copies_without_user_visible_failure() {
             .args(["create", "ramdisk", "--dir"])
             .arg(&dest)
             .env("WT_STORE", &store)
+            .env("WT_NO_TINY_BYPASS", "1")
             .current_dir(&fx.repo)
             .output()
             .expect("run wt binary");
@@ -921,6 +922,24 @@ fn warm_create_reads_no_unchanged_file_bytes() {
     let fx = Fixture::heavy_repo(12);
     fs::write(fx.repo.join(".wtinclude"), "heavy/\n").unwrap();
 
+    let aged_time = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+    {
+        let heavy = fx.repo.join("heavy");
+        let mut stack = vec![heavy];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).expect("read heavy") {
+                let p = entry.expect("entry").path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    let f = fs::File::open(&p).unwrap();
+                    f.set_times(fs::FileTimes::new().set_modified(aged_time))
+                        .unwrap();
+                }
+            }
+        }
+    }
+
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
@@ -945,6 +964,42 @@ fn warm_create_reads_no_unchanged_file_bytes() {
                 }
             }
         }
+    }
+
+    let cache_path = store.join("ingest-cache.tsv");
+    if cache_path.exists() {
+        let content = fs::read_to_string(&cache_path).unwrap();
+        let mut updated = String::new();
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() == 8 {
+                let p = fx.repo.join(parts[0]);
+                if let Ok(meta) = fs::metadata(&p) {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        let inode = meta.ino();
+                        let ctime_sec = meta.ctime();
+                        let ctime_nsec = meta.ctime_nsec();
+                        updated.push_str(&format!(
+                            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                            parts[0],
+                            parts[1],
+                            parts[2],
+                            parts[3],
+                            inode,
+                            ctime_sec,
+                            ctime_nsec,
+                            parts[7]
+                        ));
+                        continue;
+                    }
+                }
+            }
+            updated.push_str(line);
+            updated.push('\n');
+        }
+        fs::write(&cache_path, updated).unwrap();
     }
 
     assert!(
@@ -1480,6 +1535,7 @@ edition = "2021"
     let wt_out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["create", "demo"])
         .env("WT_STORE", &store_dir)
+        .env("WT_NO_TINY_BYPASS", "1")
         .current_dir(&repo)
         .output()
         .unwrap();
@@ -1639,12 +1695,34 @@ fn cross_device_or_fallback_copies_emit_diagnostic_warning_in_json() {
     assert_eq!(json["data"]["bytes_shared_cow"], 0);
     assert!(json["data"]["bytes_copied"].as_u64().unwrap() > 0);
 
+    assert_eq!(json["data"]["copy_mechanism"], "byte-copy");
+    assert!(json["data"]["copy_fallback_reason"].is_string());
+
     let diags = json["diagnostics"].as_array().unwrap();
     assert!(
         diags
             .iter()
             .any(|d| d["code"] == "CROSS_DEVICE_COPY_DEGRADATION")
     );
+}
+
+#[test]
+fn fallback_run_names_backend_and_refusal_reason_in_human_output() {
+    let fx = Fixture::heavy_repo(20);
+    fs::write(fx.repo.join(".wtinclude"), "heavy/\n").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
+        .args(["create", "human-fallback"])
+        .env("WT_SNAPSHOTS", "0")
+        .env("WT_NO_HARDLINK", "1")
+        .current_dir(&fx.repo)
+        .output()
+        .expect("run wt binary");
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Copy mechanism: byte-copy"));
+    assert!(stdout.contains("acceleration refused"));
 }
 
 #[cfg(unix)]
@@ -1717,6 +1795,7 @@ fn wt_verify_run(
         .env("WT_STORE", store)
         .env("WT_SNAPSHOTS", "0")
         .env("WT_SNAPSHOTS_V2", "0")
+        .env("WT_NO_TINY_BYPASS", "1")
         .env_remove("WT_HARDLINK")
         .env_remove("WT_NO_HARDLINK")
         .env_remove("WT_VERIFY")

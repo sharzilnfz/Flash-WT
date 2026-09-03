@@ -15,15 +15,38 @@
 //!   `refs/` entirely. Only reachable through an explicit operator
 //!   command; legacy binaries must not use the store afterwards.
 //!
-//! Root validation is filesystem-existence based — recorded worktree
+//! # Cutover Steps
+//!
+//! The cutover protocol moves the store from legacy per-blob refcounts
+//! to store-local mirror marks in three verifiable stages:
+//!
+//! 1. Dual-write (`GcMode::Legacy`, default):
+//!    All creation paths, including fallback materialization, tree snapshot
+//!    hydration, and pinned lockfile snapshot hits, perform dual-writes.
+//!    They publish store-local mirror records and maintain reference counts
+//!    in `refs/` for all member blobs. Legacy sweepers check ref counts and
+//!    execute `audit_marks_against_refs` to verify parity. Any divergence
+//!    is reported as `wt-gc-audit:` diagnostic lines without collecting live data.
+//!
+//! 2. Activate mark-and-sweep (`wt store migrate --activate-mark-sweep`):
+//!    Sets `gc-mode` to `mark-sweep`. Sweepers switch to live mirror marks
+//!    and grace windows. Reference counts remain maintained on create and
+//!    remove so older binaries or mixed-version runs remain safe.
+//!
+//! 3. Drop legacy refs (`wt store migrate --drop-legacy-refs`):
+//!    Purges all `refs/` files and sets `gc-mode` to `mark-sweep-no-refs`.
+//!    Creates and removes stop touching `refs/` entirely. This step is
+//!    one-way; pre-cutover binaries must not use the store afterwards.
+//!
+//! Root validation is filesystem-existence based. A recorded worktree
 //! path exists and is a directory, gitdir exists, and either the
 //! `wt-hydrated.tsv` sidecar survives or the mirror is younger than
-//! the grace period. No `git worktree list` calls: git's
+//! the grace period. No `git worktree list` calls. Git's
 //! administrative records outlive `rm -rf` until pruned, so they are
 //! not a liveness oracle.
 //!
 //! Unreferenced snapshots additionally face an LRU retention cap
-//! (product-handoff §7.4): past the grace filter at most
+//! (product-handoff §7.4). Past the grace filter at most
 //! `snapshot_cap` of them survive each sweep (`WT_SNAPSHOT_CAP`,
 //! default 64), least-recently-used first, with last-use stamps in
 //! the [`crate::snapindex::SnapshotLru`] sidecar beside
@@ -215,6 +238,17 @@ impl DiskStore {
     /// grace period expires. Only an aged-out failed root stops
     /// protecting content.
     pub fn compute_marks(&self, now: SystemTime, grace: Duration) -> Result<MarkReport> {
+        self.compute_marks_ext(now, grace, &BTreeSet::new(), false)
+    }
+
+    /// Compute live marks from store mirrors, optionally excluding specific mirror paths and dry-run flag.
+    pub fn compute_marks_ext(
+        &self,
+        now: SystemTime,
+        grace: Duration,
+        ignored_mirrors: &BTreeSet<PathBuf>,
+        dry_run: bool,
+    ) -> Result<MarkReport> {
         let cutoff = cutoff_of(now, grace);
         let mut report = MarkReport::default();
         for read in mirror::read_all(self.root()) {
@@ -223,6 +257,10 @@ impl DiskStore {
                 modified,
                 mirror,
             } = read;
+            if ignored_mirrors.contains(&path) {
+                report.dead_mirrors += 1;
+                continue;
+            }
             let young = modified > cutoff;
             let m = match mirror {
                 Ok(m) => m,
@@ -254,7 +292,9 @@ impl DiskStore {
                     mark_through(&mut report, self.root(), &m);
                 }
                 if !wt_alive && !young {
-                    let _ = fs::remove_file(&path);
+                    if !dry_run {
+                        let _ = fs::remove_file(&path);
+                    }
                     report.stale_mirrors_removed.push(path);
                 }
             }
@@ -265,16 +305,6 @@ impl DiskStore {
     /// Sweep in a mirror-driven mode: delete unmarked blobs older
     /// than the grace period, unreferenced/debris snapshots older
     /// than it, snapshot temp data older than it, and stale mirrors.
-    /// On top of the grace period, unreferenced snapshots are also
-    /// capped at `snapshot_cap` entries (`WT_SNAPSHOT_CAP`, default
-    /// 64): when more survive the grace filter than the cap allows,
-    /// the least-recently-used go first, per product-handoff §7.4.
-    ///
-    /// If any malformed mirror is younger than the grace window, this
-    /// pass deletes NOTHING beyond what [`DiskStore::compute_marks`]
-    /// already removed: an unparsable mirror might name live roots we
-    /// cannot see, and waiting one more grace period costs disk, not
-    /// correctness.
     pub fn sweep_mark_sweep(&mut self, grace: Duration, snapshot_cap: usize) -> Result<MarkSwept> {
         self.sweep_mark_sweep_with_budget(grace, snapshot_cap, None)
     }
@@ -286,15 +316,35 @@ impl DiskStore {
         snapshot_cap: usize,
         max_snapshot_bytes: Option<u64>,
     ) -> Result<MarkSwept> {
+        self.sweep_mark_sweep_with_policy(&SweepPolicy {
+            grace,
+            snapshot_cap,
+            max_snapshot_bytes,
+            dry_run: false,
+        })
+    }
+
+    /// Sweep with a full SweepPolicy configuration.
+    pub fn sweep_mark_sweep_with_policy(&mut self, policy: &SweepPolicy) -> Result<MarkSwept> {
+        self.sweep_mark_sweep_with_policy_excluding(policy, &BTreeSet::new())
+    }
+
+    /// Sweep with a full SweepPolicy configuration and ignored mirrors.
+    pub fn sweep_mark_sweep_with_policy_excluding(
+        &mut self,
+        policy: &SweepPolicy,
+        ignored_mirrors: &BTreeSet<PathBuf>,
+    ) -> Result<MarkSwept> {
         let now = SystemTime::now();
-        let cutoff = cutoff_of(now, grace);
-        let marks = self.compute_marks(now, grace)?;
+        let cutoff = cutoff_of(now, policy.grace);
+        let marks = self.compute_marks_ext(now, policy.grace, ignored_mirrors, policy.dry_run)?;
 
         let ids = self.ids()?;
         let examined = ids.len() as u64;
         let mut outcome = MarkSwept {
             examined,
             reclaimed: 0,
+            reclaimed_bytes: 0,
             mirrors_removed: marks.stale_mirrors_removed.len() as u64,
             snapshot_dirs_removed: 0,
             snapshot_cap_evicted: 0,
@@ -320,15 +370,19 @@ impl DiskStore {
             if modified > cutoff {
                 continue;
             }
-            self.delete(&id)?;
+            if !policy.dry_run {
+                self.delete(&id)?;
+            }
             outcome.reclaimed += 1;
+            outcome.reclaimed_bytes += meta.len();
         }
 
         let (swept, cap_evicted) = self.sweep_snapshots(
             &marks.referenced_snapshots,
             cutoff,
-            snapshot_cap,
-            max_snapshot_bytes,
+            policy.snapshot_cap,
+            policy.max_snapshot_bytes,
+            policy.dry_run,
         )?;
         outcome.snapshot_dirs_removed = swept + cap_evicted;
         outcome.snapshot_cap_evicted = cap_evicted;
@@ -347,6 +401,7 @@ impl DiskStore {
         cutoff: SystemTime,
         cap: usize,
         max_bytes: Option<u64>,
+        dry_run: bool,
     ) -> Result<(u64, u64)> {
         let mut removed = 0u64;
         let dir = self.root().join("snapshots");
@@ -382,7 +437,11 @@ impl DiskStore {
                             if let Ok(meta) = fs::metadata(&tmp_p) {
                                 if let Ok(modified) = meta.modified() {
                                     if modified <= cutoff {
-                                        removed += u64::from(remove_tree(&tmp_p));
+                                        if !dry_run {
+                                            removed += u64::from(remove_tree(&tmp_p));
+                                        } else {
+                                            removed += 1;
+                                        }
                                     }
                                 }
                             }
@@ -431,7 +490,11 @@ impl DiskStore {
                 }
                 None if aged_out => {
                     // Non-hex names are sidecar temp debris or tmp build dirs past the grace window.
-                    removed += u64::from(remove_tree(&path));
+                    if !dry_run {
+                        removed += u64::from(remove_tree(&path));
+                    } else {
+                        removed += 1;
+                    }
                 }
                 None => {}
             }
@@ -457,7 +520,11 @@ impl DiskStore {
 
             if !has_custom_budget {
                 // Default sweep without custom budget: aged-out unreferenced snapshots are grace removals.
-                if remove_tree(&c.path) {
+                if !dry_run {
+                    if remove_tree(&c.path) {
+                        removed += 1;
+                    }
+                } else {
                     removed += 1;
                 }
                 continue;
@@ -472,7 +539,11 @@ impl DiskStore {
             if count_ok && bytes_ok {
                 retained_count += 1;
                 retained_bytes = retained_bytes.saturating_add(c.size);
-            } else if remove_tree(&c.path) {
+            } else if !dry_run {
+                if remove_tree(&c.path) {
+                    cap_evicted += 1;
+                }
+            } else {
                 cap_evicted += 1;
             }
         }
@@ -535,6 +606,8 @@ pub struct MarkSwept {
     pub examined: u64,
     /// Unmarked, aged-out blobs deleted.
     pub reclaimed: u64,
+    /// Total bytes of unmarked, aged-out blobs deleted.
+    pub reclaimed_bytes: u64,
     /// Stale mirrors removed.
     pub mirrors_removed: u64,
     /// Snapshot directories (including tmp debris) removed. Includes
@@ -649,6 +722,8 @@ pub struct SweepPolicy {
     pub snapshot_cap: usize,
     /// Maximum disk byte budget for unreferenced snapshots.
     pub max_snapshot_bytes: Option<u64>,
+    /// Whether to perform mark-and-sweep analysis without deleting files.
+    pub dry_run: bool,
 }
 
 impl Default for SweepPolicy {
@@ -657,6 +732,7 @@ impl Default for SweepPolicy {
             grace: Duration::from_secs(15 * 60),
             snapshot_cap: 64,
             max_snapshot_bytes: None,
+            dry_run: false,
         }
     }
 }
@@ -668,8 +744,10 @@ pub struct SweepSummary {
     pub mode: GcMode,
     /// Total blob objects examined.
     pub examined_blobs: u64,
-    /// Unreferenced, aged-out blobs deleted.
+    /// Unreferenced, aged-out blobs deleted (or that would be deleted).
     pub reclaimed_blobs: u64,
+    /// Total bytes of unreferenced blobs deleted (or that would be deleted).
+    pub reclaimed_blob_bytes: u64,
     /// Stale or dead mirrors removed.
     pub mirrors_removed: u64,
     /// Snapshot directories (including temp debris) removed.
@@ -686,6 +764,8 @@ pub struct SweepSummary {
     pub lease_bytes_reclaimed: u64,
     /// Audit disagreement lines between mark-and-sweep and legacy refcounts.
     pub audit_disagreements: Vec<String>,
+    /// Whether this sweep was a dry run.
+    pub dry_run: bool,
 }
 
 /// Summary receipt returned when a worktree is retired.
@@ -702,12 +782,16 @@ pub struct RetirementReceipt {
 /// lifecycle belongs to the CLI, which executes the returned cleanups.
 pub struct StoreReclaimer<'a> {
     store: &'a mut DiskStore,
+    dead_mirrors: BTreeSet<PathBuf>,
 }
 
 impl<'a> StoreReclaimer<'a> {
     /// Construct a new `StoreReclaimer` on the given store.
     pub fn new(store: &'a mut DiskStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            dead_mirrors: BTreeSet::new(),
+        }
     }
 
     /// Sweep dead or expired worktree leases. Releases refs, removes mirrors
@@ -742,46 +826,84 @@ impl<'a> StoreReclaimer<'a> {
                     let is_orphaned = !lease.worktree.exists();
 
                     if is_dead || is_expired || is_orphaned {
-                        if lease.gitdir.exists() {
-                            let ledger_path = lease.gitdir.join("wt-hydrated.tsv");
-                            if ledger_path.exists() {
-                                if let Ok(text) = fs::read_to_string(&ledger_path) {
-                                    if self.store.gc_mode() != GcMode::MarkSweepNoRefs {
-                                        let mut blob_ids = BTreeSet::new();
-                                        for line in text.lines() {
-                                            if line.is_empty() {
-                                                continue;
+                        let mirror_p = crate::mirror::mirror_path(
+                            self.store.root(),
+                            &lease.worktree,
+                            &lease.gitdir,
+                        );
+                        self.dead_mirrors.insert(mirror_p);
+
+                        if !policy.dry_run {
+                            if lease.gitdir.exists() {
+                                let ledger_path = lease.gitdir.join("wt-hydrated.tsv");
+                                if ledger_path.exists() {
+                                    if let Ok(text) = fs::read_to_string(&ledger_path) {
+                                        if self.store.gc_mode() != GcMode::MarkSweepNoRefs {
+                                            let mut blob_ids = BTreeSet::new();
+                                            let mut snapshot_ids = BTreeSet::new();
+                                            for line in text.lines() {
+                                                if line.is_empty() {
+                                                    continue;
+                                                }
+                                                let fields: Vec<&str> = line.split('\t').collect();
+                                                match fields.as_slice() {
+                                                    [_, id_str] => {
+                                                        if let Some(cid) =
+                                                            ContentId::from_hex(id_str)
+                                                        {
+                                                            blob_ids.insert(cid);
+                                                        }
+                                                    }
+                                                    [_, kind, id_str] if *kind == "blob" => {
+                                                        if let Some(cid) =
+                                                            ContentId::from_hex(id_str)
+                                                        {
+                                                            blob_ids.insert(cid);
+                                                        }
+                                                    }
+                                                    [_, kind, id_str] if *kind == "snapshot" => {
+                                                        if let Some(cid) =
+                                                            ContentId::from_hex(id_str)
+                                                        {
+                                                            snapshot_ids.insert(cid);
+                                                        }
+                                                    }
+                                                    _ => {}
+                                                }
                                             }
-                                            let fields: Vec<&str> = line.split('\t').collect();
-                                            match fields.as_slice() {
-                                                [_, id_str] => {
-                                                    if let Some(cid) = ContentId::from_hex(id_str) {
-                                                        blob_ids.insert(cid);
+                                            for snap_id in &snapshot_ids {
+                                                if let Some(manifest) =
+                                                    crate::snapshot::read_published(
+                                                        self.store.root(),
+                                                        snap_id,
+                                                    )
+                                                {
+                                                    for entry in &manifest.entries {
+                                                        if let Some(blob) = entry.blob {
+                                                            blob_ids.insert(blob);
+                                                        }
                                                     }
                                                 }
-                                                [_, kind, id_str] if *kind == "blob" => {
-                                                    if let Some(cid) = ContentId::from_hex(id_str) {
-                                                        blob_ids.insert(cid);
-                                                    }
-                                                }
-                                                _ => {}
                                             }
-                                        }
-                                        for cid in blob_ids {
-                                            match self.store.release_ref(&cid) {
-                                                Ok(()) => {}
-                                                Err(Error::RefCountUnderflow(_)) => {}
-                                                Err(e) => return Err(e),
+                                            for cid in blob_ids {
+                                                match self.store.release_ref(&cid) {
+                                                    Ok(()) => {}
+                                                    Err(Error::RefCountUnderflow(_)) => {}
+                                                    Err(e) => return Err(e),
+                                                }
                                             }
                                         }
                                     }
+                                    let _ = fs::remove_file(&ledger_path);
                                 }
-                                let _ = fs::remove_file(&ledger_path);
                             }
+                            let _ = self
+                                .store
+                                .remove_worktree_mirror(&lease.worktree, &lease.gitdir);
+
+                            let _ = crate::lease::remove(self.store.root(), &id);
+                            let _ = fs::remove_file(&path);
                         }
-                        let _ = self
-                            .store
-                            .remove_worktree_mirror(&lease.worktree, &lease.gitdir);
 
                         let branch_name = if lease.gitdir.exists() {
                             fs::read_to_string(lease.gitdir.join("HEAD"))
@@ -807,15 +929,14 @@ impl<'a> StoreReclaimer<'a> {
                             branch: branch_name,
                         });
 
-                        let _ = crate::lease::remove(self.store.root(), &id);
-                        let _ = fs::remove_file(&path);
-
                         leases_reclaimed += 1;
                     }
                 }
                 Err(_reason) => {
                     if modified <= cutoff {
-                        let _ = fs::remove_file(&path);
+                        if !policy.dry_run {
+                            let _ = fs::remove_file(&path);
+                        }
                         leases_reclaimed += 1;
                     }
                 }
@@ -833,12 +954,14 @@ impl<'a> StoreReclaimer<'a> {
         let mode = self.store.gc_mode();
         match mode {
             GcMode::Legacy => {
-                let swept = self.store.sweep(policy.grace)?;
+                let (swept, reclaimed_bytes) =
+                    self.store.sweep_ext(policy.grace, policy.dry_run)?;
                 let audit_disagreements = self.store.audit_marks_against_refs(policy.grace)?;
                 Ok(SweepSummary {
                     mode,
                     examined_blobs: swept.examined,
                     reclaimed_blobs: swept.reclaimed,
+                    reclaimed_blob_bytes: reclaimed_bytes,
                     mirrors_removed: 0,
                     snapshot_dirs_removed: 0,
                     snapshot_cap_evicted: 0,
@@ -847,18 +970,18 @@ impl<'a> StoreReclaimer<'a> {
                     leases_reclaimed: 0,
                     lease_bytes_reclaimed: 0,
                     audit_disagreements,
+                    dry_run: policy.dry_run,
                 })
             }
             GcMode::MarkSweep | GcMode::MarkSweepNoRefs => {
-                let swept = self.store.sweep_mark_sweep_with_budget(
-                    policy.grace,
-                    policy.snapshot_cap,
-                    policy.max_snapshot_bytes,
-                )?;
+                let swept = self
+                    .store
+                    .sweep_mark_sweep_with_policy_excluding(policy, &self.dead_mirrors)?;
                 Ok(SweepSummary {
                     mode,
                     examined_blobs: swept.examined,
                     reclaimed_blobs: swept.reclaimed,
+                    reclaimed_blob_bytes: swept.reclaimed_bytes,
                     mirrors_removed: swept.mirrors_removed,
                     snapshot_dirs_removed: swept.snapshot_dirs_removed,
                     snapshot_cap_evicted: swept.snapshot_cap_evicted,
@@ -867,6 +990,7 @@ impl<'a> StoreReclaimer<'a> {
                     leases_reclaimed: 0,
                     lease_bytes_reclaimed: 0,
                     audit_disagreements: Vec::new(),
+                    dry_run: policy.dry_run,
                 })
             }
         }
@@ -935,6 +1059,19 @@ impl<'a> StoreReclaimer<'a> {
         let canon_worktree = fs::canonicalize(worktree_path).ok();
         let canon_gitdir = fs::canonicalize(gitdir).ok();
 
+        if self.store.gc_mode() != GcMode::MarkSweepNoRefs {
+            for snap_id in &snapshot_ids {
+                if let Some(manifest) = crate::snapshot::read_published(self.store.root(), snap_id)
+                {
+                    for entry in &manifest.entries {
+                        if let Some(blob) = entry.blob {
+                            blob_ids.insert(blob);
+                        }
+                    }
+                }
+            }
+        }
+
         let mut references_released = 0;
         if !blob_ids.is_empty() && self.store.gc_mode() != GcMode::MarkSweepNoRefs {
             for cid in &blob_ids {
@@ -997,6 +1134,7 @@ mod tests {
             grace: Duration::ZERO,
             snapshot_cap: 64,
             max_snapshot_bytes: None,
+            dry_run: false,
         };
 
         let (leases_examined, leases_reclaimed, pending) =
@@ -1007,6 +1145,80 @@ mod tests {
         let summary = reclaimer.sweep_objects(&policy).expect("sweep objects");
         assert_eq!(summary.reclaimed_blobs, 1);
         assert_eq!(summary.examined_blobs, 1);
+    }
+
+    #[test]
+    fn store_reclaimer_dry_run_reports_without_deleting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_root = dir.path().join("store");
+        let mut store = DiskStore::open(&store_root).expect("open store");
+
+        let id = store.put(b"hello unreferenced blob").expect("put blob");
+        let blob_file = store.object_path(&id);
+        assert!(blob_file.exists());
+
+        // Dead lease
+        let lease = crate::lease::WorktreeLease::new(
+            "scratch-dry",
+            dir.path().join("worktree-dry"),
+            dir.path().join("gitdir-dry"),
+            999_999_999,
+            0,
+            1900000000,
+        );
+        let lease_p = crate::lease::publish(&store_root, &lease).expect("publish lease");
+        assert!(lease_p.exists());
+
+        let usage_before = store.disk_usage().expect("disk usage");
+        assert!(usage_before.objects_bytes > 0);
+        assert!(usage_before.total_bytes > 0);
+
+        let mut reclaimer = StoreReclaimer::new(&mut store);
+        let policy = SweepPolicy {
+            grace: Duration::ZERO,
+            snapshot_cap: 64,
+            max_snapshot_bytes: None,
+            dry_run: true,
+        };
+
+        let (leases_examined, leases_reclaimed, pending) =
+            reclaimer.sweep_leases(&policy).expect("sweep leases");
+        assert_eq!(leases_examined, 1);
+        assert_eq!(leases_reclaimed, 1);
+        assert_eq!(pending.len(), 1);
+
+        // In dry-run, lease file must not be deleted
+        assert!(lease_p.exists());
+
+        let summary = reclaimer.sweep_objects(&policy).expect("sweep objects");
+        assert_eq!(summary.examined_blobs, 1);
+        assert_eq!(summary.reclaimed_blobs, 1);
+        assert!(summary.reclaimed_blob_bytes > 0);
+        assert!(summary.dry_run);
+
+        // In dry-run, blob must still exist on disk
+        assert!(blob_file.exists());
+
+        // Now run live sweep
+        let mut reclaimer_live = StoreReclaimer::new(&mut store);
+        let live_policy = SweepPolicy {
+            grace: Duration::ZERO,
+            snapshot_cap: 64,
+            max_snapshot_bytes: None,
+            dry_run: false,
+        };
+
+        let (_, live_reclaimed, _) = reclaimer_live
+            .sweep_leases(&live_policy)
+            .expect("live sweep leases");
+        assert_eq!(live_reclaimed, 1);
+        assert!(!lease_p.exists());
+
+        let live_summary = reclaimer_live
+            .sweep_objects(&live_policy)
+            .expect("live sweep objects");
+        assert_eq!(live_summary.reclaimed_blobs, 1);
+        assert!(!blob_file.exists());
     }
 
     #[test]

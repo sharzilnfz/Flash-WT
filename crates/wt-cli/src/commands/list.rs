@@ -206,6 +206,8 @@ pub fn run(cfg: &RunConfig) -> Result<(ListData, Vec<Diagnostic>)> {
                         expires_at: lease.expires_at,
                         ttl_remaining_secs: ttl_remaining,
                         is_expired: expired,
+                        worktree_path: Some(lease.worktree.display().to_string()),
+                        git_dir: Some(lease.gitdir.display().to_string()),
                     });
                     break;
                 }

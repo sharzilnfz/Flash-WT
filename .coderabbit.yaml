@@ -1,0 +1,49 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+tone_instructions: "Be concise, direct, and technically rigorous. Focus on logic, correctness, error handling, and performance. Do not nitpick formatting or stylistic preferences."
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  collapse_walkthrough: true
+  poem: false
+  review_status: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - ".*"
+    auto_incremental_review: true
+
+  tools:
+    clippy:
+      enabled: true
+    shellcheck:
+      enabled: true
+    markdownlint:
+      enabled: true
+
+  path_filters:
+    - "!target/**"
+    - "!Cargo.lock"
+    - "!eval/fixtures/**"
+    - "!**/*.generated.*"
+
+  path_instructions:
+    - path: "crates/**/*.rs"
+      instructions: |
+        - This is `wt` (instant worktrees CLI), a performance-critical systems tool in Rust.
+        - Ensure zero-cost abstractions, minimal heap allocations, and lock-free/non-blocking operations on hot paths.
+        - Respect the Store vs. Tree architectural boundary: Store is immutable content-addressed storage; Tree is an ephemeral projection. No implicit background syncing.
+        - Adhere to the workspace lint policy: avoid `unwrap()` and `expect()` in non-test production code; return structured errors via `thiserror`.
+        - Test conventions: Store flushes bypass hardware `fsync` in test environments (`WT_TEST_NO_SYNC=1` or `cfg!(test)`). Do not add manual fsync calls into test paths.
+    - path: "scripts/**/*.sh"
+      instructions: |
+        - Ensure strict error handling (`set -euo pipefail`).
+        - Scripts must remain portable across macOS (BSD coreutils) and Linux (GNU coreutils).
+        - Properly quote variable expansions to prevent word splitting.
+
+chat:
+  auto_reply: true

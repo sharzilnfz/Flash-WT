@@ -1355,3 +1355,405 @@ fn projection_engine_api_sanity() {
         }
     }
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn try_incremental_guard_narrow_diff_takes_incremental_path() {
+    use crate::snapindex::record_publish;
+    use crate::snapshot::projection::try_incremental;
+
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+    let repo_key = base.path().join("repo").to_string_lossy().into_owned();
+    let pattern = "heavy/**";
+    let heavy_rel = "heavy";
+    let lock_hash = id(99);
+
+    // Create 20 entries for base snapshot
+    let mut old_entries = Vec::new();
+    for i in 0..20 {
+        let rel = format!("file_{i:02}.txt");
+        let blob = store.put(format!("content {i}\n").as_bytes()).unwrap();
+        old_entries.push(SnapshotEntry::file(rel, blob, 0o644));
+    }
+    let old_manifest =
+        Manifest::new_with_lockfile_and_size(old_entries.clone(), Some(lock_hash), 200).unwrap();
+    store
+        .publish_snapshot(
+            old_entries,
+            PublishOptions::default().lockfile_hash(Some(lock_hash)),
+        )
+        .unwrap();
+    record_publish(
+        store.root(),
+        &repo_key,
+        pattern,
+        heavy_rel,
+        &old_manifest.hash,
+    )
+    .unwrap();
+
+    // Bump 1 file out of 20 (5% changed entries <= 10% threshold)
+    let bumped_blob = store.put(b"bumped file 0\n").unwrap();
+    let mut new_entries = old_manifest.entries.clone();
+    new_entries[0] = SnapshotEntry::file("file_00.txt", bumped_blob, 0o644);
+    let new_manifest =
+        Manifest::new_with_lockfile_and_size(new_entries, Some(lock_hash), 200).unwrap();
+
+    let mut timing = None;
+    let res = try_incremental(
+        &mut store,
+        &new_manifest,
+        &repo_key,
+        pattern,
+        heavy_rel,
+        false,
+        &mut timing,
+    );
+
+    match res {
+        IncrementalResult::Hit {
+            cloned_units,
+            linked_files,
+            hit_rate,
+        } => {
+            assert_eq!(cloned_units, 1);
+            assert_eq!(linked_files, 1);
+            assert!(hit_rate > 0.0);
+        }
+        IncrementalResult::Fallback {
+            decision, reason, ..
+        } => {
+            panic!("expected incremental hit for 5% diff, got fallback {decision:?}: {reason}");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn try_incremental_guard_wide_diff_falls_back_to_full_build() {
+    use crate::snapindex::record_publish;
+    use crate::snapshot::projection::try_incremental;
+
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+    let repo_key = base.path().join("repo").to_string_lossy().into_owned();
+    let pattern = "heavy/**";
+    let heavy_rel = "heavy";
+    let lock_hash = id(99);
+
+    // Create 20 entries for base snapshot
+    let mut old_entries = Vec::new();
+    for i in 0..20 {
+        let rel = format!("file_{i:02}.txt");
+        let blob = store.put(format!("content {i}\n").as_bytes()).unwrap();
+        old_entries.push(SnapshotEntry::file(rel, blob, 0o644));
+    }
+    let old_manifest =
+        Manifest::new_with_lockfile_and_size(old_entries.clone(), Some(lock_hash), 200).unwrap();
+    store
+        .publish_snapshot(
+            old_entries,
+            PublishOptions::default().lockfile_hash(Some(lock_hash)),
+        )
+        .unwrap();
+    record_publish(
+        store.root(),
+        &repo_key,
+        pattern,
+        heavy_rel,
+        &old_manifest.hash,
+    )
+    .unwrap();
+
+    // Bump 3 files out of 20 (15% changed entries > 10% threshold)
+    let mut new_entries = old_manifest.entries.clone();
+    for (i, entry) in new_entries.iter_mut().take(3).enumerate() {
+        let bumped_blob = store.put(format!("bumped file {i}\n").as_bytes()).unwrap();
+        *entry = SnapshotEntry::file(format!("file_{i:02}.txt"), bumped_blob, 0o644);
+    }
+    let new_manifest =
+        Manifest::new_with_lockfile_and_size(new_entries, Some(lock_hash), 200).unwrap();
+
+    let mut timing = None;
+    let res = try_incremental(
+        &mut store,
+        &new_manifest,
+        &repo_key,
+        pattern,
+        heavy_rel,
+        false,
+        &mut timing,
+    );
+
+    match res {
+        IncrementalResult::Fallback {
+            decision, reason, ..
+        } => {
+            assert_eq!(decision, IncrementalDecision::DiffTooWide);
+            assert!(
+                reason.contains("exceeds maximum threshold"),
+                "expected reason to mention threshold, got: {reason}"
+            );
+        }
+        IncrementalResult::Hit { .. } => {
+            panic!("expected wide diff to fall back, but got IncrementalResult::Hit");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn try_incremental_guard_lockfile_miss_falls_back_to_full_build() {
+    use crate::snapindex::record_publish;
+    use crate::snapshot::projection::try_incremental;
+
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+    let repo_key = base.path().join("repo").to_string_lossy().into_owned();
+    let pattern = "heavy/**";
+    let heavy_rel = "heavy";
+    let lock_hash1 = id(99);
+    let lock_hash2 = id(100);
+
+    // Create 20 entries for base snapshot with lockfile hash 1
+    let mut old_entries = Vec::new();
+    for i in 0..20 {
+        let rel = format!("file_{i:02}.txt");
+        let blob = store.put(format!("content {i}\n").as_bytes()).unwrap();
+        old_entries.push(SnapshotEntry::file(rel, blob, 0o644));
+    }
+    let old_manifest =
+        Manifest::new_with_lockfile_and_size(old_entries.clone(), Some(lock_hash1), 200).unwrap();
+    store
+        .publish_snapshot(
+            old_entries,
+            PublishOptions::default().lockfile_hash(Some(lock_hash1)),
+        )
+        .unwrap();
+    record_publish(
+        store.root(),
+        &repo_key,
+        pattern,
+        heavy_rel,
+        &old_manifest.hash,
+    )
+    .unwrap();
+
+    // Bump only 1 file (5% <= 10%), but change lockfile hash to lock_hash2
+    let bumped_blob = store.put(b"bumped file 0\n").unwrap();
+    let mut new_entries = old_manifest.entries.clone();
+    new_entries[0] = SnapshotEntry::file("file_00.txt", bumped_blob, 0o644);
+    let new_manifest =
+        Manifest::new_with_lockfile_and_size(new_entries, Some(lock_hash2), 200).unwrap();
+
+    let mut timing = None;
+    let res = try_incremental(
+        &mut store,
+        &new_manifest,
+        &repo_key,
+        pattern,
+        heavy_rel,
+        false,
+        &mut timing,
+    );
+
+    match res {
+        IncrementalResult::Fallback {
+            decision, reason, ..
+        } => {
+            assert_eq!(decision, IncrementalDecision::LockfileMiss);
+            assert!(
+                reason.contains("lockfile hash mismatch"),
+                "expected reason to mention lockfile hash mismatch, got: {reason}"
+            );
+        }
+        IncrementalResult::Hit { .. } => {
+            panic!("expected lockfile miss to fall back, but got IncrementalResult::Hit");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn snapshot_projection_engine_hydrates_narrow_wide_and_lockfile_miss() {
+    use std::collections::BTreeMap;
+
+    let base = tempfile::tempdir().unwrap();
+    let mut store = DiskStore::open(base.path().join("store")).unwrap();
+    let repo_root = base.path().join("repo");
+    let src_root = base.path().join("src");
+    std::fs::create_dir_all(&repo_root).unwrap();
+    std::fs::create_dir_all(&src_root).unwrap();
+
+    let lock_hash1 = id(77);
+    let lock_hash2 = id(88);
+
+    let dirs = vec!["heavy".to_string()];
+    let dir_modes = BTreeMap::new();
+    let symlinks = BTreeMap::new();
+
+    // Base tree with 20 files
+    let mut files = BTreeMap::new();
+    let mut file_sizes = BTreeMap::new();
+    let mut modes = BTreeMap::new();
+    for i in 0..20 {
+        let rel = format!("heavy/file_{i:02}.txt");
+        let content = format!("file content {i}\n");
+        let blob = store.put(content.as_bytes()).unwrap();
+        file_sizes.insert(rel.clone(), content.len() as u64);
+        modes.insert(rel.clone(), 0o644);
+        files.insert(rel, blob);
+    }
+
+    // Step 1: Initial hydration builds base snapshot
+    let dest1 = base.path().join("dest1");
+    let req1 = SnapshotProjectionRequest {
+        dirs: &dirs,
+        dir_modes: &dir_modes,
+        files: &files,
+        file_sizes: &file_sizes,
+        symlinks: &symlinks,
+        modes: &modes,
+        repo_root: &repo_root,
+        pattern: "heavy/**",
+        src_root: &src_root,
+        heavy_rel: "heavy",
+        dest_root: &dest1,
+        lockfile_hash: Some(&lock_hash1),
+        verify: false,
+        snapshots_enabled: true,
+        v2_enabled: true,
+    };
+    let outcome1 = SnapshotProjectionEngine::hydrate(&mut store, &req1);
+    match outcome1 {
+        SnapshotOutcome::Hydrated(info) => {
+            assert_eq!(info.mode, "build");
+            assert!(dest1.join("heavy/file_00.txt").exists());
+        }
+        other => panic!("expected initial build snapshot, got {other:?}"),
+    }
+
+    // Step 2: Narrow diff (1 of 20 files changed = 5% <= 10%) with same lockfile -> v2 hit!
+    let dest2 = base.path().join("dest2");
+    let mut files2 = files.clone();
+    let bumped_blob = store.put(b"bumped 0 content\n").unwrap();
+    files2.insert("heavy/file_00.txt".into(), bumped_blob);
+
+    let req2 = SnapshotProjectionRequest {
+        dirs: &dirs,
+        dir_modes: &dir_modes,
+        files: &files2,
+        file_sizes: &file_sizes,
+        symlinks: &symlinks,
+        modes: &modes,
+        repo_root: &repo_root,
+        pattern: "heavy/**",
+        src_root: &src_root,
+        heavy_rel: "heavy",
+        dest_root: &dest2,
+        lockfile_hash: Some(&lock_hash1),
+        verify: false,
+        snapshots_enabled: true,
+        v2_enabled: true,
+    };
+    let outcome2 = SnapshotProjectionEngine::hydrate(&mut store, &req2);
+    match outcome2 {
+        SnapshotOutcome::Hydrated(info) => {
+            assert_eq!(
+                info.mode, "v2",
+                "narrow diff should take v2 incremental path"
+            );
+            assert_eq!(info.incremental_decision, Some(IncrementalDecision::Hit));
+            assert!(info.incremental_hit_rate.is_some());
+            assert_eq!(info.cloned_units, 1);
+            assert_eq!(info.linked_files, 1);
+            assert_eq!(
+                std::fs::read_to_string(dest2.join("heavy/file_00.txt")).unwrap(),
+                "bumped 0 content\n"
+            );
+        }
+        other => panic!("expected v2 incremental hit, got {other:?}"),
+    }
+
+    // Step 3: Wide diff (3 of 20 files changed = 15% > 10%) with same lockfile -> fallback to full build!
+    let dest3 = base.path().join("dest3");
+    let mut files3 = files2.clone();
+    for i in 1..4 {
+        let b = store.put(format!("wide content {i}\n").as_bytes()).unwrap();
+        files3.insert(format!("heavy/file_{i:02}.txt"), b);
+    }
+    let req3 = SnapshotProjectionRequest {
+        dirs: &dirs,
+        dir_modes: &dir_modes,
+        files: &files3,
+        file_sizes: &file_sizes,
+        symlinks: &symlinks,
+        modes: &modes,
+        repo_root: &repo_root,
+        pattern: "heavy/**",
+        src_root: &src_root,
+        heavy_rel: "heavy",
+        dest_root: &dest3,
+        lockfile_hash: Some(&lock_hash1),
+        verify: false,
+        snapshots_enabled: true,
+        v2_enabled: true,
+    };
+    let outcome3 = SnapshotProjectionEngine::hydrate(&mut store, &req3);
+    match outcome3 {
+        SnapshotOutcome::Hydrated(info) => {
+            assert_eq!(
+                info.mode, "build",
+                "wide diff should fall back to full build mode"
+            );
+            assert_eq!(
+                info.incremental_decision,
+                Some(IncrementalDecision::DiffTooWide)
+            );
+            assert!(info.incremental_fallback_reason.is_some());
+            assert_eq!(info.cloned_units, 0);
+            assert!(dest3.join("heavy/file_01.txt").exists());
+        }
+        other => panic!("expected fallback to build for wide diff, got {other:?}"),
+    }
+
+    // Step 4: Lockfile miss (1 of 20 files changed, but lock_hash2 != lock_hash1) -> fallback to full build!
+    let dest4 = base.path().join("dest4");
+    let mut files4 = files.clone();
+    let b = store.put(b"lockfile test bump\n").unwrap();
+    files4.insert("heavy/file_05.txt".into(), b);
+    let req4 = SnapshotProjectionRequest {
+        dirs: &dirs,
+        dir_modes: &dir_modes,
+        files: &files4,
+        file_sizes: &file_sizes,
+        symlinks: &symlinks,
+        modes: &modes,
+        repo_root: &repo_root,
+        pattern: "heavy/**",
+        src_root: &src_root,
+        heavy_rel: "heavy",
+        dest_root: &dest4,
+        lockfile_hash: Some(&lock_hash2),
+        verify: false,
+        snapshots_enabled: true,
+        v2_enabled: true,
+    };
+    let outcome4 = SnapshotProjectionEngine::hydrate(&mut store, &req4);
+    match outcome4 {
+        SnapshotOutcome::Hydrated(info) => {
+            assert_eq!(
+                info.mode, "build",
+                "lockfile miss should fall back to full build mode"
+            );
+            assert_eq!(
+                info.incremental_decision,
+                Some(IncrementalDecision::LockfileMiss)
+            );
+            assert!(info.incremental_fallback_reason.is_some());
+            assert_eq!(info.cloned_units, 0);
+        }
+        other => panic!("expected fallback to build for lockfile miss, got {other:?}"),
+    }
+}

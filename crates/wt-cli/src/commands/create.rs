@@ -8,12 +8,13 @@ use std::time::Instant;
 use crate::config::RunConfig;
 use crate::envelope::{CreateData, Diagnostic};
 use crate::error::{Error, Result};
-use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
+use crate::hydrate::{HydrationEngine, HydrationRequest};
 use crate::hydration_filter::{self, LoadedPatterns, load_patterns};
 use crate::output::{HumanBytes, HumanCount};
+use crate::receipt::{OperationReceipt, ReceiptState};
 use crate::signal;
 use crate::timing::StageTimings;
-use crate::workspace::WorkspaceEngine;
+use crate::workspace::{self, WorkspaceEngine};
 
 /// RAII guard that rolls back a newly created worktree+branch if
 /// hydration fails. Defuse on success.
@@ -53,8 +54,30 @@ pub fn run(
         Some(d) => d.to_path_buf(),
         None => engine.default_dest(name)?,
     };
+
+    let git_dir = workspace::resolve_git_dir(&dest);
+    let receipt_path = OperationReceipt::receipt_path(&git_dir);
+    let alt_git_dir = root.join(".git").join("worktrees").join(name);
+    let alt_receipt_path = OperationReceipt::receipt_path(&alt_git_dir);
+
+    let mut resuming = false;
+    let candidate_receipt = if receipt_path.exists() {
+        receipt_path
+    } else {
+        alt_receipt_path
+    };
+
     if dest.exists() {
-        return Err(Error::Usage(format!("{} already exists", dest.display())));
+        if candidate_receipt.exists() {
+            if let Ok(receipt) = OperationReceipt::load(&candidate_receipt) {
+                if receipt.branch == name && receipt.state != ReceiptState::Completed {
+                    resuming = true;
+                }
+            }
+        }
+        if !resuming {
+            return Err(Error::Usage(format!("{} already exists", dest.display())));
+        }
     }
 
     let timing_enabled = cfg.timing;
@@ -67,8 +90,21 @@ pub fn run(
         None
     };
 
-    engine.create_worktree(name, &dest, start_point)?;
-    timings.git_worktree_ms = started.elapsed().as_millis();
+    if !resuming {
+        engine.create_worktree(name, &dest, start_point)?;
+        timings.git_worktree_ms = started.elapsed().as_millis();
+    }
+
+    let resolved_git_dir = workspace::resolve_git_dir(&dest);
+    let final_receipt_path = OperationReceipt::receipt_path(&resolved_git_dir);
+    let mut receipt = OperationReceipt::new_in_progress(
+        "create",
+        name,
+        root.display().to_string(),
+        dest.display().to_string(),
+        base.map(|s| s.to_string()),
+    );
+    let _ = receipt.save(&final_receipt_path);
 
     // Register for signal-driven cleanup and arm RAII guard for
     // transactional rollback on any subsequent failure.
@@ -85,11 +121,18 @@ pub fn run(
     };
 
     if !cfg.json {
-        println!(
-            "created worktree {} from {}",
-            dest.display(),
-            root.display()
-        );
+        if resuming {
+            println!(
+                "resuming interrupted create for worktree {} ({name})",
+                dest.display()
+            );
+        } else {
+            println!(
+                "created worktree {} from {}",
+                dest.display(),
+                root.display()
+            );
+        }
     }
 
     let lp = load_patterns(&root, manifest)?;
@@ -107,8 +150,7 @@ pub fn run(
         LoadedPatterns::Loaded { patterns, .. } => patterns,
     };
 
-    let mut store = open_store()?;
-    let mut h_engine = HydrationEngine::new(&mut store);
+    let mut h_engine = HydrationEngine::auto();
     let req = HydrationRequest {
         root: &root,
         dest: &dest,
@@ -124,6 +166,14 @@ pub fn run(
     // Success: defuse guard so Drop does not delete the worktree.
     guard.defuse();
 
+    let dirs: Vec<String> = report
+        .dirs_hydrated
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    receipt.complete(dirs);
+    let _ = receipt.save(&final_receipt_path);
+
     if !cfg.json {
         report.timings.emit(started, timing_enabled);
 
@@ -138,6 +188,9 @@ pub fn run(
                 report.hydration_method,
                 total_ms
             );
+            crate::hydrate::print_copy_mechanism_refusal(&report);
+        } else {
+            crate::hydrate::print_zero_savings(&report.dirs_hydrated);
         }
         if let Ok(curr) = std::env::current_dir() {
             if let Ok(rel) = dest.strip_prefix(&curr) {
@@ -159,6 +212,21 @@ pub fn run(
         }
     }
 
+    let (copy_mechanism, copy_fallback_reason) =
+        if report.total_copied > 0 || report.hydration_method == "byte_copy" {
+            (
+                Some(
+                    report
+                        .copy_backend
+                        .clone()
+                        .unwrap_or_else(|| "byte-copy".to_string()),
+                ),
+                report.refusal_reason.clone(),
+            )
+        } else {
+            (None, None)
+        };
+
     let data = CreateData {
         worktree_path: dest.display().to_string(),
         branch: name.to_string(),
@@ -168,6 +236,13 @@ pub fn run(
         bytes_shared_cow: report.bytes_shared_cow,
         bytes_copied: report.bytes_copied,
         files_hydrated: report.total_files,
+        incremental_decision: report.incremental_decision,
+        incremental_fallback_reason: report.incremental_fallback_reason,
+        incremental_hit_rate: report.incremental_hit_rate,
+        copy_mechanism,
+        copy_fallback_reason,
+        resumed: if resuming { Some(true) } else { None },
+        receipt_path: Some(final_receipt_path.display().to_string()),
     };
 
     Ok((data, report.diagnostics))

@@ -160,6 +160,51 @@ fn is_btrfs_filesystem(path: &Path) -> bool {
     }
 }
 
+/// Filesystem copy capabilities for a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsCapabilities {
+    /// APFS whole-directory clonefile(2) support on macOS.
+    pub apfs_clonefile: bool,
+    /// Linux ioctl(FICLONE) reflink support on btrfs/XFS.
+    pub ficlone: bool,
+    /// Linux copy_file_range(2) in-kernel page splicing support.
+    pub copy_file_range: bool,
+}
+
+/// Probe the copy capabilities of the filesystem holding `path`.
+pub fn probe_capabilities(path: &Path) -> FsCapabilities {
+    #[allow(unused_variables)]
+    let (is_primary, is_secondary) = probe_fs_capabilities(path);
+
+    #[cfg(target_os = "macos")]
+    {
+        FsCapabilities {
+            apfs_clonefile: is_primary,
+            ficlone: false,
+            copy_file_range: false,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        FsCapabilities {
+            apfs_clonefile: false,
+            ficlone: is_primary,
+            copy_file_range: is_secondary,
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (is_primary, is_secondary);
+        FsCapabilities {
+            apfs_clonefile: false,
+            ficlone: false,
+            copy_file_range: false,
+        }
+    }
+}
+
 /// Probe reflink and ext4 capabilities for the filesystem holding `path`.
 pub(crate) fn probe_fs_capabilities(path: &Path) -> (bool, bool) {
     let existing = find_existing_ancestor(path);
@@ -210,6 +255,68 @@ pub(crate) fn count_files_and_bytes(dir: &Path) -> io::Result<(u64, u64)> {
         }
     }
     Ok((files, bytes))
+}
+
+/// Resolve the filesystem type name for the filesystem holding `path`.
+pub(crate) fn filesystem_name(path: &Path) -> String {
+    let existing = find_existing_ancestor(path);
+    let Ok(st) = statfs_of(existing) else {
+        return "unknown".to_string();
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CStr;
+        let fstype = unsafe { CStr::from_ptr(st.f_fstypename.as_ptr()) };
+        fstype.to_string_lossy().into_owned()
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let f_type = st.f_type as libc::c_long;
+        match f_type {
+            x if x == (libc::EXT4_SUPER_MAGIC as libc::c_long) => "ext4".to_string(),
+            x if x == (libc::BTRFS_SUPER_MAGIC as libc::c_long) => "btrfs".to_string(),
+            x if x == (libc::XFS_SUPER_MAGIC as libc::c_long) => "xfs".to_string(),
+            0x01021994 => "tmpfs".to_string(),
+            0x6969 => "nfs".to_string(),
+            0x794c7630 => "overlayfs".to_string(),
+            0x65735546 => "fuse".to_string(),
+            0x4d44 => "vfat".to_string(),
+            _ => format!("unknown (0x{f_type:x})"),
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = st;
+        "unknown".to_string()
+    }
+}
+
+/// Format an explanatory refusal reason for an OS error encountered during placement.
+pub fn refusal_reason_for_errno(errno: i32) -> String {
+    #[cfg(unix)]
+    {
+        match errno {
+            libc::EXDEV => "cross-device link (EXDEV)".to_string(),
+            libc::ENOTSUP | libc::EOPNOTSUPP => {
+                "filesystem does not support operation (ENOTSUP/EOPNOTSUPP)".to_string()
+            }
+            libc::ENOSYS => "syscall not implemented by kernel (ENOSYS)".to_string(),
+            libc::EMLINK => "maximum link count reached (EMLINK)".to_string(),
+            libc::EPERM => "operation not permitted by filesystem (EPERM)".to_string(),
+            _ => {
+                let err = io::Error::from_raw_os_error(errno);
+                format!("placement refused: {err} (errno {errno})")
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let err = io::Error::from_raw_os_error(errno);
+        format!("placement refused: {err} (errno {errno})")
+    }
 }
 
 // Tests assert with unwrap/expect by design: a panic IS the failure
