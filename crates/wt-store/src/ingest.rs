@@ -24,9 +24,10 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 #[cfg(target_os = "macos")]
@@ -205,6 +206,7 @@ impl DiskStore {
         match walked {
             #[cfg(target_os = "macos")]
             Some(entries) => {
+                let mut pending = Vec::new();
                 // Bulk entries are relative to `src`; every consumer (and
                 // the legacy walk) speaks source-root-relative paths, so
                 // prefix with the ingested tree's own source-relative name.
@@ -251,12 +253,13 @@ impl DiskStore {
                     let mtime = UNIX_EPOCH + Duration::new(entry.mtime_secs, entry.mtime_nanos);
                     let ctime = UNIX_EPOCH + Duration::new(entry.ctime_secs, entry.ctime_nanos);
                     let inode = entry.inode;
-                    ingest_file(
+                    process_file_entry(
                         self,
                         &mut cache,
                         &mut ingested,
+                        &mut pending,
                         rel,
-                        &path,
+                        path,
                         entry.size,
                         mtime,
                         inode,
@@ -264,6 +267,7 @@ impl DiskStore {
                         entry.mode,
                     )?;
                 }
+                flush_pending(self, &mut cache, &mut ingested, &mut pending)?;
             }
             None => ingest_tree_walk(self, &mut cache, &mut ingested, src_root, src, options)?,
         }
@@ -273,6 +277,172 @@ impl DiskStore {
         cache.save().map_err(Error::Io)?;
         Ok(ingested)
     }
+}
+
+const INGEST_BATCH_SIZE: usize = 1024;
+
+struct PendingFile {
+    rel: String,
+    path: PathBuf,
+    size: u64,
+    mtime: std::time::SystemTime,
+    inode: u64,
+    ctime: std::time::SystemTime,
+}
+
+/// Stream-hash a file using SHA-256 in 64KB chunks into a [`ContentId`].
+///
+/// Large files never hold full contents in memory, keeping memory consumption
+/// bounded to 64KB regardless of file size.
+pub fn stream_hash_file(path: &Path) -> io::Result<ContentId> {
+    let mut buf = vec![0u8; 64 * 1024];
+    stream_hash_file_with_buf(path, &mut buf)
+}
+
+pub(crate) fn stream_hash_file_with_buf(path: &Path, buf: &mut [u8]) -> io::Result<ContentId> {
+    use sha2::{Digest, Sha256};
+
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    loop {
+        let n = file.read(buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(ContentId(hasher.finalize().into()))
+}
+
+fn hash_pending_files(pending: &[PendingFile]) -> Vec<io::Result<ContentId>> {
+    if pending.is_empty() {
+        return Vec::new();
+    }
+    if pending.len() == 1 {
+        let mut buf = vec![0u8; 64 * 1024];
+        return vec![stream_hash_file_with_buf(&pending[0].path, &mut buf)];
+    }
+
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 8)
+        .min(pending.len());
+
+    if num_threads <= 1 {
+        let mut buf = vec![0u8; 64 * 1024];
+        return pending
+            .iter()
+            .map(|f| stream_hash_file_with_buf(&f.path, &mut buf))
+            .collect();
+    }
+
+    let mut results: Vec<Option<io::Result<ContentId>>> =
+        (0..pending.len()).map(|_| None).collect();
+    let next_index = AtomicUsize::new(0);
+
+    std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(num_threads);
+        for _ in 0..num_threads {
+            handles.push(s.spawn(|| {
+                let mut buf = vec![0u8; 64 * 1024];
+                let mut local = Vec::new();
+                loop {
+                    let idx = next_index.fetch_add(1, Ordering::Relaxed);
+                    if idx >= pending.len() {
+                        break;
+                    }
+                    let res = stream_hash_file_with_buf(&pending[idx].path, &mut buf);
+                    local.push((idx, res));
+                }
+                local
+            }));
+        }
+
+        for handle in handles {
+            if let Ok(local) = handle.join() {
+                for (idx, res) in local {
+                    results[idx] = Some(res);
+                }
+            }
+        }
+    });
+
+    results
+        .into_iter()
+        .map(|opt| opt.unwrap_or_else(|| Err(io::Error::other("worker failed to produce hash"))))
+        .collect()
+}
+
+fn flush_pending(
+    store: &mut DiskStore,
+    cache: &mut ValidationCache,
+    ingested: &mut Ingested,
+    pending: &mut Vec<PendingFile>,
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let results = hash_pending_files(pending);
+    let mut copy_buf = vec![0u8; 64 * 1024];
+
+    for (file, hash_res) in pending.drain(..).zip(results) {
+        let id = hash_res.map_err(|e| io_ctx("read", &file.path, e))?;
+        store.put_file_with_id_buf(&file.path, &id, &mut copy_buf)?;
+        if file.mtime >= UNIX_EPOCH && file.ctime >= UNIX_EPOCH {
+            cache.record(
+                file.rel.clone(),
+                Entry {
+                    size: file.size,
+                    mtime: file.mtime,
+                    inode: file.inode,
+                    ctime: file.ctime,
+                    id,
+                },
+            );
+        }
+        ingested.file_sizes.insert(file.rel.clone(), file.size);
+        ingested.files.insert(file.rel, id);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_file_entry(
+    store: &mut DiskStore,
+    cache: &mut ValidationCache,
+    ingested: &mut Ingested,
+    pending: &mut Vec<PendingFile>,
+    rel: String,
+    path: PathBuf,
+    size: u64,
+    mtime: std::time::SystemTime,
+    inode: u64,
+    ctime: std::time::SystemTime,
+    mode: u32,
+) -> Result<()> {
+    ingested.modes.insert(rel.clone(), mode & 0o7777);
+    match cache.lookup(&rel, size, mtime, inode, ctime) {
+        Some(id) if store.contains(&id) => {
+            ingested.file_sizes.insert(rel.clone(), size);
+            ingested.files.insert(rel, id);
+        }
+        _ => {
+            pending.push(PendingFile {
+                rel,
+                path,
+                size,
+                mtime,
+                inode,
+                ctime,
+            });
+            if pending.len() >= INGEST_BATCH_SIZE {
+                flush_pending(store, cache, ingested, pending)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The portable read_dir+metadata walk: one `fs::metadata` per regular
@@ -287,6 +457,7 @@ fn ingest_tree_walk(
     options: &IngestOptions<'_>,
 ) -> Result<()> {
     let snapshots = options.snapshots;
+    let mut pending = Vec::new();
     let mut stack = vec![src.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let rel = rel_text(src_root, &dir)?;
@@ -344,15 +515,26 @@ fn ingest_tree_walk(
             let ctime_nanos = meta.ctime_nsec().clamp(0, 999_999_999) as u32;
             let ctime = UNIX_EPOCH + Duration::new(ctime_secs, ctime_nanos);
             let mode = meta.mode();
-            ingest_file(
-                store, cache, ingested, rel, &path, size, mtime, inode, ctime, mode,
+            process_file_entry(
+                store,
+                cache,
+                ingested,
+                &mut pending,
+                rel,
+                path,
+                size,
+                mtime,
+                inode,
+                ctime,
+                mode,
             )?;
         }
     }
+    flush_pending(store, cache, ingested, &mut pending)?;
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn ingest_file(
     store: &mut DiskStore,
     cache: &mut ValidationCache,
@@ -365,36 +547,21 @@ fn ingest_file(
     ctime: std::time::SystemTime,
     mode: u32,
 ) -> Result<()> {
-    ingested.modes.insert(rel.clone(), mode & 0o7777);
-    let id = match cache.lookup(&rel, size, mtime, inode, ctime) {
-        // Cache hit: same size, mtime, inode, and ctime as last time.
-        // Trust it only while the blob is actually still here.
-        Some(id) if store.contains(&id) => id,
-        _ => {
-            // Miss (or near now rehash, or a swept blob): pay for read and hash.
-            let bytes = fs::read(path).map_err(|e| io_ctx("read", path, e))?;
-            let id = store.put(&bytes)?;
-            // An mtime or ctime before the epoch cannot round-trip
-            // through the cache format; skip caching rather
-            // than fail, so such a file just stays cold.
-            if mtime >= std::time::UNIX_EPOCH && ctime >= std::time::UNIX_EPOCH {
-                cache.record(
-                    rel.clone(),
-                    Entry {
-                        size,
-                        mtime,
-                        inode,
-                        ctime,
-                        id,
-                    },
-                );
-            }
-            id
-        }
-    };
-    ingested.file_sizes.insert(rel.clone(), size);
-    ingested.files.insert(rel, id);
-    Ok(())
+    let mut pending = Vec::new();
+    process_file_entry(
+        store,
+        cache,
+        ingested,
+        &mut pending,
+        rel,
+        path.to_path_buf(),
+        size,
+        mtime,
+        inode,
+        ctime,
+        mode,
+    )?;
+    flush_pending(store, cache, ingested, &mut pending)
 }
 
 fn ingest_symlink(ingested: &mut Ingested, rel: String, path: &Path) -> Result<()> {

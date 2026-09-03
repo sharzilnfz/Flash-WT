@@ -9,7 +9,7 @@ use std::fs;
 use std::time::Instant;
 
 use tempfile::TempDir;
-use wt_store::{ContentId, DiskStore, Error};
+use wt_store::{ContentId, DiskStore, Error, stream_hash_file};
 
 fn temp_root() -> TempDir {
     TempDir::new().expect("temp dir")
@@ -1111,4 +1111,112 @@ fn save_without_changes_is_a_noop_not_a_rewrite() {
         .modified()
         .expect("mtime");
     assert_eq!(before, after, "clean save must not rewrite the TSV");
+}
+
+#[test]
+fn stream_hash_file_matches_for_bytes_across_sizes() {
+    let dir = TempDir::new().expect("tempdir");
+
+    let empty_path = dir.path().join("empty.txt");
+    fs::write(&empty_path, b"").expect("write empty");
+    assert_eq!(
+        stream_hash_file(&empty_path).expect("hash empty"),
+        ContentId::for_bytes(b"")
+    );
+
+    let small_path = dir.path().join("small.txt");
+    let small_data = b"hello streaming ingest world\n";
+    fs::write(&small_path, small_data).expect("write small");
+    assert_eq!(
+        stream_hash_file(&small_path).expect("hash small"),
+        ContentId::for_bytes(small_data)
+    );
+
+    let large_path = dir.path().join("large.bin");
+    let large_data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+    fs::write(&large_path, &large_data).expect("write large");
+    assert_eq!(
+        stream_hash_file(&large_path).expect("hash large"),
+        ContentId::for_bytes(&large_data)
+    );
+}
+
+#[test]
+fn put_file_streams_into_store_and_deduplicates() {
+    let store_dir = temp_root();
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let src = TempDir::new().expect("tempdir");
+
+    let file_path = src.path().join("chunked.bin");
+    let data: Vec<u8> = (0..128 * 1024).map(|i| (i % 173) as u8).collect();
+    fs::write(&file_path, &data).expect("write data");
+
+    let id = store.put_file(&file_path).expect("put_file");
+    assert_eq!(id, ContentId::for_bytes(&data));
+    assert_eq!(store.get(&id).expect("get"), data);
+
+    let duplicate_path = src.path().join("duplicate.bin");
+    fs::write(&duplicate_path, &data).expect("write duplicate");
+    let id2 = store.put_file(&duplicate_path).expect("put duplicate");
+    assert_eq!(id2, id);
+}
+
+#[test]
+fn parallel_cold_ingest_produces_identical_blob_ids_and_manifest_bytes() {
+    let src = TempDir::new().expect("tempdir");
+    let heavy = src.path().join("heavy");
+    fs::create_dir_all(&heavy).expect("mkdir heavy");
+
+    for dir_idx in 0..4 {
+        let sub = heavy.join(format!("pkg_{dir_idx}"));
+        fs::create_dir_all(&sub).expect("mkdir sub");
+        for file_idx in 0..30 {
+            let file_path = sub.join(format!("file_{file_idx}.dat"));
+            if file_idx % 5 == 0 {
+                let large_bytes: Vec<u8> = (0..80 * 1024)
+                    .map(|b| ((dir_idx * 31 + file_idx * 7 + b) % 256) as u8)
+                    .collect();
+                fs::write(&file_path, &large_bytes).expect("write large");
+            } else if file_idx % 3 == 0 {
+                fs::write(&file_path, b"shared duplicate file content\n").expect("write duplicate");
+            } else {
+                let content = format!("package {dir_idx} item {file_idx}\n");
+                fs::write(&file_path, content.as_bytes()).expect("write");
+            }
+        }
+    }
+
+    let store1_dir = temp_root();
+    let mut store1 = DiskStore::open(store1_dir.path()).expect("open store 1");
+    let options = IngestOptions {
+        snapshots: true,
+        exclude: &|_| false,
+    };
+    let ingested1 = store1
+        .ingest_tree(src.path(), &heavy, &options)
+        .expect("ingest 1");
+    let manifest1 = ingested1
+        .to_snapshot_manifest("heavy", None)
+        .expect("manifest 1");
+
+    let store2_dir = temp_root();
+    let mut store2 = DiskStore::open(store2_dir.path()).expect("open store 2");
+    let ingested2 = store2
+        .ingest_tree(src.path(), &heavy, &options)
+        .expect("ingest 2");
+    let manifest2 = ingested2
+        .to_snapshot_manifest("heavy", None)
+        .expect("manifest 2");
+
+    assert_eq!(ingested1.files, ingested2.files);
+    assert_eq!(ingested1.file_sizes, ingested2.file_sizes);
+    assert_eq!(ingested1.dirs, ingested2.dirs);
+    assert_eq!(ingested1.dir_modes, ingested2.dir_modes);
+    assert_eq!(ingested1.modes, ingested2.modes);
+
+    let bytes1 = manifest1.serialize();
+    let bytes2 = manifest2.serialize();
+    assert_eq!(bytes1, bytes2, "manifest bytes must be identical for identical inputs");
+    assert_eq!(manifest1.entries.len(), manifest2.entries.len());
+    assert_eq!(manifest1.total_size, manifest2.total_size);
 }
