@@ -243,7 +243,11 @@ fn cleanup_pending(pending: &PendingCleanup) {
     }
 }
 
-pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<Diagnostic>)> {
+pub fn sweep(
+    age: Option<Duration>,
+    dry_run: bool,
+    cfg: &RunConfig,
+) -> Result<(SweepData, Vec<Diagnostic>)> {
     let mut store = open_store()?;
     let mode = store.gc_mode();
     let mut reclaimer = StoreReclaimer::new(&mut store);
@@ -255,6 +259,7 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
                 grace: max_age,
                 snapshot_cap: DEFAULT_SNAPSHOT_CAP,
                 max_snapshot_bytes: None,
+                dry_run,
             }
         }
         GcMode::MarkSweep | GcMode::MarkSweepNoRefs => {
@@ -268,6 +273,7 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
                 grace,
                 snapshot_cap,
                 max_snapshot_bytes,
+                dry_run,
             }
         }
     };
@@ -280,13 +286,17 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
             lease_bytes_reclaimed += dir_size(&item.worktree);
         }
     }
-    for item in &pending {
-        cleanup_pending(item);
+    if !dry_run {
+        for item in &pending {
+            cleanup_pending(item);
+        }
     }
     let mut summary = reclaimer.sweep_objects(&policy)?;
     summary.leases_examined = leases_examined;
     summary.leases_reclaimed = leases_reclaimed;
     summary.lease_bytes_reclaimed = lease_bytes_reclaimed;
+
+    let total_reclaimed_bytes = summary.reclaimed_blob_bytes + summary.lease_bytes_reclaimed;
 
     match summary.mode {
         GcMode::Legacy => {
@@ -294,7 +304,17 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
                 eprintln!("{line}");
             }
             if !cfg.json {
-                if summary.leases_reclaimed > 0 {
+                if dry_run {
+                    println!(
+                        "dry run: would reclaim {} unreferenced blob{} ({} bytes), {} dead lease{} ({} bytes)",
+                        summary.reclaimed_blobs,
+                        if summary.reclaimed_blobs == 1 { "" } else { "s" },
+                        summary.reclaimed_blob_bytes,
+                        summary.leases_reclaimed,
+                        if summary.leases_reclaimed == 1 { "" } else { "s" },
+                        summary.lease_bytes_reclaimed,
+                    );
+                } else if summary.leases_reclaimed > 0 {
                     println!(
                         "swept store: examined {}, reclaimed {} entr{}, reclaimed {} lease{} ({} bytes)",
                         summary.examined_blobs,
@@ -336,6 +356,10 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
                 leases_examined: Some(summary.leases_examined),
                 leases_reclaimed: Some(summary.leases_reclaimed),
                 lease_bytes_reclaimed: Some(summary.lease_bytes_reclaimed),
+                dry_run: if dry_run { Some(true) } else { None },
+                unreferenced_blobs: if dry_run { Some(summary.reclaimed_blobs as usize) } else { None },
+                dead_leases: if dry_run { Some(summary.leases_reclaimed) } else { None },
+                reclaimed_bytes: if dry_run { Some(total_reclaimed_bytes) } else { None },
             };
             Ok((data, Vec::new()))
         }
@@ -346,7 +370,17 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
                 );
             }
             if !cfg.json {
-                if summary.leases_reclaimed > 0 {
+                if dry_run {
+                    println!(
+                        "dry run: would reclaim {} unreferenced blob{} ({} bytes), {} dead lease{} ({} bytes)",
+                        summary.reclaimed_blobs,
+                        if summary.reclaimed_blobs == 1 { "" } else { "s" },
+                        summary.reclaimed_blob_bytes,
+                        summary.leases_reclaimed,
+                        if summary.leases_reclaimed == 1 { "" } else { "s" },
+                        summary.lease_bytes_reclaimed,
+                    );
+                } else if summary.leases_reclaimed > 0 {
                     println!(
                         "swept store (mark-and-sweep): examined {}, reclaimed {}, mirrors removed {}, snapshots removed {}, cap evicted {}, reclaimed {} lease{} ({} bytes)",
                         summary.examined_blobs,
@@ -384,6 +418,10 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
                 leases_examined: Some(summary.leases_examined),
                 leases_reclaimed: Some(summary.leases_reclaimed),
                 lease_bytes_reclaimed: Some(summary.lease_bytes_reclaimed),
+                dry_run: if dry_run { Some(true) } else { None },
+                unreferenced_blobs: if dry_run { Some(summary.reclaimed_blobs as usize) } else { None },
+                dead_leases: if dry_run { Some(summary.leases_reclaimed) } else { None },
+                reclaimed_bytes: if dry_run { Some(total_reclaimed_bytes) } else { None },
             };
             Ok((data, Vec::new()))
         }

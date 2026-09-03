@@ -22,7 +22,7 @@ pub mod bulkwalk;
 pub mod hydrate;
 pub mod lockfile;
 pub mod mirror;
-pub use disk::{DiskStore, FsCapabilities, probe_fs};
+pub use disk::{DiskStore, FsCapabilities, StoreDiskUsage, probe_fs};
 pub use fsutil::FlockGuard;
 pub use gc::{
     GcMode, MarkReport, MarkSwept, PendingCleanup, RetirementReceipt, StoreReclaimer, SweepPolicy,

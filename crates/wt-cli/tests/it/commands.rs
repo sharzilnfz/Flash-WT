@@ -7,7 +7,9 @@ use std::process::Command;
 use std::time::SystemTime;
 
 use crate::common::{Fixture, git, git_out, list_files};
-use wt_store::{ContentId, DiskStore, PublishOptions, WorktreeLease, lease_path};
+use wt_store::{
+    ContentId, DiskStore, PublishOptions, WorktreeLease, lease_path, publish_lease,
+};
 
 const HEAVY_FILES: usize = 200;
 
@@ -1283,3 +1285,126 @@ fn help_lists_the_completions_subcommand() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("completions"));
 }
+
+#[test]
+fn doctor_human_output_and_json_envelope() {
+    let fx = Fixture::heavy_repo(10);
+    let out = fx.wt(&["doctor"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Resolved Store:"));
+    assert!(text.contains("Environment Variables:"));
+    assert!(text.contains("Filesystem Capabilities:"));
+    assert!(text.contains("Store Disk Usage:"));
+
+    let json_out = fx.wt(&["--json", "doctor"]);
+    assert!(json_out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&json_out.stdout).expect("parse doctor json");
+    assert_eq!(parsed["status"], "ok");
+    assert_eq!(parsed["command"], "doctor");
+    assert_eq!(
+        parsed["data"]["store_path"],
+        fx.store_path().display().to_string()
+    );
+    assert!(parsed["data"]["fs_capabilities"]["apfs_clonefile"].is_boolean());
+    assert!(parsed["data"]["store_disk_usage"]["total_bytes"].is_number());
+}
+
+#[test]
+fn store_du_human_output_and_json() {
+    let fx = Fixture::heavy_repo(20);
+    let create = fx.wt(&["create", "feat-du"]);
+    assert!(create.status.success());
+
+    let du_out = fx.wt(&["store", "du"]);
+    assert!(du_out.status.success());
+    let text = String::from_utf8_lossy(&du_out.stdout);
+    assert!(text.contains("Store disk usage for"));
+    assert!(text.contains("objects:"));
+    assert!(text.contains("snapshots:"));
+    assert!(text.contains("mirrors:"));
+    assert!(text.contains("refs:"));
+    assert!(text.contains("caches:"));
+    assert!(text.contains("total:"));
+
+    let du_alias = fx.wt(&["store", "disk-usage"]);
+    assert!(du_alias.status.success());
+
+    let json_out = fx.wt(&["--json", "store", "du"]);
+    assert!(json_out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&json_out.stdout).expect("parse store du json");
+    assert_eq!(parsed["status"], "ok");
+    assert_eq!(parsed["command"], "store du");
+    assert!(parsed["data"]["total_bytes"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn sweep_dry_run_reports_without_deleting() {
+    let fx = Fixture::init();
+    let store_path = fx.store_path();
+    let mut store = DiskStore::open(&store_path).expect("open store");
+
+    // 1. Create an unreferenced blob
+    let cid = store
+        .put(b"test unreferenced content for dry run")
+        .expect("put blob");
+    let hex = cid.to_string();
+    let blob_path = store_path.join("objects").join(&hex[..2]).join(&hex[2..]);
+    assert!(blob_path.exists());
+
+    // 2. Create a dead lease
+    let lease_id = "scratch-dryrun";
+    let dead_worktree = fx.repo.parent().unwrap().join("dead-wt");
+    let dead_gitdir = fx.repo.join(".git").join("worktrees").join("dead-wt");
+    let dead_lease = WorktreeLease::new(
+        lease_id,
+        dead_worktree,
+        dead_gitdir,
+        999_999_999,
+        0,
+        1900000000,
+    );
+    let lease_p = publish_lease(&store_path, &dead_lease).expect("publish lease");
+    assert!(lease_p.exists());
+
+    // 3. Run dry run
+    let dry = fx.wt(&["sweep", "--dry-run", "--age", "0s"]);
+    assert!(dry.status.success());
+    let dry_text = String::from_utf8_lossy(&dry.stdout);
+    assert!(dry_text.contains("dry run: would reclaim"));
+    assert!(dry_text.contains("1 unreferenced blob"));
+    assert!(dry_text.contains("1 dead lease"));
+
+    // Verify neither the blob nor the lease was deleted
+    assert!(blob_path.exists(), "dry run must not delete unreferenced blob");
+    assert!(lease_p.exists(), "dry run must not delete dead lease");
+
+    // 4. Run dry run with --json
+    let dry_json = fx.wt(&["--json", "sweep", "--dry-run", "--age", "0s"]);
+    assert!(dry_json.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&dry_json.stdout).expect("parse sweep dry-run json");
+    assert_eq!(parsed["status"], "ok");
+    assert_eq!(parsed["command"], "sweep");
+    assert_eq!(parsed["data"]["dry_run"], true);
+    assert_eq!(parsed["data"]["unreferenced_blobs"], 1);
+    assert_eq!(parsed["data"]["dead_leases"], 1);
+    assert!(parsed["data"]["reclaimed_bytes"].as_u64().unwrap() > 0);
+
+    // Verify still not deleted
+    assert!(blob_path.exists());
+    assert!(lease_p.exists());
+
+    // 5. Run live sweep
+    let live = fx.wt(&["sweep", "--age", "0s"]);
+    assert!(live.status.success());
+    let live_text = String::from_utf8_lossy(&live.stdout);
+    assert!(live_text.contains("swept store"));
+
+    // Now verified deleted
+    assert!(!blob_path.exists(), "live sweep must delete unreferenced blob");
+    assert!(!lease_p.exists(), "live sweep must delete dead lease");
+}
+

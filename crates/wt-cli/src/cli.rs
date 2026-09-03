@@ -140,6 +140,9 @@ snapshot hits entirely and rebuilds from freshly hashed blobs."
         /// WT_GC_GRACE (default 15m) in mark-sweep mode.
         #[arg(long, value_parser = parse_age_value)]
         age: Option<Duration>,
+        /// Perform mark-and-sweep analysis without deleting files.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Re-hash every blob in the store against its content address
     /// and repair corruption. Closes the documented trust-model gap:
@@ -157,6 +160,8 @@ snapshot hits entirely and rebuilds from freshly hashed blobs."
         #[command(subcommand)]
         action: StoreAction,
     },
+    /// Inspect environment variables, store configuration, filesystem capabilities, and disk usage.
+    Doctor,
     /// Create an ephemeral scratch worktree with lease persistence.
     /// Optionally execute a command inside the sandbox and clean up on exit.
     #[command(alias = "isolate")]
@@ -206,6 +211,7 @@ impl WtCommand {
             WtCommand::Sweep { .. } => "sweep",
             WtCommand::Scrub { .. } => "scrub",
             WtCommand::Store { .. } => "store",
+            WtCommand::Doctor => "doctor",
             WtCommand::Scratch { .. } => "scratch",
             WtCommand::List => "list",
             WtCommand::Demo => "demo",
@@ -216,6 +222,9 @@ impl WtCommand {
 
 #[derive(Subcommand)]
 pub enum StoreAction {
+    /// Print breakdown of disk usage in the store.
+    #[command(name = "du", alias = "disk-usage")]
+    Du,
     /// Migrate the store's garbage-collection scheme (one-way; see
     /// ADR-0004). Until activated, sweep stays refcount-driven and
     /// every sweep audits mirrors against refs for parity.

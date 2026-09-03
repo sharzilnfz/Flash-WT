@@ -16,7 +16,7 @@ use crate::workspace;
 
 /// Where the per-machine store lives. `$WT_STORE` wins (tests use it
 /// for isolation); otherwise XDG cache conventions.
-fn store_dir() -> Result<PathBuf> {
+pub fn store_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("WT_STORE") {
         return Ok(PathBuf::from(dir));
     }

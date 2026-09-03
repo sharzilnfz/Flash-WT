@@ -53,7 +53,7 @@ pub use materialize::{BatchItem, BatchReceipt, Materializer, PlacementOutcome, S
 #[cfg(target_os = "linux")]
 pub use reflink::{ReflinkBackend, reflink_file};
 pub use selection::{SourcePolicy, candidates, select_backend};
-pub use sys::buffered_copy_file;
+pub use sys::{FsCapabilities, buffered_copy_file, probe_capabilities};
 
 use std::io;
 use std::path::Path;
