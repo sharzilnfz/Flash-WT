@@ -1,18 +1,21 @@
 # Sweep the store
 
 `flashwt sweep` deletes store entries no live worktree references and older than
-`--age`, reclaiming disk. It also reclaims expired scratch leases.
+`--age`, reclaiming disk. It also reclaims expired, dead, and orphaned scratch leases.
 
 ## Sub-features
 
 - `sweep-unreferenced` collects unreferenced blobs past the age floor.
 - `sweep-protected` keeps entries any live worktree references.
-- `sweep-leases` reclaims expired scratch leases.
+- `sweep-leases` reclaims expired, dead-process, or orphaned scratch leases.
+- `sweep-dry-run` previews reclaimable blobs and leases without modifying disk.
 - `sweep-mark-sweep` collects unreferenced blobs and snapshots using mirror marks.
+
 ## How to get to it (user POV)
 
-- Run `flashwt sweep` from any repo pointed at the store (the store is global).
+- Run `flashwt sweep` from any repo pointed at the store.
 - Tune retention with `flashwt sweep --age 0s|90s|10m|1h|7d`.
+- Preview reclamation without deleting objects via `flashwt sweep --dry-run`.
 - An explicit `--age` overrides default floors (7d in legacy mode, 15m in mark-sweep mode).
 
 ## Driving it with the shell fixture
@@ -20,30 +23,32 @@
 Preconditions:
 
 - Fixture loaded, cwd `$FLASHWT_ORIGIN`.
-- Known store contents: create one worktree (`demo`), remove it, and keep a
-  second (`demo2`) alive. The removed worktree exclusive blobs are now
-  unreferenced.
+- Known store contents: create one worktree (`demo`) with an exclusive unique file, create a second (`demo2`), and remove `demo`. The exclusive blobs from `demo` are now unreferenced.
 
 ```sh
 flashwt --json create demo  --dir "$FLASHWT_FIXTURE/demo"
+echo "exclusive-payload" > "$FLASHWT_ORIGIN/heavy/pkg00/nested/exclusive.txt"
+flashwt --json hydrate "$FLASHWT_FIXTURE/demo"
 flashwt --json create demo2 --dir "$FLASHWT_FIXTURE/demo2"
 flashwt --json remove demo  --dir "$FLASHWT_FIXTURE/demo"
 ```
 
-- **Sweep with age floor.** `flashwt --json sweep --age 0s`. Envelope `status` is
-  `ok`; `data.mode` is `legacy`; `data.examined` counts store entries;
+- **Dry-run preview.** `flashwt --json sweep --age 0s --dry-run`. Envelope `status` is
+  `ok`; `data.dry_run` is `true`; `data.unreferenced_blobs` is greater than 0;
+  `data.reclaimed` is `0`.
+- **Live sweep with age floor.** `flashwt --json sweep --age 0s`. Envelope `status` is
+  `ok`; `data.mode` is present; `data.examined` counts store entries;
   `data.reclaimed` reports entries deleted; `data.leases_examined` counts evaluated leases;
-  `data.leases_reclaimed` reports expired scratch leases;
-  `data.lease_bytes_reclaimed` reports disk space freed from leases.
+  `data.leases_reclaimed` reports reclaimed scratch leases.
 - **Mark-sweep mode.** In mark-sweep mode (`flashwt --json store migrate --activate-mark-sweep`),
   the envelope also reports `data.mirrors_removed`, `data.snapshot_dirs_removed`,
   `data.snapshot_cap_evicted`, and `data.deferred_by_grace`.
 - **Verify protection.** `demo2` still hydrates fine after sweep:
   `cat "$FLASHWT_FIXTURE/demo2/heavy/pkg00/nested/file-0.txt"` matches fixture
   content. Shared blobs referenced by the live worktree are never touched.
-- **Verify reclamation.** Blobs unreferenced after the remove are gone from
+- **Verify reclamation.** Exclusive blobs unreferenced after the remove are gone from
   `$FLASHWT_STORE/objects` (compare before/after `find` listings).
-- **Proof.** Save the envelope plus before/after store listings to
+- **Proof.** Save dry-run and live envelopes plus before/after store listings to
   `artifacts/verify-flashwt/<run-id>/`.
 
 ## Gotchas

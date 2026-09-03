@@ -7,7 +7,7 @@ the recipe.
 ## Baseline preconditions
 
 - Binary at `$FLASHWT_BIN` (release build, `flashwt --version` answers).
-- Fixture loaded with `eval "$(helpers/mkfixture.sh "$Flash-WT")"`.
+- Fixture loaded with `eval "$(helpers/mkfixture.sh "$FLASHWT_BIN")"`.
   This sets `FLASHWT_BIN`, `FLASHWT_FIXTURE`, `FLASHWT_ORIGIN`, and `FLASHWT_STORE`, defines `flashwt()`, and yields cd control.
 - `FLASHWT_STORE` exported and pointing at the fixture store on every invocation.
 - Working directory for all `flashwt` calls is `$FLASHWT_ORIGIN` (or the worktree).
@@ -21,7 +21,7 @@ the recipe.
 - One fixture per run. Recreate with `mkfixture.sh` when dirty; never repair.
 - Sweep with `--age 0s` in proofs; the default grace is 15m and would make
   assertions time-dependent.
-- `FLASHWT_SNAPSHOTS` / `FLASHWT_SNAPSHOTS_V2` are macOS/APFS-only opt-ins. On Linux,
+- `FLASHWT_SNAPSHOTS` and `FLASHWT_SNAPSHOTS_V2` are macOS APFS opt-ins. On Linux,
   do not write proofs that depend on snapshot hits.
 
 ## Proof and skip reporting
@@ -67,3 +67,5 @@ handles, required state, commands, and observable proof.
 - [Shell completions](./completions.md) covers tab-completion generation for bash, zsh, fish, elvish, and powershell.
 - [Flash snapshots & incremental rebuilds](./flash-snapshots.md) covers APFS whole-directory snapshot caching (v1) and diff-based incremental rebuilds (v2).
 - [Storage deduplication & CoW isolation](./storage-dedup.md) covers APFS block sharing, volume storage accounting, and break-on-write mutation isolation.
+- [System diagnostics](./doctor.md) covers environment checks, filesystem capabilities, and store byte consumption.
+- [Ephemeral lease management](./lease.md) covers inspecting active and expired sandbox leases.
