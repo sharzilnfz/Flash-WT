@@ -1,9 +1,11 @@
-//! Ingest validation cache (ticket 02), kept beside the store.
+//! Ingest validation cache (ticket 02, ticket 06), kept beside the store.
 //!
 //! One file, `<store root>/ingest-cache.tsv`, records for every path
-//! the last ingest saw its size, mtime, and content id. The next
-//! ingest skips reading and hashing any file whose size AND mtime are
-//! unchanged, reusing the recorded id directly.
+//! the last ingest saw its size, mtime, inode, ctime, and content id.
+//! The next ingest skips reading and hashing any file whose size,
+//! mtime, inode, and ctime are unchanged, reusing the recorded id directly.
+//! If mtime is near now (within 2 seconds), the entry is rehashed to
+//! prevent stale alias hits from rapid writes.
 //!
 //! The cache sits beside `objects/` and `refs/` — never inside the
 //! blob layout — so the store format stays untouched and stores that
@@ -13,10 +15,11 @@
 //! hash through `Store::get`.
 //!
 //! Format: one entry per line,
-//! `<repo-relative path>\t<size>\t<secs>\t<nanos>\t<64 hex digits>`,
-//! matching the tab-separated ledger style used elsewhere. Unparseable
-//! lines are dropped rather than trusted; saving rewrites the whole
-//! file through temp-file-plus-rename so a crash mid-write leaves
+//! `<repo-relative path>\t<size>\t<msecs>\t<mnanos>\t<inode>\t<csecs>\t<cnanos>\t<64 hex digits>`,
+//! matching the tab-separated ledger style used elsewhere. Older 5-field
+//! lines without inode and ctime are supported for backward compatibility.
+//! Unparseable lines are dropped rather than trusted; saving rewrites
+//! the whole file through temp-file-plus-rename so a crash mid-write leaves
 //! either the previous cache or the complete new one, never a mixture.
 //!
 //! Durability status: rebuildable and best-effort by design (losing it
@@ -41,11 +44,15 @@ pub struct Entry {
     pub size: u64,
     /// Last-modified time at last ingest.
     pub mtime: SystemTime,
+    /// Inode number at last ingest.
+    pub inode: u64,
+    /// Inode change time at last ingest.
+    pub ctime: SystemTime,
     /// Content id the bytes hashed to at last ingest.
     pub id: ContentId,
 }
 
-/// Ingest-side stat cache: path → (size, mtime, content id).
+/// Ingest-side stat cache: path → (size, mtime, inode, ctime, content id).
 pub struct ValidationCache {
     /// Store root the cache file lives in.
     root: PathBuf,
@@ -75,12 +82,50 @@ impl ValidationCache {
         }
     }
 
-    /// The stored content id for `rel`, but only if both the recorded
-    /// size and the recorded mtime match what the caller just stat'd.
+    /// The stored content id for `rel`, but only if the recorded size,
+    /// mtime, inode, and ctime match what the caller just stat'd, and
+    /// mtime is not within 2 seconds of the current clock tick.
     /// Anything else is a miss and must go through read-and-hash.
-    pub fn lookup(&self, rel: &str, size: u64, mtime: SystemTime) -> Option<ContentId> {
+    pub fn lookup(
+        &self,
+        rel: &str,
+        size: u64,
+        mtime: SystemTime,
+        inode: u64,
+        ctime: SystemTime,
+    ) -> Option<ContentId> {
+        self.lookup_at(rel, size, mtime, inode, ctime, SystemTime::now())
+    }
+
+    /// Explicit-time variant of `lookup` used for deterministic testing
+    /// of near-now rehashing boundaries.
+    pub fn lookup_at(
+        &self,
+        rel: &str,
+        size: u64,
+        mtime: SystemTime,
+        inode: u64,
+        ctime: SystemTime,
+        now: SystemTime,
+    ) -> Option<ContentId> {
         let entry = self.entries.get(rel)?;
-        (entry.size == size && entry.mtime == mtime).then_some(entry.id)
+        if entry.size != size || entry.mtime != mtime {
+            return None;
+        }
+        if entry.inode != 0 && entry.inode != inode {
+            return None;
+        }
+        if entry.ctime != UNIX_EPOCH && entry.ctime != ctime {
+            return None;
+        }
+        let is_near_now = match now.duration_since(mtime) {
+            Ok(dur) => dur < Duration::from_secs(2),
+            Err(e) => e.duration() < Duration::from_secs(2),
+        };
+        if is_near_now {
+            return None;
+        }
+        Some(entry.id)
     }
 
     /// Record what this ingest learned about one file.
@@ -113,16 +158,23 @@ impl ValidationCache {
         }
         let mut tmp = tempfile::NamedTempFile::new_in(&self.root)?;
         for (rel, entry) in &self.entries {
-            let since = entry
+            let mtime_since = entry
                 .mtime
                 .duration_since(UNIX_EPOCH)
                 .map_err(|e| io::Error::other(format!("uncacheable mtime: {e}")))?;
+            let ctime_since = entry
+                .ctime
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| io::Error::other(format!("uncacheable ctime: {e}")))?;
             writeln!(
                 tmp,
-                "{rel}\t{}\t{}\t{}\t{}",
+                "{rel}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 entry.size,
-                since.as_secs(),
-                since.subsec_nanos(),
+                mtime_since.as_secs(),
+                mtime_since.subsec_nanos(),
+                entry.inode,
+                ctime_since.as_secs(),
+                ctime_since.subsec_nanos(),
                 entry.id
             )?;
         }
@@ -133,37 +185,145 @@ impl ValidationCache {
 }
 
 /// Parse cache text, dropping any line that does not parse cleanly.
-/// Corruption shrinks the cache, never misdirects it.
+/// Older 5-column formats without inode and ctime are supported for
+/// backward compatibility. Corruption shrinks the cache, never misdirects it.
 fn parse(text: &str) -> BTreeMap<String, Entry> {
     let mut out = BTreeMap::new();
     for line in text.lines() {
-        let mut parts = line.splitn(6, '\t');
-        let (Some(rel), Some(size), Some(secs), Some(nanos), Some(hex), None) = (
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-        ) else {
-            continue;
-        };
-        let (Ok(size), Ok(secs), Ok(nanos)) = (
-            size.parse::<u64>(),
-            secs.parse::<u64>(),
-            nanos.parse::<u32>(),
-        ) else {
-            continue;
-        };
-        let Some(id) = ContentId::from_hex(hex) else {
-            continue;
-        };
-        // Durations beyond the platform range cannot round-trip; skip
-        // rather than panic on hostile input.
-        let Some(mtime) = UNIX_EPOCH.checked_add(Duration::new(secs, nanos)) else {
-            continue;
-        };
-        out.insert(rel.to_string(), Entry { size, mtime, id });
+        let parts: Vec<&str> = line.split('\t').collect();
+        match parts.as_slice() {
+            [rel, size, msecs, mnanos, inode, csecs, cnanos, hex] => {
+                let (Ok(size), Ok(msecs), Ok(mnanos), Ok(inode), Ok(csecs), Ok(cnanos)) = (
+                    size.parse::<u64>(),
+                    msecs.parse::<u64>(),
+                    mnanos.parse::<u32>(),
+                    inode.parse::<u64>(),
+                    csecs.parse::<u64>(),
+                    cnanos.parse::<u32>(),
+                ) else {
+                    continue;
+                };
+                let Some(id) = ContentId::from_hex(hex) else {
+                    continue;
+                };
+                let Some(mtime) = UNIX_EPOCH.checked_add(Duration::new(msecs, mnanos)) else {
+                    continue;
+                };
+                let Some(ctime) = UNIX_EPOCH.checked_add(Duration::new(csecs, cnanos)) else {
+                    continue;
+                };
+                out.insert(
+                    rel.to_string(),
+                    Entry {
+                        size,
+                        mtime,
+                        inode,
+                        ctime,
+                        id,
+                    },
+                );
+            }
+            [rel, size, msecs, mnanos, hex] => {
+                let (Ok(size), Ok(msecs), Ok(mnanos)) = (
+                    size.parse::<u64>(),
+                    msecs.parse::<u64>(),
+                    mnanos.parse::<u32>(),
+                ) else {
+                    continue;
+                };
+                let Some(id) = ContentId::from_hex(hex) else {
+                    continue;
+                };
+                let Some(mtime) = UNIX_EPOCH.checked_add(Duration::new(msecs, mnanos)) else {
+                    continue;
+                };
+                out.insert(
+                    rel.to_string(),
+                    Entry {
+                        size,
+                        mtime,
+                        inode: 0,
+                        ctime: UNIX_EPOCH,
+                        id,
+                    },
+                );
+            }
+            _ => continue,
+        }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_handles_both_current_and_legacy_formats() {
+        let text = "current.txt\t100\t1700000000\t50\t123456\t1700000001\t60\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
+                    legacy.txt\t200\t1700000000\t0\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
+                    corrupt\tnot\tenough\ttabs\n";
+        let parsed = parse(text);
+        assert_eq!(parsed.len(), 2);
+
+        let cur = &parsed["current.txt"];
+        assert_eq!(cur.size, 100);
+        assert_eq!(cur.inode, 123456);
+        assert_eq!(cur.ctime, UNIX_EPOCH + Duration::new(1700000001, 60));
+
+        let leg = &parsed["legacy.txt"];
+        assert_eq!(leg.size, 200);
+        assert_eq!(leg.inode, 0);
+        assert_eq!(leg.ctime, UNIX_EPOCH);
+    }
+
+    #[test]
+    fn lookup_at_near_now_rehashes() {
+        let mut cache = ValidationCache {
+            root: PathBuf::new(),
+            path: PathBuf::new(),
+            entries: BTreeMap::new(),
+            dirty: false,
+        };
+        let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let ctime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let id = ContentId([1u8; 32]);
+        cache.record(
+            "file.txt".into(),
+            Entry {
+                size: 50,
+                mtime,
+                inode: 999,
+                ctime,
+                id,
+            },
+        );
+
+        // Case 1: now is 1 second after mtime (near now -> None / rehash).
+        let now_near = mtime + Duration::from_secs(1);
+        assert_eq!(
+            cache.lookup_at("file.txt", 50, mtime, 999, ctime, now_near),
+            None
+        );
+
+        // Case 2: now is 10 seconds after mtime (not near now -> hit).
+        let now_far = mtime + Duration::from_secs(10);
+        assert_eq!(
+            cache.lookup_at("file.txt", 50, mtime, 999, ctime, now_far),
+            Some(id)
+        );
+
+        // Case 3: inode moved -> miss.
+        assert_eq!(
+            cache.lookup_at("file.txt", 50, mtime, 1000, ctime, now_far),
+            None
+        );
+
+        // Case 4: ctime moved -> miss.
+        let ctime_moved = ctime + Duration::from_secs(1);
+        assert_eq!(
+            cache.lookup_at("file.txt", 50, mtime, 999, ctime_moved, now_far),
+            None
+        );
+    }
 }

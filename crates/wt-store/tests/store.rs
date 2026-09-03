@@ -281,16 +281,40 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use wt_store::{Entry as CacheEntry, ValidationCache};
 
+fn set_file_mtime(path: &std::path::Path, time: SystemTime) {
+    use std::os::unix::ffi::OsStrExt;
+    let dur = time.duration_since(UNIX_EPOCH).expect("time since epoch");
+    let ts = libc::timespec {
+        tv_sec: dur.as_secs() as _,
+        tv_nsec: dur.subsec_nanos() as _,
+    };
+    let times = [ts, ts];
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("cstring");
+    let ret = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    assert_eq!(ret, 0, "utimensat failed");
+}
+
 /// Stat a file and build the cache entry an ingest would record.
-fn entry_for(path: &std::path::Path) -> (u64, SystemTime) {
+fn entry_for(path: &std::path::Path) -> (u64, SystemTime, u64, SystemTime) {
+    use std::os::unix::fs::MetadataExt;
     let meta = fs::metadata(path).expect("stat source file");
-    (meta.len(), meta.modified().expect("mtime"))
+    let ctime_secs = meta.ctime().max(0) as u64;
+    let ctime_nanos = meta.ctime_nsec().clamp(0, 999_999_999) as u32;
+    let ctime = UNIX_EPOCH + Duration::new(ctime_secs, ctime_nanos);
+    (
+        meta.len(),
+        meta.modified().expect("mtime"),
+        meta.ino(),
+        ctime,
+    )
 }
 
 fn write_source(root: &TempDir, text: &str) -> std::path::PathBuf {
     let path = root.path().join("heavy/file.txt");
     fs::create_dir_all(path.parent().unwrap()).expect("mkdir heavy");
     fs::write(&path, text).expect("write source");
+    // Backdate mtime so it is not near now, simulating normal repo files on disk.
+    set_file_mtime(&path, UNIX_EPOCH + Duration::from_secs(1_700_000_000));
     path
 }
 
@@ -301,8 +325,17 @@ fn record_for(
 ) -> ContentId {
     let bytes = fs::read(path).expect("read source");
     let id = store.put(&bytes).expect("put");
-    let (size, mtime) = entry_for(path);
-    cache.record("heavy/file.txt".to_string(), CacheEntry { size, mtime, id });
+    let (size, mtime, inode, ctime) = entry_for(path);
+    cache.record(
+        "heavy/file.txt".to_string(),
+        CacheEntry {
+            size,
+            mtime,
+            inode,
+            ctime,
+            id,
+        },
+    );
     id
 }
 
@@ -318,13 +351,13 @@ fn cache_hits_on_unchanged_file() {
     let id = record_for(&mut cache, &mut store, &path);
     cache.save().expect("save");
 
-    // Next run, same size and mtime: hit, no read needed.
+    // Next run, same size, mtime, inode, and ctime: hit, no read needed.
     let reopened = ValidationCache::open(store_dir.path());
-    let (size, mtime) = entry_for(&path);
+    let (size, mtime, inode, ctime) = entry_for(&path);
     assert_eq!(
-        reopened.lookup("heavy/file.txt", size, mtime),
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
         Some(id),
-        "unchanged size+mtime must be a hit"
+        "unchanged size+mtime+inode+ctime must be a hit"
     );
 }
 
@@ -340,14 +373,17 @@ fn cache_misses_on_mtime_change_with_same_size() {
     cache.save().expect("save");
 
     let reopened = ValidationCache::open(store_dir.path());
-    let (size, mtime) = entry_for(&path);
+    let (size, mtime, inode, ctime) = entry_for(&path);
     let touched = mtime + Duration::from_secs(1);
     assert_eq!(
-        reopened.lookup("heavy/file.txt", size, touched),
+        reopened.lookup("heavy/file.txt", size, touched, inode, ctime),
         None,
         "a bumped mtime must be re-hashed even at the same size"
     );
-    assert_eq!(reopened.lookup("heavy/file.txt", size, mtime), Some(id));
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
+        Some(id)
+    );
 }
 
 #[test]
@@ -362,13 +398,16 @@ fn cache_misses_on_size_change_with_same_mtime() {
     cache.save().expect("save");
 
     let reopened = ValidationCache::open(store_dir.path());
-    let (size, mtime) = entry_for(&path);
+    let (size, mtime, inode, ctime) = entry_for(&path);
     assert_eq!(
-        reopened.lookup("heavy/file.txt", size + 1, mtime),
+        reopened.lookup("heavy/file.txt", size + 1, mtime, inode, ctime),
         None,
         "a changed size must be re-hashed even at the same mtime"
     );
-    assert_eq!(reopened.lookup("heavy/file.txt", size, mtime), Some(id));
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
+        Some(id)
+    );
 }
 
 #[test]
@@ -384,10 +423,13 @@ fn cache_misses_after_content_change() {
 
     // Edit the content: both size and mtime move in practice.
     fs::write(&path, "after edit, longer\n").expect("edit source");
-    let (size, mtime) = entry_for(&path);
+    let (size, mtime, inode, ctime) = entry_for(&path);
 
     let reopened = ValidationCache::open(store_dir.path());
-    assert_eq!(reopened.lookup("heavy/file.txt", size, mtime), None);
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
+        None
+    );
     assert_ne!(store.put(b"after edit, longer\n").expect("put"), old_id);
 }
 
@@ -407,9 +449,12 @@ fn pre_existing_store_without_cache_opens_empty_and_populates() {
 
     // The next run finds it populated.
     let reopened = ValidationCache::open(dir.path());
-    let (size, mtime) = entry_for(&path);
+    let (size, mtime, inode, ctime) = entry_for(&path);
     assert_eq!(reopened.len(), 1);
-    assert_eq!(reopened.lookup("heavy/file.txt", size, mtime), Some(id));
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
+        Some(id)
+    );
 }
 
 #[test]
@@ -427,7 +472,13 @@ fn deleted_cache_degrades_to_empty_not_error() {
     let reopened = ValidationCache::open(dir.path());
     assert!(reopened.is_empty(), "deleted cache must fall back to cold");
     assert_eq!(
-        reopened.lookup("heavy/file.txt", 0, SystemTime::UNIX_EPOCH),
+        reopened.lookup(
+            "heavy/file.txt",
+            0,
+            SystemTime::UNIX_EPOCH,
+            0,
+            SystemTime::UNIX_EPOCH
+        ),
         None
     );
 }
@@ -460,6 +511,8 @@ fn save_is_atomic_enough_to_round_trip() {
         CacheEntry {
             size: 3,
             mtime: UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(42),
+            inode: 12345,
+            ctime: UNIX_EPOCH + Duration::from_secs(1_700_000_001),
             id: ContentId([7u8; 32]),
         },
     );
@@ -468,6 +521,8 @@ fn save_is_atomic_enough_to_round_trip() {
         CacheEntry {
             size: 9,
             mtime: UNIX_EPOCH + Duration::from_secs(1),
+            inode: 67890,
+            ctime: UNIX_EPOCH + Duration::from_secs(2),
             id: ContentId([8u8; 32]),
         },
     );
@@ -479,10 +534,12 @@ fn save_is_atomic_enough_to_round_trip() {
         reopened.lookup(
             "heavy/a.txt",
             3,
-            UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(42)
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(42),
+            12345,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_001),
         ),
         Some(ContentId([7u8; 32])),
-        "sub-second mtime precision must survive the round trip"
+        "sub-second mtime precision and inode/ctime must survive the round trip"
     );
 }
 
@@ -602,6 +659,74 @@ fn ingest_tree_rehashes_changed_content_and_feeds_the_cache() {
         cache.len() >= 2,
         "ingest must populate the validation cache"
     );
+}
+
+#[test]
+fn forced_mtime_collision_and_identical_size_rehashes_fresh_content() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let heavy = src.path().join("heavy");
+    fs::create_dir_all(&heavy).expect("mkdir");
+    let file = heavy.join("item.txt");
+    fs::write(&file, "initial content\n").expect("write initial");
+
+    let t0 = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    set_file_mtime(&file, t0);
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let first = store
+        .ingest_tree(src.path(), &heavy, &no_excludes())
+        .expect("first ingest");
+    let id1 = first.files["heavy/item.txt"];
+
+    // Overwrite in-place with different content of the exact same byte length (16 bytes).
+    fs::write(&file, "updated content\n").expect("write updated");
+    // Force mtime collision with the prior cached timestamp.
+    set_file_mtime(&file, t0);
+
+    // Ingest again: despite identical size and forced mtime collision,
+    // ctime (or inode) changed so it must not reuse id1.
+    let second = store
+        .ingest_tree(src.path(), &heavy, &no_excludes())
+        .expect("second ingest");
+    let id2 = second.files["heavy/item.txt"];
+    assert_ne!(
+        id1, id2,
+        "fresh content must be re-hashed despite mtime and size collision"
+    );
+    assert_eq!(
+        store.get(&id2).expect("get updated blob"),
+        b"updated content\n"
+    );
+}
+
+#[test]
+fn near_now_mtime_rehashes_even_with_identical_size_and_mtime() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let heavy = src.path().join("heavy");
+    fs::create_dir_all(&heavy).expect("mkdir");
+    let file = heavy.join("fast.txt");
+    fs::write(&file, "rapid write 1\n").expect("write 1");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let first = store
+        .ingest_tree(src.path(), &heavy, &no_excludes())
+        .expect("first ingest");
+    let id1 = first.files["heavy/fast.txt"];
+
+    // Immediate rewrite within the same time window (< 2s) with identical size (14 bytes).
+    fs::write(&file, "rapid write 2\n").expect("write 2");
+
+    let second = store
+        .ingest_tree(src.path(), &heavy, &no_excludes())
+        .expect("second ingest");
+    let id2 = second.files["heavy/fast.txt"];
+    assert_ne!(
+        id1, id2,
+        "near-now rewrite must rehash rather than serving stale blob"
+    );
+    assert_eq!(store.get(&id2).expect("get"), b"rapid write 2\n");
 }
 
 #[test]

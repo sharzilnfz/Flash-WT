@@ -27,7 +27,6 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-#[cfg(target_os = "macos")]
 use std::time::{Duration, UNIX_EPOCH};
 
 #[cfg(target_os = "macos")]
@@ -250,6 +249,8 @@ impl DiskStore {
                         continue;
                     }
                     let mtime = UNIX_EPOCH + Duration::new(entry.mtime_secs, entry.mtime_nanos);
+                    let ctime = UNIX_EPOCH + Duration::new(entry.ctime_secs, entry.ctime_nanos);
+                    let inode = entry.inode;
                     ingest_file(
                         self,
                         &mut cache,
@@ -258,6 +259,8 @@ impl DiskStore {
                         &path,
                         entry.size,
                         mtime,
+                        inode,
+                        ctime,
                         entry.mode,
                     )?;
                 }
@@ -336,8 +339,14 @@ fn ingest_tree_walk(
             let meta = fs::metadata(&path).map_err(|e| io_ctx("stat", &path, e))?;
             let size = meta.len();
             let mtime = meta.modified().map_err(|e| io_ctx("stat", &path, e))?;
+            let inode = meta.ino();
+            let ctime_secs = meta.ctime().max(0) as u64;
+            let ctime_nanos = meta.ctime_nsec().clamp(0, 999_999_999) as u32;
+            let ctime = UNIX_EPOCH + Duration::new(ctime_secs, ctime_nanos);
             let mode = meta.mode();
-            ingest_file(store, cache, ingested, rel, &path, size, mtime, mode)?;
+            ingest_file(
+                store, cache, ingested, rel, &path, size, mtime, inode, ctime, mode,
+            )?;
         }
     }
     Ok(())
@@ -352,22 +361,33 @@ fn ingest_file(
     path: &Path,
     size: u64,
     mtime: std::time::SystemTime,
+    inode: u64,
+    ctime: std::time::SystemTime,
     mode: u32,
 ) -> Result<()> {
     ingested.modes.insert(rel.clone(), mode & 0o7777);
-    let id = match cache.lookup(&rel, size, mtime) {
-        // Cache hit: same size and same mtime as last time.
+    let id = match cache.lookup(&rel, size, mtime, inode, ctime) {
+        // Cache hit: same size, mtime, inode, and ctime as last time.
         // Trust it only while the blob is actually still here.
         Some(id) if store.contains(&id) => id,
         _ => {
-            // Miss (or a swept blob): pay for read and hash.
+            // Miss (or near now rehash, or a swept blob): pay for read and hash.
             let bytes = fs::read(path).map_err(|e| io_ctx("read", path, e))?;
             let id = store.put(&bytes)?;
-            // An mtime before the epoch cannot round-trip
+            // An mtime or ctime before the epoch cannot round-trip
             // through the cache format; skip caching rather
             // than fail, so such a file just stays cold.
-            if mtime >= std::time::UNIX_EPOCH {
-                cache.record(rel.clone(), Entry { size, mtime, id });
+            if mtime >= std::time::UNIX_EPOCH && ctime >= std::time::UNIX_EPOCH {
+                cache.record(
+                    rel.clone(),
+                    Entry {
+                        size,
+                        mtime,
+                        inode,
+                        ctime,
+                        id,
+                    },
+                );
             }
             id
         }

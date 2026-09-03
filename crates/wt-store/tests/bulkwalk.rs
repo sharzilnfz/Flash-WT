@@ -70,6 +70,9 @@ struct RefEntry {
     size: u64,
     mtime_secs: u64,
     mtime_nanos: u32,
+    inode: u64,
+    ctime_secs: u64,
+    ctime_nanos: u32,
     mode: u32,
 }
 
@@ -92,6 +95,9 @@ fn legacy_walk(root: &Path) -> BTreeMap<String, RefEntry> {
                 Ok(d) => (d.as_secs(), d.subsec_nanos()),
                 Err(_) => (0, 0),
             };
+            let inode = meta.ino();
+            let ctime_secs = meta.ctime().max(0) as u64;
+            let ctime_nanos = meta.ctime_nsec().clamp(0, 999_999_999) as u32;
             out.insert(
                 rel.clone(),
                 RefEntry {
@@ -103,6 +109,9 @@ fn legacy_walk(root: &Path) -> BTreeMap<String, RefEntry> {
                     size: if ft.is_file() { meta.len() } else { 0 },
                     mtime_secs: secs,
                     mtime_nanos: nanos,
+                    inode,
+                    ctime_secs,
+                    ctime_nanos,
                     mode: meta.mode() & 0o7777,
                 },
             );
@@ -128,6 +137,9 @@ fn bulk_map(entries: Vec<bulkwalk::BulkEntry>) -> BTreeMap<String, RefEntry> {
                     size: if e.is_file { e.size } else { 0 },
                     mtime_secs: e.mtime_secs,
                     mtime_nanos: e.mtime_nanos,
+                    inode: e.inode,
+                    ctime_secs: e.ctime_secs,
+                    ctime_nanos: e.ctime_nanos,
                     mode: e.mode & 0o7777,
                 },
             )
