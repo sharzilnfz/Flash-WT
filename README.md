@@ -49,7 +49,7 @@ Measured via volume free-space probes (`df -k`) on macOS APFS across 40,000 file
 | 3 worktrees | 468.75 MB | ~120.76 MB | ~3.9x | 0 MB additional dirty blocks |
 | 5 worktrees | **781.25 MB** | **120.76 MB** | **4.37x** | 5 worktrees share identical disk blocks |
 
-When you edit, create, or delete files in one worktree, the operating system writes changes to new disk blocks for that worktree only. Other worktrees and the central store remain untouched.
+When you edit, create, or delete files in one worktree, the operating system writes changes to new disk blocks for that worktree only. Other worktrees and the central store remain untouched. `wt` runs no background sync daemons and no filesystem watchers. Explicit hydration (`wt hydrate` / `wt new`) is the sole mechanism for materializing and updating dependencies.
 
 ### Performance characteristics by workload scale
 
@@ -203,6 +203,7 @@ export WT_SNAPSHOTS_V2=0
 - **Incremental rebuilds**: A flat manifest diff engine identifies unchanged subtrees, cloning stable packages and relinking only changed files.
 - **Crash-safe garbage collection**: Mark-and-sweep GC uses store-local mirror files as roots. A default 15-minute grace period (`WT_GC_GRACE`) ensures concurrent builds and unexpected interruptions never delete live data.
 - **Integrity verification**: Blobs are verified on ingest and tracked via a verification ledger. `WT_VERIFY=1` forces full cryptographic re-hashing on every run.
+- **Explicit hydration only**: `wt` runs no background daemons, filesystem watchers, or automatic synchronization loops. Explicit CLI commands (`wt new`, `wt hydrate`) are the sole mechanism for populating and updating worktree files from the store.
 
 Read [docs/archive/product-handoff.md](docs/archive/product-handoff.md) and the [Architecture Decision Records](docs/adr/) for full implementation details.
 

@@ -1,6 +1,6 @@
 # 12 - Fix docs promise gap
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Problem
 
