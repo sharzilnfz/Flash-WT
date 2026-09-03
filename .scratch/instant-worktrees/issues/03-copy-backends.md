@@ -19,7 +19,7 @@ Hardlink mode ships disabled by default until ticket 07 makes it safe.
 
 ## Comments
 
-2026-08-23 (agent): Implemented in `crates/wt-copy`. `StubBackend` removed;
+2026-08-23 (agent): Implemented in `crates/flashwt-copy`. `StubBackend` removed;
 its DeepCopy slot is now a real portable fallback (`DeepCopyBackend`).
 
 - `clonefile.rs` (macOS): whole-directory `clonefile(2)`; `supports()`
@@ -39,7 +39,7 @@ Public API added: `ClonefileBackend` (macOS), `ReflinkBackend` (Linux),
 `HardlinkBackend`, `DeepCopyBackend`, `candidates()`, `select_backend()`.
 The frozen trait in `lib.rs` is untouched. Tests: unit tests per backend
 plus integration through the trait (`tests/backends.rs`, fixture in
-`tests/common/mod.rs`). Verified: `cargo test -p wt-copy` (14 pass),
+`tests/common/mod.rs`). Verified: `cargo test -p flashwt-copy` (14 pass),
 `cargo clippy --workspace --all-targets` clean, `cargo fmt --check` clean,
-and `cargo check -p wt-copy --target x86_64-unknown-linux-gnu` for the
+and `cargo check -p flashwt-copy --target x86_64-unknown-linux-gnu` for the
 reflink path.

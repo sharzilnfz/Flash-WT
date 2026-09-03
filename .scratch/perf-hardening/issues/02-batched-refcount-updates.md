@@ -3,7 +3,7 @@
 Status: ready-for-agent
 
 Legacy-mode reference claiming calls `DiskStore::add_ref` once per distinct
-blob (crates/wt-cli/src/hydrate.rs claim_references loop -> crates/wt-store/
+blob (crates/flashwt-cli/src/hydrate.rs claim_references loop -> crates/flashwt-store/
 src/disk.rs). Each call: open refs dir + flock + close, stat ref file, read,
 NamedTempFile write, rename. ~8-10 serialized syscalls per blob; 40k blobs ≈
 ~400k syscalls in the references stage. Removal does the same dance through
@@ -32,5 +32,5 @@ release_ref.
 
 Recon from the halted first attempt (no code was changed): touch points are
 `add_ref` / `release_ref` / `lock_refs` / `read_ref_count` / `write_ref_count`
-in crates/wt-store/src/disk.rs, plus both `claim_*_references` functions in
-crates/wt-cli/src/hydrate.rs and the removal path.
+in crates/flashwt-store/src/disk.rs, plus both `claim_*_references` functions in
+crates/flashwt-cli/src/hydrate.rs and the removal path.

@@ -4,7 +4,7 @@ Status: ready-for-agent
 
 ## Problem
 1. The CLI has no `SIGINT`/`SIGTERM` handlers. Pressing `Ctrl+C` terminates the process immediately, bypassing RAII drops and leaving orphaned scratch worktrees, git branches, and lease files on disk.
-2. `wt new` creates the Git branch and worktree before store ingestion and hydration. Any subsequent error exits immediately, leaving an unhydrated orphan worktree behind.
+2. `flashwt new` creates the Git branch and worktree before store ingestion and hydration. Any subsequent error exits immediately, leaving an unhydrated orphan worktree behind.
 
 ## Requirements
 1. Register `SIGINT`/`SIGTERM` signal handlers in `main.rs` that execute cleanup for active scratch workspaces and temporary resources before exiting.

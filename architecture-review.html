@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Architecture Review for wt (Instant Worktrees)</title>
+    <title>Architecture Review for flashFlash-WT (Instant Worktrees)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script type="module">
       import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
@@ -27,7 +27,7 @@
         <div class="flex flex-col sm:flex-row sm:items-baseline justify-between gap-4">
           <div>
             <div class="text-xs font-mono uppercase tracking-wider text-stone-500 mb-1">Architecture Review &middot; Deepening Opportunities</div>
-            <h1 class="text-3xl font-bold tracking-tight text-slate-900 font-serif">wt (Instant Worktrees)</h1>
+            <h1 class="text-3xl font-bold tracking-tight text-slate-900 font-serif">Flash-WT (Instant Worktrees)</h1>
           </div>
           <div class="text-xs font-mono text-stone-500">2026-09-03</div>
         </div>
@@ -68,10 +68,10 @@
           </div>
 
           <div class="text-xs font-mono text-stone-600 bg-stone-50 p-3 rounded-md border border-stone-200/80 space-y-1">
-            <div>crates/wt-cli/src/hydrate.rs</div>
-            <div>crates/wt-store/src/hydrate.rs</div>
-            <div>crates/wt-store/src/ingest.rs</div>
-            <div>crates/wt-store/src/snapshot/projection.rs</div>
+            <div>crates/flashwt-cli/src/hydrate.rs</div>
+            <div>crates/flashwt-store/src/hydrate.rs</div>
+            <div>crates/flashwt-store/src/ingest.rs</div>
+            <div>crates/flashwt-store/src/snapshot/projection.rs</div>
           </div>
 
           <!-- Side-by-Side Diagram -->
@@ -80,15 +80,15 @@
               <div class="text-xs font-mono uppercase tracking-wider text-red-700 font-bold mb-3">Before: Shallow CLI Choreographer</div>
               <pre class="mermaid">
                 flowchart TD
-                  subgraph CLI[wt-cli]
+                  subgraph CLI[flashwt-cli]
                     HE[HydrationEngine]
                   end
-                  subgraph Store[wt-store]
+                  subgraph Store[flashwt-store]
                     FL[find_lockfile]
                     TL[try_lockfile_hit]
                     IT[ingest_tree]
                     HY[DiskStore::hydrate]
-                    SH[wt-hydrated.tsv]
+                    SH[flashwt-hydrated.tsv]
                     MR[publish_mirror]
                   end
                   HE -->|inspects| FL
@@ -108,10 +108,10 @@
               <div class="text-xs font-mono uppercase tracking-wider text-emerald-800 font-bold mb-3">After: Deep Storage Hydration Module</div>
               <pre class="mermaid">
                 flowchart TD
-                  subgraph CLI[wt-cli]
+                  subgraph CLI[flashwt-cli]
                     HE[HydrationEngine]
                   end
-                  subgraph Store[wt-store: Deep Module]
+                  subgraph Store[flashwt-store: Deep Module]
                     DH[DiskStore::hydrate]
                     subgraph HiddenInternals[Encapsulated Implementation]
                       LP[Lockfile & Hit]
@@ -135,7 +135,7 @@
           <div class="space-y-3 pt-2">
             <div>
               <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Problem</div>
-              <p class="text-sm text-slate-700 mt-0.5">The hydration seam between <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">wt-cli</code> and <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">wt-store</code> is shallow, leaking lockfile heuristics, sidecar ledger writing, mirror publishing, and 19 unpacked parameters across crate borders.</p>
+              <p class="text-sm text-slate-700 mt-0.5">The hydration seam between <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">flashwt-cli</code> and <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">flashwt-store</code> is shallow, leaking lockfile heuristics, sidecar ledger writing, mirror publishing, and 19 unpacked parameters across crate borders.</p>
             </div>
             <div>
               <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Solution</div>
@@ -168,11 +168,11 @@
           </div>
 
           <div class="text-xs font-mono text-stone-600 bg-stone-50 p-3 rounded-md border border-stone-200/80 space-y-1">
-            <div>crates/wt-cli/src/workspace.rs</div>
-            <div>crates/wt-cli/src/gc.rs</div>
-            <div>crates/wt-store/src/gc.rs</div>
-            <div>crates/wt-cli/src/commands/clean.rs</div>
-            <div>crates/wt-cli/src/commands/scratch.rs</div>
+            <div>crates/flashwt-cli/src/workspace.rs</div>
+            <div>crates/flashwt-cli/src/gc.rs</div>
+            <div>crates/flashwt-store/src/gc.rs</div>
+            <div>crates/flashwt-cli/src/commands/clean.rs</div>
+            <div>crates/flashwt-cli/src/commands/scratch.rs</div>
           </div>
 
           <!-- Side-by-Side Diagram -->
@@ -181,12 +181,12 @@
               <div class="text-xs font-mono uppercase tracking-wider text-red-700 font-bold mb-3">Before: Circular Callback & Split Cleanup</div>
               <pre class="mermaid">
                 flowchart TD
-                  subgraph CLI[wt-cli]
+                  subgraph CLI[flashwt-cli]
                     CMD[clean / scratch / remove]
                     GWC[GitWorkspaceCleaner adapter]
                     WE[WorkspaceEngine]
                   end
-                  subgraph Store[wt-store]
+                  subgraph Store[flashwt-store]
                     SR[StoreReclaimer]
                     WC[[trait WorkspaceCleaner]]
                   end
@@ -206,11 +206,11 @@
               <div class="text-xs font-mono uppercase tracking-wider text-emerald-800 font-bold mb-3">After: Unidirectional Retirement Seam</div>
               <pre class="mermaid">
                 flowchart TD
-                  subgraph CLI[wt-cli]
+                  subgraph CLI[flashwt-cli]
                     CMD[clean / scratch / remove]
                     WE[WorkspaceEngine: Deep Module]
                   end
-                  subgraph Store[wt-store]
+                  subgraph Store[flashwt-store]
                     DS[DiskStore::retire_worktree_refs]
                   end
                   CMD -->|retires worktree| WE
@@ -227,7 +227,7 @@
           <div class="space-y-3 pt-2">
             <div>
               <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Problem</div>
-              <p class="text-sm text-slate-700 mt-0.5">The worktree retirement seam is inverted: <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">StoreReclaimer</code> deletes git worktrees via a hypothetical one-adapter trait (<code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">WorkspaceCleaner</code>) calling back into <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">wt-cli</code>, while four commands hand-roll divergent removal sequences.</p>
+              <p class="text-sm text-slate-700 mt-0.5">The worktree retirement seam is inverted: <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">StoreReclaimer</code> deletes git worktrees via a hypothetical one-adapter trait (<code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">WorkspaceCleaner</code>) calling back into <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">flashwt-cli</code>, while four commands hand-roll divergent removal sequences.</p>
             </div>
             <div>
               <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Solution</div>
@@ -260,9 +260,9 @@
           </div>
 
           <div class="text-xs font-mono text-stone-600 bg-stone-50 p-3 rounded-md border border-stone-200/80 space-y-1">
-            <div>crates/wt-copy/src/materialize.rs</div>
-            <div>crates/wt-copy/src/engine.rs</div>
-            <div>crates/wt-store/src/hydrate.rs</div>
+            <div>crates/flashwt-copy/src/materialize.rs</div>
+            <div>crates/flashwt-copy/src/engine.rs</div>
+            <div>crates/flashwt-store/src/hydrate.rs</div>
           </div>
 
           <!-- Side-by-Side Diagram (Cross-Section Pattern) -->
@@ -271,7 +271,7 @@
               <div class="text-xs font-mono uppercase tracking-wider text-red-700 font-bold mb-3">Before: Threading Leaks into Store</div>
               <div class="space-y-2 py-2">
                 <div class="border-l-4 border-slate-700 bg-white p-2.5 rounded shadow-sm text-xs">
-                  <div class="font-bold text-slate-800">wt-store::hydrate</div>
+                  <div class="font-bold text-slate-800">flashwt-store::hydrate</div>
                   <div class="text-stone-500 text-[11px] mt-0.5">Spawns 4&ndash;8 worker threads via thread::scope</div>
                 </div>
                 <div class="border-l-4 border-red-500 bg-white p-2.5 rounded shadow-sm text-xs">
@@ -279,7 +279,7 @@
                   <div class="text-stone-500 text-[11px] mt-0.5">AtomicUsize index, Mutex&lt;Error&gt;, atomic byte counters</div>
                 </div>
                 <div class="border-l-4 border-slate-400 bg-white p-2.5 rounded shadow-sm text-xs">
-                  <div class="font-bold text-slate-700">wt-copy::Materializer</div>
+                  <div class="font-bold text-slate-700">flashwt-copy::Materializer</div>
                   <div class="text-stone-500 text-[11px] mt-0.5">Shallow interface: materialize_file placed one by one</div>
                 </div>
               </div>
@@ -290,26 +290,26 @@
               <div class="text-xs font-mono uppercase tracking-wider text-emerald-800 font-bold mb-3">After: Deep Batch Materializer</div>
               <div class="space-y-2 py-2">
                 <div class="border-l-4 border-slate-700 bg-white p-2.5 rounded shadow-sm text-xs">
-                  <div class="font-bold text-slate-800">wt-store::hydrate</div>
+                  <div class="font-bold text-slate-800">flashwt-store::hydrate</div>
                   <div class="text-stone-500 text-[11px] mt-0.5">Passes file batch slice across the seam</div>
                 </div>
                 <div class="border-l-4 border-emerald-600 bg-slate-900 text-white p-4 rounded shadow-sm text-xs">
-                  <div class="font-bold text-emerald-400 uppercase tracking-wider text-[11px]">wt-copy::Materializer (Deep Module)</div>
+                  <div class="font-bold text-emerald-400 uppercase tracking-wider text-[11px]">flashwt-copy::Materializer (Deep Module)</div>
                   <div class="text-slate-300 text-[11px] mt-1">Encapsulates thread pool, worker loops, atomic task distribution, mode normalization, and outcome aggregation behind one method</div>
                 </div>
               </div>
-              <div class="mt-3 text-[11px] font-mono text-emerald-800 text-center">Concurrency and copy fallbacks concentrate in wt-copy</div>
+              <div class="mt-3 text-[11px] font-mono text-emerald-800 text-center">Concurrency and copy fallbacks concentrate in flashwt-copy</div>
             </div>
           </div>
 
           <div class="space-y-3 pt-2">
             <div>
               <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Problem</div>
-              <p class="text-sm text-slate-700 mt-0.5"><code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">wt-copy::Materializer</code> provides only a single-file interface, forcing <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">wt-store</code> to hand-roll 70 lines of thread pool orchestration, worker scoping, atomic counters, and error slots.</p>
+              <p class="text-sm text-slate-700 mt-0.5"><code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">flashwt-copy::Materializer</code> provides only a single-file interface, forcing <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">flashwt-store</code> to hand-roll 70 lines of thread pool orchestration, worker scoping, atomic counters, and error slots.</p>
             </div>
             <div>
               <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Solution</div>
-              <p class="text-sm text-slate-700 mt-0.5">Deepen <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">wt-copy::Materializer</code> with a batch materialization interface that encapsulates thread worker scaling, task distribution, and error aggregation.</p>
+              <p class="text-sm text-slate-700 mt-0.5">Deepen <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">flashwt-copy::Materializer</code> with a batch materialization interface that encapsulates thread worker scaling, task distribution, and error aggregation.</p>
             </div>
             <div>
               <div class="text-xs font-mono uppercase tracking-wider text-stone-500 mb-1">Wins</div>
@@ -337,9 +337,9 @@
           </div>
 
           <div class="text-xs font-mono text-stone-600 bg-stone-50 p-3 rounded-md border border-stone-200/80 space-y-1">
-            <div>crates/wt-store/src/ingest.rs</div>
-            <div>crates/wt-store/src/snapshot/manifest.rs</div>
-            <div>crates/wt-store/src/snapshot/publish.rs</div>
+            <div>crates/flashwt-store/src/ingest.rs</div>
+            <div>crates/flashwt-store/src/snapshot/manifest.rs</div>
+            <div>crates/flashwt-store/src/snapshot/publish.rs</div>
           </div>
 
           <!-- Side-by-Side Diagram (Mass Diagram Pattern) -->
@@ -405,7 +405,7 @@
             <a href="#candidate-1" class="hover:text-emerald-300 transition-colors">Candidate 01: Collapse the Cross-Crate Hydration Pipeline</a>
           </h3>
           <p class="text-slate-300 text-sm leading-relaxed">
-            Hydration is the primary hot path of <code class="font-mono text-xs text-emerald-300 bg-slate-800 px-1 py-0.5 rounded">wt</code>. Collapsing the leaky choreography between <code class="font-mono text-xs text-slate-200 bg-slate-800 px-1 py-0.5 rounded">wt-cli</code> and <code class="font-mono text-xs text-slate-200 bg-slate-800 px-1 py-0.5 rounded">wt-store</code> eliminates over 15 pass-through parameters, stops the storage ledger sidecar and mirror publishing from leaking into command handlers, and concentrates all cache hits and projection mechanics behind a single testable storage interface.
+            Hydration is the primary hot path of <code class="font-mono text-xs text-emerald-300 bg-slate-800 px-1 py-0.5 rounded">flashwt</code>. Collapsing the leaky choreography between <code class="font-mono text-xs text-slate-200 bg-slate-800 px-1 py-0.5 rounded">flashwt-cli</code> and <code class="font-mono text-xs text-slate-200 bg-slate-800 px-1 py-0.5 rounded">flashwt-store</code> eliminates over 15 pass-through parameters, stops the storage ledger sidecar and mirror publishing from leaking into command handlers, and concentrates all cache hits and projection mechanics behind a single testable storage interface.
           </p>
         </div>
         <div class="pt-2">

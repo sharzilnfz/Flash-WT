@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Architecture Review: Deepening Opportunities for wt</title>
+  <title>Architecture Review: Deepening Opportunities for flashwt</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script type="module">
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
@@ -56,16 +56,16 @@
             Architecture Review
           </div>
           <h1 class="text-3xl sm:text-4xl font-extrabold tracking-tight text-white">
-            Deepening Opportunities for <span class="text-emerald-400">wt</span>
+            Deepening Opportunities for <span class="text-emerald-400">flashwt</span>
           </h1>
           <p class="mt-2 text-slate-400 max-w-3xl">
             Surfacing architectural friction, eliminating shallow orchestration, and designing deep modules for maximum testability, locality, and AI-navigability.
           </p>
         </div>
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 text-xs text-slate-400 font-mono">
-          <div><span class="text-slate-500">Project:</span> wt (Instant Worktrees)</div>
+          <div><span class="text-slate-500">Project:</span> flashwt (Instant Worktrees)</div>
           <div><span class="text-slate-500">Vocabulary:</span> codebase-design + CONTEXT.md</div>
-          <div><span class="text-slate-500">Crates:</span> wt-cli, wt-store, wt-copy</div>
+          <div><span class="text-slate-500">Crates:</span> flashwt-cli, flashwt-store, flashwt-copy</div>
         </div>
       </div>
     </header>
@@ -80,7 +80,7 @@
         <h2 class="text-xl font-bold text-white">Top Recommendation: Candidate 1 &mdash; Unified <code class="text-emerald-300 font-mono text-lg">HydrationEngine</code></h2>
       </div>
       <p class="text-slate-300 leading-relaxed text-sm sm:text-base mb-4">
-        Hydration is the primary hot path of <code class="text-emerald-400 font-mono">wt</code>. Currently, <code class="text-slate-200 font-mono text-xs bg-slate-800 px-1.5 py-0.5 rounded">wt-cli/src/hydrate.rs</code> and <code class="text-slate-200 font-mono text-xs bg-slate-800 px-1.5 py-0.5 rounded">commands/create.rs</code> expose six fragmented procedural helpers (ingest, strategy selection, materialize, claim refs, snapshot refs, mirror publishing) that callers must manually choreograph. Consolidating this behind a deep <strong class="text-white">HydrationEngine</strong> concentrates multi-threading, verification, atomic mirror persistence, and fallback ladders behind one cohesive seam.
+        Hydration is the primary hot path of <code class="text-emerald-400 font-mono">flashwt</code>. Currently, <code class="text-slate-200 font-mono text-xs bg-slate-800 px-1.5 py-0.5 rounded">flashwt-cli/src/hydrate.rs</code> and <code class="text-slate-200 font-mono text-xs bg-slate-800 px-1.5 py-0.5 rounded">commands/create.rs</code> expose six fragmented procedural helpers (ingest, strategy selection, materialize, claim refs, snapshot refs, mirror publishing) that callers must manually choreograph. Consolidating this behind a deep <strong class="text-white">HydrationEngine</strong> concentrates multi-threading, verification, atomic mirror persistence, and fallback ladders behind one cohesive seam.
       </p>
       <div class="flex flex-wrap gap-2 text-xs font-medium">
         <span class="px-2.5 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700">Interface reduction: 6 functions &rarr; 1 method</span>
@@ -103,9 +103,9 @@
             <h3 class="text-2xl font-bold text-white mt-1">Unified Hydration Engine</h3>
           </div>
           <div class="text-xs text-slate-400 font-mono bg-slate-950 px-3 py-2 rounded-lg border border-slate-800">
-            crates/wt-cli/src/hydrate.rs<br>
-            crates/wt-cli/src/commands/create.rs<br>
-            crates/wt-cli/src/commands/scratch.rs
+            crates/flashwt-cli/src/hydrate.rs<br>
+            crates/flashwt-cli/src/commands/create.rs<br>
+            crates/flashwt-cli/src/commands/scratch.rs
           </div>
         </div>
 
@@ -162,7 +162,7 @@ impl&lt;'a&gt; HydrationEngine&lt;'a&gt; {
               <span class="text-xs font-bold text-rose-400 block mb-2 font-mono">BEFORE: Shallow & Fragmented</span>
               <div class="mermaid">
 flowchart TD
-    CLI["wt create / scratch"]
+    CLI["flashwt create / scratch"]
     CLI -->|"1. ingest"| ING["ingest_dir()"]
     CLI -->|"2. select"| STR["select_strategy()"]
     CLI -->|"3. place"| MAT["materialize()"]
@@ -175,7 +175,7 @@ flowchart TD
               <span class="text-xs font-bold text-emerald-400 block mb-2 font-mono">AFTER: Deep Module (High Leverage)</span>
               <div class="mermaid">
 flowchart TD
-    CLI["wt create / scratch"]
+    CLI["flashwt create / scratch"]
     CLI -->|"hydrate(request)"| HE["HydrationEngine (Deep Seam)"]
     subgraph Inside HydrationEngine
       HE --> INGEST["Ingest & Cache"]
@@ -200,10 +200,10 @@ flowchart TD
             <h3 class="text-2xl font-bold text-white mt-1">Autonomous Store & Lease Reclamation Engine</h3>
           </div>
           <div class="text-xs text-slate-400 font-mono bg-slate-950 px-3 py-2 rounded-lg border border-slate-800">
-            crates/wt-cli/src/gc.rs<br>
-            crates/wt-cli/src/commands/sweep.rs<br>
-            crates/wt-store/src/gc.rs<br>
-            crates/wt-store/src/lease.rs
+            crates/flashwt-cli/src/gc.rs<br>
+            crates/flashwt-cli/src/commands/sweep.rs<br>
+            crates/flashwt-store/src/gc.rs<br>
+            crates/flashwt-store/src/lease.rs
           </div>
         </div>
 
@@ -214,10 +214,10 @@ flowchart TD
               Architectural Friction (Leaked Seam)
             </h4>
             <p class="text-slate-300 text-sm leading-relaxed mb-4">
-              <code class="text-slate-200 font-mono text-xs">wt-cli/src/gc.rs::sweep_leases</code> contains low-level store GC logic: directory size calculations, lease file parsing, process PID liveness probing, ledger parsing, refcount decrementing, and mirror removal, alongside shell git commands (<code class="text-slate-300 font-mono">git worktree remove --force</code>, <code class="text-slate-300 font-mono">git branch -D</code>).
+              <code class="text-slate-200 font-mono text-xs">flashwt-cli/src/gc.rs::sweep_leases</code> contains low-level store GC logic: directory size calculations, lease file parsing, process PID liveness probing, ledger parsing, refcount decrementing, and mirror removal, alongside shell git commands (<code class="text-slate-300 font-mono">git worktree remove --force</code>, <code class="text-slate-300 font-mono">git branch -D</code>).
             </p>
             <p class="text-slate-400 text-xs leading-relaxed">
-              Meanwhile, <code class="text-slate-200 font-mono text-xs">wt-store/src/gc.rs</code> contains an independent mark-and-sweep for objects and snapshots. Storage durability invariants are scattered across CLI and store crates.
+              Meanwhile, <code class="text-slate-200 font-mono text-xs">flashwt-store/src/gc.rs</code> contains an independent mark-and-sweep for objects and snapshots. Storage durability invariants are scattered across CLI and store crates.
             </p>
           </div>
 
@@ -227,7 +227,7 @@ flowchart TD
               Deepening Solution: <code class="normal-case">StoreReclaimer</code>
             </h4>
             <p class="text-slate-300 text-sm leading-relaxed mb-4">
-              Move lease lifecycle and store reclamation into a unified deep <strong class="text-white">`StoreReclaimer`</strong> in <code class="text-slate-200 font-mono text-xs">wt-store</code>, accepting an adapter for workspace cleanup:
+              Move lease lifecycle and store reclamation into a unified deep <strong class="text-white">`StoreReclaimer`</strong> in <code class="text-slate-200 font-mono text-xs">flashwt-store</code>, accepting an adapter for workspace cleanup:
             </p>
             <div class="bg-slate-950 p-3 rounded-lg border border-slate-800 text-xs font-mono text-emerald-300 mb-4 overflow-x-auto">
 <pre><code>pub struct StoreReclaimer&lt;'a, W: WorkspaceCleaner&gt; {
@@ -253,7 +253,7 @@ impl&lt;'a, W: WorkspaceCleaner&gt; StoreReclaimer&lt;'a, W&gt; {
               <span class="text-xs font-bold text-rose-400 block mb-2 font-mono">BEFORE: Leaked Responsibilities</span>
               <div class="mermaid">
 flowchart TD
-    CLI["wt sweep CLI"]
+    CLI["flashwt sweep CLI"]
     CLI -->|"manual loop"| LEASE["Parse Leases (CLI)"]
     CLI -->|"manual probe"| PID["Check /proc PIDs (CLI)"]
     CLI -->|"manual exec"| GIT["git worktree / branch (CLI)"]
@@ -264,7 +264,7 @@ flowchart TD
               <span class="text-xs font-bold text-emerald-400 block mb-2 font-mono">AFTER: Autonomous Reclaimer</span>
               <div class="mermaid">
 flowchart TD
-    CLI["wt sweep / Daemon"]
+    CLI["flashwt sweep / Daemon"]
     CLI -->|"reclaimer.sweep(policy)"| REC["StoreReclaimer (Deep)"]
     REC --> LEASE_INT["Lease Expiry & Grace"]
     REC --> OBJ_SWEEP["Mark-and-Sweep Objects"]
@@ -287,9 +287,9 @@ flowchart TD
             <h3 class="text-2xl font-bold text-white mt-1">Deep Snapshot Projection Module</h3>
           </div>
           <div class="text-xs text-slate-400 font-mono bg-slate-950 px-3 py-2 rounded-lg border border-slate-800">
-            crates/wt-cli/src/snapshots.rs<br>
-            crates/wt-store/src/snapshot/mod.rs<br>
-            crates/wt-store/src/snapindex.rs
+            crates/flashwt-cli/src/snapshots.rs<br>
+            crates/flashwt-store/src/snapshot/mod.rs<br>
+            crates/flashwt-store/src/snapindex.rs
           </div>
         </div>
 
@@ -300,7 +300,7 @@ flowchart TD
               Architectural Friction (Misplaced Logic)
             </h4>
             <p class="text-slate-300 text-sm leading-relaxed mb-4">
-              <code class="text-slate-200 font-mono text-xs">wt-cli/src/snapshots.rs</code> (717 lines) implements snapshot cache routing, v2 delta rebuild heuristics, selection ring rotation, sweep-race retry loops, and self-healing blob rebuilds (<code class="text-slate-300 font-mono">heal_blob</code>).
+              <code class="text-slate-200 font-mono text-xs">flashwt-cli/src/snapshots.rs</code> (717 lines) implements snapshot cache routing, v2 delta rebuild heuristics, selection ring rotation, sweep-race retry loops, and self-healing blob rebuilds (<code class="text-slate-300 font-mono">heal_blob</code>).
             </p>
             <p class="text-slate-400 text-xs leading-relaxed">
               These are foundational projection algorithms belonging to the storage layer, but they reside inside the CLI binary, making headless reuse impossible.
@@ -313,7 +313,7 @@ flowchart TD
               Deepening Solution: <code class="normal-case">SnapshotProjectionEngine</code>
             </h4>
             <p class="text-slate-300 text-sm leading-relaxed mb-4">
-              Move projection planning, delta threshold heuristics, and healing retries into <code class="text-slate-200 font-mono text-xs">wt-store::SnapshotProjectionEngine</code>.
+              Move projection planning, delta threshold heuristics, and healing retries into <code class="text-slate-200 font-mono text-xs">flashwt-store::SnapshotProjectionEngine</code>.
             </p>
             <div class="bg-slate-950 p-3 rounded-lg border border-slate-800 text-xs font-mono text-emerald-300 mb-4 overflow-x-auto">
 <pre><code>pub struct SnapshotProjectionEngine&lt;'a&gt; {
@@ -342,9 +342,9 @@ impl&lt;'a&gt; SnapshotProjectionEngine&lt;'a&gt; {
             <h3 class="text-2xl font-bold text-white mt-1">Encapsulated Materialization & Capability Matrix</h3>
           </div>
           <div class="text-xs text-slate-400 font-mono bg-slate-950 px-3 py-2 rounded-lg border border-slate-800">
-            crates/wt-copy/src/materialize.rs<br>
-            crates/wt-copy/src/selection.rs<br>
-            crates/wt-cli/src/hydrate.rs
+            crates/flashwt-copy/src/materialize.rs<br>
+            crates/flashwt-copy/src/selection.rs<br>
+            crates/flashwt-cli/src/hydrate.rs
           </div>
         </div>
 
@@ -355,10 +355,10 @@ impl&lt;'a&gt; SnapshotProjectionEngine&lt;'a&gt; {
               Architectural Friction (Leaked Physical Details)
             </h4>
             <p class="text-slate-300 text-sm leading-relaxed mb-4">
-              Strategy negotiation (CoW clone vs Linux reflink vs copy_file_range vs byte-copy) is handled inside <code class="text-slate-200 font-mono text-xs">wt-cli/src/hydrate.rs::select_strategy</code>.
+              Strategy negotiation (CoW clone vs Linux reflink vs copy_file_range vs byte-copy) is handled inside <code class="text-slate-200 font-mono text-xs">flashwt-cli/src/hydrate.rs::select_strategy</code>.
             </p>
             <p class="text-slate-400 text-xs leading-relaxed">
-              Additionally, <code class="text-slate-200 font-mono text-xs">finalize_mode</code> in <code class="text-slate-200 font-mono text-xs">wt-cli</code> checks <code class="text-slate-300 font-mono">shares_inode_with_source</code> and manually executes file removals and copies to avoid leaking chmod mutations to shared hardlinked blobs.
+              Additionally, <code class="text-slate-200 font-mono text-xs">finalize_mode</code> in <code class="text-slate-200 font-mono text-xs">flashwt-cli</code> checks <code class="text-slate-300 font-mono">shares_inode_with_source</code> and manually executes file removals and copies to avoid leaking chmod mutations to shared hardlinked blobs.
             </p>
           </div>
 
@@ -368,7 +368,7 @@ impl&lt;'a&gt; SnapshotProjectionEngine&lt;'a&gt; {
               Deepening Solution: <code class="normal-case">Deep Materializer</code>
             </h4>
             <p class="text-slate-300 text-sm leading-relaxed mb-4">
-              Consolidate filesystem capability detection, strategy selection, fallback chains, and mode normalization inside <code class="text-slate-200 font-mono text-xs">wt-copy::Materializer</code>:
+              Consolidate filesystem capability detection, strategy selection, fallback chains, and mode normalization inside <code class="text-slate-200 font-mono text-xs">flashwt-copy::Materializer</code>:
             </p>
             <div class="bg-slate-950 p-3 rounded-lg border border-slate-800 text-xs font-mono text-emerald-300 mb-4 overflow-x-auto">
 <pre><code>pub struct Materializer {
@@ -380,7 +380,7 @@ impl Materializer {
 }</code></pre>
             </div>
             <p class="text-slate-400 text-xs leading-relaxed">
-              <strong>Locality:</strong> Callers request placement with a requested permission mode; <code class="text-slate-200 font-mono text-xs">wt-copy</code> encapsulates all OS and filesystem edge cases.
+              <strong>Locality:</strong> Callers request placement with a requested permission mode; <code class="text-slate-200 font-mono text-xs">flashwt-copy</code> encapsulates all OS and filesystem edge cases.
             </p>
           </div>
         </div>
@@ -409,7 +409,7 @@ impl Materializer {
           <tbody class="divide-y divide-slate-800/60 text-slate-300">
             <tr class="hover:bg-slate-800/30">
               <td class="px-4 py-3.5 font-medium text-emerald-300">1. HydrationEngine</td>
-              <td class="px-4 py-3.5 font-mono text-xs text-slate-400">wt-cli / wt-store</td>
+              <td class="px-4 py-3.5 font-mono text-xs text-slate-400">flashwt-cli / flashwt-store</td>
               <td class="px-4 py-3.5 text-xs">1 method (<code class="text-emerald-400">hydrate</code>)</td>
               <td class="px-4 py-3.5 text-xs">Scans, verifies, CoW clones, mirrors, sidecars</td>
               <td class="px-4 py-3.5"><span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-xs font-semibold">Very High</span></td>
@@ -417,7 +417,7 @@ impl Materializer {
             </tr>
             <tr class="hover:bg-slate-800/30">
               <td class="px-4 py-3.5 font-medium text-emerald-300">2. StoreReclaimer</td>
-              <td class="px-4 py-3.5 font-mono text-xs text-slate-400">wt-store</td>
+              <td class="px-4 py-3.5 font-mono text-xs text-slate-400">flashwt-store</td>
               <td class="px-4 py-3.5 text-xs">1 method (<code class="text-emerald-400">sweep</code>)</td>
               <td class="px-4 py-3.5 text-xs">Lease inspection, PID checks, GC, mark-and-sweep</td>
               <td class="px-4 py-3.5"><span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-xs font-semibold">High</span></td>
@@ -425,7 +425,7 @@ impl Materializer {
             </tr>
             <tr class="hover:bg-slate-800/30">
               <td class="px-4 py-3.5 font-medium text-blue-300">3. SnapshotProjection</td>
-              <td class="px-4 py-3.5 font-mono text-xs text-slate-400">wt-store</td>
+              <td class="px-4 py-3.5 font-mono text-xs text-slate-400">flashwt-store</td>
               <td class="px-4 py-3.5 text-xs">2 methods (<code class="text-blue-400">project</code>, <code class="text-blue-400">invalidate</code>)</td>
               <td class="px-4 py-3.5 text-xs">Lockfile check, v2 delta diff, self-healing</td>
               <td class="px-4 py-3.5"><span class="px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 text-xs font-semibold">High</span></td>
@@ -433,7 +433,7 @@ impl Materializer {
             </tr>
             <tr class="hover:bg-slate-800/30">
               <td class="px-4 py-3.5 font-medium text-blue-300">4. Deep Materializer</td>
-              <td class="px-4 py-3.5 font-mono text-xs text-slate-400">wt-copy</td>
+              <td class="px-4 py-3.5 font-mono text-xs text-slate-400">flashwt-copy</td>
               <td class="px-4 py-3.5 text-xs">2 methods (<code class="text-blue-400">place_file</code>, <code class="text-blue-400">copy_dir</code>)</td>
               <td class="px-4 py-3.5 text-xs">Probing, clone/reflink, fallback, chmod repair</td>
               <td class="px-4 py-3.5"><span class="px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 text-xs font-semibold">Medium</span></td>
@@ -446,7 +446,7 @@ impl Materializer {
 
     <!-- Footer -->
     <footer class="mt-16 border-t border-slate-800 pt-8 text-center text-xs text-slate-500 font-mono">
-      Generated for wt &bull; Shared codebase-design vocabulary &bull; 2026
+      Generated for flashwt &bull; Shared codebase-design vocabulary &bull; 2026
     </footer>
 
   </div>

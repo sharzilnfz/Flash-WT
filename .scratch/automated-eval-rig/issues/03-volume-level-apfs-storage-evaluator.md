@@ -8,6 +8,6 @@
 
 - [ ] Volume free-space probe implementing OS-level `statvfs` / `fstatvfs` queries to capture available block and fragment counts before and after operations.
 - [ ] Physical storage accounting engine measuring net private disk footprint after multiple worktree creations on APFS and Linux reflink filesystems.
-- [ ] GC reclamation evaluator verifying that unreferenced blob and snapshot pruning reclaims the expected physical bytes after `wt sweep`.
+- [ ] GC reclamation evaluator verifying that unreferenced blob and snapshot pruning reclaims the expected physical bytes after `flashwt sweep`.
 - [ ] Deduplication efficiency calculator reporting actual physical storage multiplier across N identical and divergent worktrees.
 - [ ] Automated assertions validating that APFS clonefile shared extents consume zero additional physical data blocks upon initial creation.

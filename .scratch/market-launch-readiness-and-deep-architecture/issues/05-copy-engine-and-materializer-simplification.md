@@ -6,7 +6,7 @@ Blocked by: None (can start immediately).
 
 ## Problem
 
-`wt-copy` contains obsolete backend safety contracts (`Safety::UnsafePending`, `Error::UnsafeBackend`) despite all shipped backends being verified safe. It also contains redundant delegator methods on `CopyEngine`, dead constructor methods on `Materializer`, zero-sized wrapper structs, manual 128 KiB buffer copy loops, and duplicate directory ancestor searching.
+`flashwt-copy` contains obsolete backend safety contracts (`Safety::UnsafePending`, `Error::UnsafeBackend`) despite all shipped backends being verified safe. It also contains redundant delegator methods on `CopyEngine`, dead constructor methods on `Materializer`, zero-sized wrapper structs, manual 128 KiB buffer copy loops, and duplicate directory ancestor searching.
 
 ## Work
 
@@ -20,10 +20,10 @@ Blocked by: None (can start immediately).
 
 ## Files Owned
 
-- `crates/wt-copy/src/lib.rs`
-- `crates/wt-copy/src/materialize.rs`
-- `crates/wt-copy/src/sys.rs`
-- `crates/wt-copy/tests/copy.rs`
+- `crates/flashwt-copy/src/lib.rs`
+- `crates/flashwt-copy/src/materialize.rs`
+- `crates/flashwt-copy/src/sys.rs`
+- `crates/flashwt-copy/tests/copy.rs`
 
 ## Done When
 

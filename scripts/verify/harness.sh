@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-# scripts/verify/harness.sh — Central environment manager and assertion harness for Flash WT (wt).
-#
-# Sourced by verification tests to provide:
-#   - Binary resolution (WT_BIN) and CLI wrappers (wt / flashwt / wt_json)
-#   - Isolated test environments (setup_isolated_env, teardown_env)
-#   - Guaranteed store isolation: exports WT_STORE pointing to throwaway store
-#   - Volume storage accounting (volume_free_bytes, tree_disk_usage, storage_to_json)
-#   - JSON assertion helpers (json_val, assert_status_ok, assert_eq, assert_json_val, etc.)
-#   - Suite lifecycle & telemetry (suite_init, test_start, test_pass, test_fail, suite_finish)
-#   - Robust cleanup trap handling so interrupted tests do not leave orphaned mounts or directories
 
 if [ -n "${BASH_VERSION:-}" ]; then
     set -euo pipefail
@@ -20,85 +10,74 @@ HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HARNESS_DIR/../.." && pwd)"
 VERIFY_DIR="$REPO_ROOT/scripts/verify"
 SUITES_DIR="$VERIFY_DIR/suites"
-ARTIFACTS_DIR="${ARTIFACTS_DIR:-$REPO_ROOT/artifacts/verify-wt}"
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-$REPO_ROOT/artifacts/verify-flashwt}"
 
 mkdir -p "$ARTIFACTS_DIR"
 
-# -----------------------------------------------------------------------------
-# Binary Resolution
-# -----------------------------------------------------------------------------
-
-resolve_wt_bin() {
-    # 1. User-supplied override
-    if [ -n "${WT_BIN:-}" ] && [ -x "$WT_BIN" ]; then
-        WT_BIN="$(cd "$(dirname "$WT_BIN")" && pwd)/$(basename "$WT_BIN")"
-        export WT_BIN
+resolve_flashwt_bin() {
+    if [ -n "${FLASHWT_BIN:-}" ] && [ -x "$FLASHWT_BIN" ]; then
+        FLASHWT_BIN="$(cd "$(dirname "$FLASHWT_BIN")" && pwd)/$(basename "$FLASHWT_BIN")"
+        export FLASHWT_BIN
         return 0
     fi
 
-    # 2. Local workspace build targets (release preferred over debug)
     local candidates=(
         "$REPO_ROOT/target/release/flashwt"
-        "$REPO_ROOT/target/release/wt"
+        "$REPO_ROOT/target/release/flashwt"
         "$REPO_ROOT/target/debug/flashwt"
-        "$REPO_ROOT/target/debug/wt"
+        "$REPO_ROOT/target/debug/flashwt"
     )
 
     for bin in "${candidates[@]}"; do
         if [ -x "$bin" ]; then
-            WT_BIN="$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")"
-            export WT_BIN
+            FLASHWT_BIN="$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")"
+            export FLASHWT_BIN
             return 0
         fi
     done
 
-    # 3. System PATH
     if command -v flashwt >/dev/null 2>&1; then
-        WT_BIN="$(command -v flashwt)"
-        export WT_BIN
+        FLASHWT_BIN="$(command -v flashwt)"
+        export FLASHWT_BIN
         return 0
-    elif command -v wt >/dev/null 2>&1; then
-        WT_BIN="$(command -v wt)"
-        export WT_BIN
+    elif command -v flashwt >/dev/null 2>&1; then
+        FLASHWT_BIN="$(command -v flashwt)"
+        export FLASHWT_BIN
         return 0
     fi
 
-    # 4. Auto-build release binary if missing
     echo "harness: building release binary..." >&2
-    cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p wt-cli >&2
+    cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p flashwt-cli >&2
     if [ -x "$REPO_ROOT/target/release/flashwt" ]; then
-        WT_BIN="$REPO_ROOT/target/release/flashwt"
+        FLASHWT_BIN="$REPO_ROOT/target/release/flashwt"
     else
-        WT_BIN="$REPO_ROOT/target/release/wt"
+        FLASHWT_BIN="$REPO_ROOT/target/release/flashwt"
     fi
-    export WT_BIN
+    export FLASHWT_BIN
     return 0
 }
 
-resolve_wt_bin
+resolve_flashwt_bin
 
-# CLI wrappers delegating to resolved binary with isolated store
-wt() {
-    WT_STORE="${WT_STORE:-${FIXTURE_STORE:-}}" "$WT_BIN" "$@"
-}
 
 flashwt() {
-    WT_STORE="${WT_STORE:-${FIXTURE_STORE:-}}" "$WT_BIN" "$@"
+    FLASHWT_STORE="${FLASHWT_STORE:-${FIXTURE_STORE:-}}" \
+    FLASHWT_TIMING="${FLASHWT_TIMING:-}" \
+    FLASHWT_SNAPSHOTS="${FLASHWT_SNAPSHOTS:-}" \
+    FLASHWT_SNAPSHOTS_V2="${FLASHWT_SNAPSHOTS_V2:-}" \
+    FLASHWT_VERIFY="${FLASHWT_VERIFY:-}" \
+    "$FLASHWT_BIN" "$@"
 }
 
-wt_json() {
-    wt --json "$@"
+flashwt_json() {
+    flashwt --json "$@"
 }
 
-# -----------------------------------------------------------------------------
-# Environment Lifecycle & Storage Isolation
-# -----------------------------------------------------------------------------
-
-WT_ENV_ROOT=""
-WT_ORIGIN=""
-WT_STORE=""
-WT_WORKTREES=""
-WT_TMP=""
+FLASHWT_ENV_ROOT=""
+FLASHWT_ORIGIN=""
+FLASHWT_STORE=""
+FLASHWT_WORKTREES=""
+FLASHWT_TMP=""
 ACTIVE_FIXTURES=()
 
 _harness_cleanup_trap() {
@@ -115,44 +94,39 @@ _harness_cleanup_trap() {
 
 setup_isolated_env() {
     local name="${1:-test}"
-    local fixture_root="${WT_FIXTURE_ROOT:-${TMPDIR:-/tmp}/wt-verify}"
+    local fixture_root="${FLASHWT_FIXTURE_ROOT:-${TMPDIR:-/tmp}/flashflashwt-verify}"
     mkdir -p "$fixture_root"
 
-    # Creates throwaway $FIXTURE_ROOT/wt-test-<name>-XXXXXX
     local env_dir
-    env_dir="$(mktemp -d "$fixture_root/wt-test-${name}-XXXXXX")"
+    env_dir="$(mktemp -d "$fixture_root/flashwt-test-${name}-XXXXXX")"
 
-    WT_ENV_ROOT="$env_dir"
-    WT_ORIGIN="$env_dir/origin"
-    WT_STORE="$env_dir/store"
-    WT_WORKTREES="$env_dir/worktrees"
-    WT_TMP="$env_dir/tmp"
+    FLASHWT_ENV_ROOT="$env_dir"
+    FLASHWT_ORIGIN="$env_dir/origin"
+    FLASHWT_STORE="$env_dir/store"
+    FLASHWT_WORKTREES="$env_dir/worktrees"
+    FLASHWT_TMP="$env_dir/tmp"
 
-    mkdir -p "$WT_ORIGIN" "$WT_STORE" "$WT_WORKTREES" "$WT_TMP"
+    mkdir -p "$FLASHWT_ORIGIN" "$FLASHWT_STORE" "$FLASHWT_WORKTREES" "$FLASHWT_TMP"
 
-    # Export WT_STORE so no test ever touches the machine-wide store ~/.cache/wt/store
-    export WT_ENV_ROOT WT_ORIGIN WT_STORE WT_WORKTREES WT_TMP
+    export FLASHWT_ENV_ROOT FLASHWT_ORIGIN FLASHWT_STORE FLASHWT_WORKTREES FLASHWT_TMP
 
-    # Set compatibility variables used across suites
     FIXTURE_DIR="$env_dir"
-    FIXTURE_ORIGIN="$WT_ORIGIN"
-    FIXTURE_STORE="$WT_STORE"
+    FIXTURE_ORIGIN="$FLASHWT_ORIGIN"
+    FIXTURE_STORE="$FLASHWT_STORE"
     export FIXTURE_DIR FIXTURE_ORIGIN FIXTURE_STORE
 
-    # Initialize a valid origin git repo with seed commit so worktrees can be formed
-    git -C "$WT_ORIGIN" init --quiet
-    git -C "$WT_ORIGIN" config user.email "verify@example.com"
-    git -C "$WT_ORIGIN" config user.name "Flash WT Verify"
-    git -C "$WT_ORIGIN" config commit.gpgSign false
+    git -C "$FLASHWT_ORIGIN" init --quiet
+    git -C "$FLASHWT_ORIGIN" config user.email "verify@example.com"
+    git -C "$FLASHWT_ORIGIN" config user.name "Flash-WT Verify"
+    git -C "$FLASHWT_ORIGIN" config commit.gpgSign false
 
-    printf "# Fixture: %s\n" "$name" > "$WT_ORIGIN/README.md"
-    printf ".DS_Store\n" > "$WT_ORIGIN/.gitignore"
-    git -C "$WT_ORIGIN" add .
-    git -C "$WT_ORIGIN" commit --quiet -m "Initial commit for $name fixture"
+    printf "# Fixture: %s\n" "$name" > "$FLASHWT_ORIGIN/README.md"
+    printf ".DS_Store\n" > "$FLASHWT_ORIGIN/.gitignore"
+    git -C "$FLASHWT_ORIGIN" add .
+    git -C "$FLASHWT_ORIGIN" commit --quiet -m "Initial commit for $name fixture"
 
     ACTIVE_FIXTURES+=("$env_dir")
 
-    # Install signal and exit traps to prevent orphaned mounts or directories
     trap "_harness_cleanup_trap EXIT" EXIT
     trap "_harness_cleanup_trap INT" INT
     trap "_harness_cleanup_trap TERM" TERM
@@ -166,12 +140,12 @@ setup_isolated_fixture() {
 }
 
 teardown_env() {
-    local target="${1:-${WT_ENV_ROOT:-}}"
+    local target="${1:-${FLASHWT_ENV_ROOT:-}}"
     if [ -z "$target" ] && [ ${#ACTIVE_FIXTURES[@]} -eq 0 ]; then
         return 0
     fi
 
-    if [ "${WT_KEEP_FIXTURE:-0}" = "1" ] || [ "${WT_PRESERVE:-0}" = "1" ]; then
+    if [ "${FLASHWT_KEEP_FIXTURE:-0}" = "1" ] || [ "${FLASHWT_PRESERVE:-0}" = "1" ]; then
         echo "[harness] Preserving fixture directories for debugging" >&2
         return 0
     fi
@@ -187,7 +161,6 @@ teardown_env() {
     done
 
     for env_root in "${targets_to_clean[@]}"; do
-        # 1. Unmount any mounts created under the environment (e.g. ramdisks, tmpfs, loop mounts)
         case "$(uname -s)" in
             Darwin)
                 mount | awk -v root="$env_root" '
@@ -215,17 +188,15 @@ teardown_env() {
                 ;;
         esac
 
-        # 2. Prune git worktree metadata before removing directory
         if [ -d "$env_root/origin/.git" ]; then
             git -C "$env_root/origin" worktree prune >/dev/null 2>&1 || true
         fi
 
-        # 3. Clean directory
         rm -rf "$env_root" 2>/dev/null || true
     done
 
     ACTIVE_FIXTURES=()
-    WT_ENV_ROOT=""
+    FLASHWT_ENV_ROOT=""
     FIXTURE_DIR=""
     return 0
 }
@@ -233,10 +204,6 @@ teardown_env() {
 teardown_isolated_fixture() {
     teardown_env "$@"
 }
-
-# -----------------------------------------------------------------------------
-# Volume Storage Accounting
-# -----------------------------------------------------------------------------
 
 sha256_hash() {
     local file_path="$1"
@@ -249,8 +216,6 @@ sha256_hash() {
     fi
 }
 
-# Available free bytes on the filesystem hosting the given path.
-# Uses df -k * 1024 cross-platform.
 volume_free_bytes() {
     local target_dir="${1:-.}"
     if [ ! -e "$target_dir" ]; then
@@ -271,8 +236,6 @@ volume_free_bytes() {
     }'
 }
 
-# Measure logical (apparent) and allocated (st_blocks * 512) size of a directory tree.
-# Emits "<apparent_bytes> <allocated_bytes>"
 tree_disk_usage() {
     local dir="$1"
     [ -d "$dir" ] || { echo "0 0"; return 0; }
@@ -288,11 +251,6 @@ tree_disk_usage() {
         END { printf "%.0f %.0f\n", (app ? app : 0), (alloc ? alloc : 0) }'
 }
 
-# Format storage metrics as JSON.
-# Accepts either:
-#   storage_to_json <directory_path>
-# or:
-#   storage_to_json <apparent_bytes> <allocated_bytes> [volume_consumed_bytes] [dedup_ratio]
 storage_to_json() {
     local app=0 alloc=0 vol_consumed=0 dedup_ratio=1.0
 
@@ -312,11 +270,6 @@ storage_to_json() {
         "$app" "$alloc" "$vol_consumed" "$dedup_ratio"
 }
 
-# -----------------------------------------------------------------------------
-# JSON Assertion Helpers
-# -----------------------------------------------------------------------------
-
-# Extract value from JSON string or file using python3 or awk
 json_val() {
     local json_input="$1"
     local key="$2"
@@ -333,7 +286,6 @@ raw = sys.argv[1]
 key = sys.argv[2]
 try:
     data = json.loads(raw)
-    # Normalize keys: data["foo"] -> data.foo, data.bar.0 -> parts
     k = key.replace("[", ".").replace("]", "").replace("'\''", "").replace("\"", "")
     if k.startswith("."):
         k = k[1:]
@@ -360,7 +312,6 @@ except Exception:
     sys.exit(1)
 ' "$json_input" "$key" 2>/dev/null || true
     else
-        # Awk fallback for top-level key lookup
         printf "%s" "$json_input" | awk -v k="$key" '
         BEGIN { RS="[,{}\\[\\]]"; FS=":" }
         {
@@ -375,7 +326,6 @@ except Exception:
     fi
 }
 
-# Assert envelope status is "ok"
 assert_status_ok() {
     local envelope="$1"
     local msg="${2:-Envelope status must be ok}"
@@ -401,12 +351,10 @@ assert_status_ok() {
     return 0
 }
 
-# Compatibility alias
 assert_json_ok() {
     assert_status_ok "$@"
 }
 
-# Assert equality of two values
 assert_eq() {
     local actual="$1"
     local expected="$2"
@@ -421,7 +369,6 @@ assert_eq() {
     return 0
 }
 
-# Assert specific JSON key matches expected value
 assert_json_val() {
     local json_input="$1"
     local key="$2"
@@ -586,10 +533,6 @@ sys.exit(0)
     return 0
 }
 
-# -----------------------------------------------------------------------------
-# Timing & Stage Extraction
-# -----------------------------------------------------------------------------
-
 now() {
     perl -MTime::HiRes=time -e 'printf "%.6f\n", time' 2>/dev/null || python3 -c 'import time; print(f"{time.time():.6f}")'
 }
@@ -606,8 +549,8 @@ parse_stage_log() {
     local logfile="$1"
     [ -f "$logfile" ] || return 0
     awk '
-        /^wt-stage / {
-            sub(/^wt-stage /, "", $0)
+        /^flashwt-stage / {
+            sub(/^flashwt-stage /, "", $0)
             split($0, kv, "=")
             if (length(kv[1]) > 0 && length(kv[2]) > 0) {
                 print kv[1] "=" kv[2]
@@ -615,10 +558,6 @@ parse_stage_log() {
         }
     ' "$logfile"
 }
-
-# -----------------------------------------------------------------------------
-# Suite Lifecycle & Telemetry Collection
-# -----------------------------------------------------------------------------
 
 SUITE_ID=""
 SUITE_TITLE=""
@@ -668,7 +607,7 @@ test_pass() {
         desc="$arg2"
         extra_json="{}"
     fi
-    
+
     PASS_COUNT=$((PASS_COUNT + 1))
     TEST_COUNT=$((TEST_COUNT + 1))
 
@@ -742,7 +681,7 @@ suite_finish() {
     echo ""
     echo "--- Suite [${SUITE_ID}] Summary ---"
     echo "Total: $TEST_COUNT | Passed: $PASS_COUNT | Failed: $FAIL_COUNT | Skipped: $SKIP_COUNT | Duration: ${suite_duration}s"
-    
+
     local suite_out_file="$ARTIFACTS_DIR/suite_${SUITE_ID}.json"
     python3 -c '
 import json, sys
@@ -766,3 +705,4 @@ with open(sys.argv[10], "w") as f:
     fi
     return 0
 }
+

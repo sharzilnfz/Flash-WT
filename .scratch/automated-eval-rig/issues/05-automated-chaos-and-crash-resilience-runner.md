@@ -8,6 +8,6 @@
 
 - [ ] Lifecycle phase signal interceptor triggering `SIGKILL` during active blob ingest, directory link train construction, snapshot atomic rename, and GC sweep.
 - [ ] Post-crash integrity validator asserting that interrupted operations leave no partially written projections and zero corrupted CAS entries.
-- [ ] Self-healing verification asserting that subsequent `wt create` commands successfully repair missing blobs or staged files and complete cleanly.
+- [ ] Self-healing verification asserting that subsequent `flashwt create` commands successfully repair missing blobs or staged files and complete cleanly.
 - [ ] GC resilience validator asserting that crash interrupted sweeps never collect referenced live data.
 - [ ] Chaos suite runner producing structured recovery reports and exit codes for CI pipelines.

@@ -1,10 +1,10 @@
-# Handoff: `wt` hydration performance problem
+# Handoff: `flashwt` hydration performance problem
 
 Date: 2026-08-23. Repo: `/Users/sharzilnafis/Desktop/Project/dumps/idea1`, branch `master`, HEAD `b652c0c`. Everything below is self-contained; no other context needed.
 
 ## 1. What this project is
 
-`wt` is a free, open-source CLI that makes agentic coding fast by ending small-file churn around git worktrees. Agents spin up many worktrees per day; each normally pays full dependency installs and rebuilds. `wt create` makes a git worktree and fills ("hydrates") its heavy untracked directories (`node_modules`, `target`, caches) from a per-machine content-addressed store, so the second and later worktrees cost near nothing and share physical blocks.
+`flashwt` is a free, open-source CLI that makes agentic coding fast by ending small-file churn around git worktrees. Agents spin up many worktrees per day; each normally pays full dependency installs and rebuilds. `flashwt create` makes a git worktree and fills ("hydrates") its heavy untracked directories (`node_modules`, `target`, caches) from a per-machine content-addressed store, so the second and later worktrees cost near nothing and share physical blocks.
 
 Domain vocabulary (from CONTEXT.md):
 
@@ -18,25 +18,25 @@ Authoritative docs in-repo: `CONTEXT.md`, `docs/adr/0001..0004`, `.scratch/insta
 
 Rust workspace, three crates:
 
-- `wt-store`: `DiskStore`. Layout inside a root dir (default `~/.cache/wt/store`, override `$WT_STORE`):
+- `flashwt-store`: `DiskStore`. Layout inside a root dir (default `~/.cache/flashwt/store`, override `$FLASHWT_STORE`):
   - `objects/<2 hex>/<62 hex>` — immutable blobs named by SHA-256 of contents, written temp-file + atomic rename.
   - `refs/<64 hex>` — one decimal refcount file PER BLOB (legacy layout, load-bearing).
   - `ingest-cache.tsv` — path -> (size, mtime, id) so warm ingest skips reading unchanged source files (ticket 02).
-  - `verified.tsv` — id -> (size, mtime) fingerprint recorded whenever a blob's hash was last checked; lets materialization trust previously verified blobs (ticket 05). `WT_VERIFY=1` forces full hashing every run.
-  - GC (ticket 06): age-based sweep; blobs with refcount > 0 survive; delete order (ref file first, then object) chosen so a kill mid-delete leaves states the next sweep finishes. Per-worktree references recorded in `<worktree gitdir>/wt-hydrated.tsv`.
-- `wt-copy`: directory-shaped backends (`clonefile(2)` whole-tree on APFS, Linux reflink, hardlink walker) plus the file-shaped `FileMaterialize` trait used by store hydration:
+  - `verified.tsv` — id -> (size, mtime) fingerprint recorded whenever a blob's hash was last checked; lets materialization trust previously verified blobs (ticket 05). `FLASHWT_VERIFY=1` forces full hashing every run.
+  - GC (ticket 06): age-based sweep; blobs with refcount > 0 survive; delete order (ref file first, then object) chosen so a kill mid-delete leaves states the next sweep finishes. Per-worktree references recorded in `<worktree gitdir>/flashwt-hydrated.tsv`.
+- `flashwt-copy`: directory-shaped backends (`clonefile(2)` whole-tree on APFS, Linux reflink, hardlink walker) plus the file-shaped `FileMaterialize` trait used by store hydration:
   - `CloneOut` (macOS default): per-file `fclonefileat(2)` — destination gets a private inode sharing the blob's blocks until first write. Blobs carry normal writable modes at rest so clones inherit them (no per-file chmod).
-  - `HardlinkOut`: opt-in (`WT_HARDLINK=1`), experimental, strips write bits from shared inodes.
-  - Byte-copy fallback everywhere else; `WT_NO_HARDLINK=1` forces plain copies.
-- `wt-cli`: `wt create|remove|sweep`. `create` = `git worktree add` -> read `.wtinclude` patterns -> per heavy directory: `ingest_dir` (walk + validation cache + `put`) -> `claim_references` (+1 ref per distinct blob, append sidecar ledger) -> `materialize` (verify/trust each blob, place via selected strategy, silent byte-copy fallback on fs refusal).
+  - `HardlinkOut`: opt-in (`FLASHWT_HARDLINK=1`), experimental, strips write bits from shared inodes.
+  - Byte-copy fallback everywhere else; `FLASHWT_NO_HARDLINK=1` forces plain copies.
+- `flashwt-cli`: `flashwt create|remove|sweep`. `create` = `git worktree add` -> read `.flashwtinclude` patterns -> per heavy directory: `ingest_dir` (walk + validation cache + `put`) -> `claim_references` (+1 ref per distinct blob, append sidecar ledger) -> `materialize` (verify/trust each blob, place via selected strategy, silent byte-copy fallback on fs refusal).
 
-Benchmark suite: `benchmarks/run.sh --verify` — three scenarios on generated fixtures (default 4,000 small files, 500 package dirs): (A) `git worktree add` + file-by-file install simulation, (B) direct recursive CoW clone of the heavy tree (`cp -Rc`; one mechanism per platform), (C) `wt create` against cold and warm stores. All runs byte-verified.
+Benchmark suite: `benchmarks/run.sh --verify` — three scenarios on generated fixtures (default 4,000 small files, 500 package dirs): (A) `git worktree add` + file-by-file install simulation, (B) direct recursive CoW clone of the heavy tree (`cp -Rc`; one mechanism per platform), (C) `flashwt create` against cold and warm stores. All runs byte-verified.
 
 ## 3. The problem, with the full measurement history
 
-**`wt create` is still slower than both the naive baseline and the trivial alternative on warm runs.** Same machine (Apple Silicon, APFS, Darwin 25.6.0), 4,000-file fixture, medians:
+**`flashwt create` is still slower than both the naive baseline and the trivial alternative on warm runs.** Same machine (Apple Silicon, APFS, Darwin 25.6.0), 4,000-file fixture, medians:
 
-| Milestone | wt cold | wt warm | baseline | direct CoW |
+| Milestone | flashwt cold | flashwt warm | baseline | direct CoW |
 |---|---|---|---|---|
 | Tickets 01–09 done (CAS + hardlinks, always re-hash) | 3.79 | 3.26 | 1.69 | not measured yet |
 | + ticket 03 (CoW materialization default) | 2.81 | 2.37 | 1.74 | 0.95 |
@@ -81,7 +81,7 @@ Our store holds individual blobs, so hydration places files one at a time and pa
 Per-blob refcount files mean 4,000 atomic temp-write-renames per create. Options:
 
 - **Single refcount ledger file** (one atomic rewrite per run). Format change; requires migration for existing stores AND re-analysis of GC crash safety (the current delete-ordering argument depends on per-blob files).
-- **Mark-and-sweep instead of refcounts**: the per-worktree `wt-hydrated.tsv` sidecars already name exactly which blobs each worktree uses. A sweep could walk live sidecars, mark reachable blobs, and reclaim the rest — eliminating `add_ref` entirely from the create path. Needs its own crash-safety story (torn sidecar appends, worktrees deleted out from under us) but would remove cost 4 completely.
+- **Mark-and-sweep instead of refcounts**: the per-worktree `flashwt-hydrated.tsv` sidecars already name exactly which blobs each worktree uses. A sweep could walk live sidecars, mark reachable blobs, and reclaim the rest — eliminating `add_ref` entirely from the create path. Needs its own crash-safety story (torn sidecar appends, worktrees deleted out from under us) but would remove cost 4 completely.
 
 ### P3: Wall-clock parallelism
 
@@ -93,7 +93,7 @@ The project's own spec says: if optimized store hydration cannot beat direct CoW
 
 ## 6. Constraints any solution must honor
 
-- Corruption must never land silently in a fresh tree (loud failure before placement; `WT_VERIFY=1` paranoid mode exists).
+- Corruption must never land silently in a fresh tree (loud failure before placement; `FLASHWT_VERIFY=1` paranoid mode exists).
 - Existing stores on disk must keep working (migration allowed, breakage not). Blob layout is sacred; sidecar ledgers are fair game.
 - Hydrated files must be private, writable, normal-permission inodes.
 - GC must remain crash-safe: any kill mid-operation leaves states a later run reconciles.
@@ -108,4 +108,4 @@ cargo test                      # 90 tests
 ./benchmarks/run.sh --verify    # three-scenario table, byte-verified
 ```
 
-Isolated experiments: set `$WT_STORE` to a scratch dir; strategy flags `WT_HARDLINK=1`, `WT_NO_HARDLINK=1`, `WT_VERIFY=1`. Fixture generator: `benchmarks/fixture.sh`.
+Isolated experiments: set `$FLASHWT_STORE` to a scratch dir; strategy flags `FLASHWT_HARDLINK=1`, `FLASHWT_NO_HARDLINK=1`, `FLASHWT_VERIFY=1`. Fixture generator: `benchmarks/fixture.sh`.

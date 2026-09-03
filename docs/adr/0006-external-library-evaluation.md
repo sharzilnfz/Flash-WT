@@ -46,7 +46,7 @@ new inodes sharing extents, each with link count 1 and invisible to any
 count-based scheme. Current pnpm ecosystem docs concede the same limit
 ("on reflink filesystems such as APFS, link counts cannot prove project
 reachability"). Adopting this would collect live data. Store-local
-mirrors remain the correct root set for wt.
+mirrors remain the correct root set for flashwt.
 
 ## What we did take from the research
 

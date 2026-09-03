@@ -1,0 +1,1273 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::fs;
+use std::time::Instant;
+
+use flashwt_store::{ContentId, DiskStore, Error, stream_hash_file};
+use tempfile::TempDir;
+
+fn temp_root() -> TempDir {
+    TempDir::new().expect("temp dir")
+}
+
+fn clobber_all_files(root: &std::path::Path) {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).expect("read_dir") {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    assert!(!files.is_empty(), "store should have files on disk");
+    for path in files {
+        let len = fs::metadata(&path).expect("meta").len() as usize;
+        fs::write(&path, vec![b'X'; len.max(1)]).expect("clobber");
+    }
+}
+
+#[test]
+fn put_get_round_trips_byte_identical_content() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+
+    let content = "hello, store \0 with embedded nulls and unicode \u{1f600}".as_bytes();
+    let id = store.put(content).expect("put");
+
+    assert_eq!(store.get(&id).expect("get"), content);
+}
+
+#[test]
+fn empty_content_round_trips() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+
+    let id = store.put(b"").expect("put empty");
+    assert_eq!(store.get(&id).expect("get"), b"");
+}
+
+#[test]
+fn identical_content_stored_once_on_disk() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+
+    let first = store.put(b"duplicate me").expect("put 1");
+    let second = store.put(b"duplicate me").expect("put 2");
+
+    assert_eq!(first, second);
+
+    let mut count = 0;
+    let mut stack = vec![dir.path().to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in fs::read_dir(&current).expect("read_dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                count += 1;
+            }
+        }
+    }
+
+    assert!(
+        count <= 2,
+        "identical content must occupy disk once, found {count} files"
+    );
+}
+
+#[test]
+fn different_content_gets_different_ids() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+
+    let a = store.put(b"a").expect("put a");
+    let b = store.put(b"b").expect("put b");
+    assert_ne!(a, b);
+}
+
+#[test]
+fn put_does_not_take_a_reference() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+
+    let id = store.put(b"unreferenced").expect("put");
+    assert_eq!(store.ref_count(&id).expect("ref_count"), 0);
+}
+
+#[test]
+fn reference_counts_increment_and_decrement() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+
+    let id = store.put(b"counted").expect("put");
+    store.add_ref(&id).expect("add_ref 1");
+    store.add_ref(&id).expect("add_ref 2");
+    assert_eq!(store.ref_count(&id).expect("after adds"), 2);
+
+    store.release_ref(&id).expect("release 1");
+    assert_eq!(store.ref_count(&id).expect("after release"), 1);
+}
+
+#[test]
+fn release_past_zero_is_an_underflow_error() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+
+    let id = store.put(b"underflow target").expect("put");
+    store.add_ref(&id).expect("add_ref");
+    store.release_ref(&id).expect("release to zero");
+
+    match store.release_ref(&id) {
+        Err(Error::RefCountUnderflow(past)) => assert_eq!(past, id),
+        other => panic!("expected RefCountUnderflow, got {other:?}"),
+    }
+}
+
+#[test]
+fn refs_on_unknown_content_error() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let missing = ContentId([9u8; 32]);
+
+    assert!(matches!(
+        store.add_ref(&missing),
+        Err(Error::UnknownContent(_))
+    ));
+    assert!(matches!(
+        store.release_ref(&missing),
+        Err(Error::RefCountUnderflow(_))
+    ));
+    assert!(matches!(
+        store.ref_count(&missing),
+        Err(Error::UnknownContent(_))
+    ));
+}
+
+#[test]
+fn get_unknown_content_errors() {
+    let dir = temp_root();
+    let store = DiskStore::open(dir.path()).expect("open");
+    let missing = ContentId([7u8; 32]);
+
+    assert!(!store.contains(&missing));
+    assert!(matches!(store.get(&missing), Err(Error::UnknownContent(_))));
+}
+
+#[test]
+fn corrupted_blob_returns_error_not_bad_data() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+
+    let id = store.put(b"soon to be corrupted").expect("put");
+    assert!(store.contains(&id));
+
+    clobber_all_files(dir.path());
+
+    assert!(matches!(store.get(&id), Err(Error::Corrupted(c)) if c == id));
+}
+
+#[test]
+fn separate_handles_see_each_others_writes() {
+    let dir = temp_root();
+    let mut a = DiskStore::open(dir.path()).expect("open a");
+    let b = DiskStore::open(dir.path()).expect("open b");
+
+    let id = a.put(b"visible across handles").expect("put through a");
+
+    assert!(b.contains(&id));
+    assert_eq!(
+        b.get(&id).expect("get through b"),
+        b"visible across handles"
+    );
+
+    let mut c = DiskStore::open(dir.path()).expect("open c");
+    c.add_ref(&id).expect("add_ref through c");
+    assert_eq!(a.ref_count(&id).expect("seen from a"), 1);
+}
+
+#[test]
+fn suite_is_fast_and_self_contained() {
+    let start = Instant::now();
+    for i in 0..25 {
+        let dir = temp_root();
+        let mut store = DiskStore::open(dir.path()).expect("open");
+        let content = format!("iteration {i}").into_bytes();
+        let id = store.put(&content).expect("put");
+        assert_eq!(store.get(&id).expect("get"), content);
+    }
+    assert!(
+        start.elapsed().as_secs() < 10,
+        "store suite must not touch real project trees or be slow"
+    );
+}
+
+#[test]
+fn link_out_shares_a_read_only_inode() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+
+    let id = store.put(b"linked into a tree").expect("put");
+    let dest = dir.path().join("tree/file.txt");
+    fs::create_dir_all(dest.parent().unwrap()).expect("mkdir tree");
+
+    store.link_out(&id, &dest).expect("link_out");
+
+    assert_eq!(fs::read(&dest).expect("read"), b"linked into a tree");
+
+    assert_eq!(fs::metadata(&dest).expect("meta").nlink(), 2);
+    assert!(
+        fs::metadata(&dest).expect("meta").permissions().readonly(),
+        "shared inode must be read-only"
+    );
+    assert!(
+        fs::write(&dest, b"poison").is_err(),
+        "in-place rewrite of a linked-out blob must fail"
+    );
+
+    assert_eq!(store.get(&id).expect("get"), b"linked into a tree");
+}
+
+#[test]
+fn link_out_unknown_content_errors_without_creating_dest() {
+    let dir = temp_root();
+    let store = DiskStore::open(dir.path()).expect("open");
+    let missing = ContentId([3u8; 32]);
+    let dest = dir.path().join("out/file.txt");
+
+    match store.link_out(&missing, &dest) {
+        Err(Error::UnknownContent(id)) => assert_eq!(id, missing),
+        other => panic!("expected UnknownContent, got {other:?}"),
+    }
+    assert!(!dest.exists());
+}
+
+#[test]
+fn link_out_corrupted_content_errors_without_creating_dest() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+
+    let id = store.put(b"soon corrupted").expect("put");
+    clobber_all_files(dir.path());
+    let dest = dir.path().join("out/file.txt");
+
+    match store.link_out(&id, &dest) {
+        Err(Error::Corrupted(c)) => assert_eq!(c, id),
+        other => panic!("expected Corrupted, got {other:?}"),
+    }
+    assert!(!dest.exists(), "corrupt bytes must never land in a tree");
+}
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use flashwt_store::{Entry as CacheEntry, ValidationCache};
+
+fn set_file_mtime(path: &std::path::Path, time: SystemTime) {
+    use std::os::unix::ffi::OsStrExt;
+    let dur = time.duration_since(UNIX_EPOCH).expect("time since epoch");
+    let ts = libc::timespec {
+        tv_sec: dur.as_secs() as _,
+        tv_nsec: dur.subsec_nanos() as _,
+    };
+    let times = [ts, ts];
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("cstring");
+    let ret = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    assert_eq!(ret, 0, "utimensat failed");
+}
+
+fn entry_for(path: &std::path::Path) -> (u64, SystemTime, u64, SystemTime) {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(path).expect("stat source file");
+    let ctime_secs = meta.ctime().max(0) as u64;
+    let ctime_nanos = meta.ctime_nsec().clamp(0, 999_999_999) as u32;
+    let ctime = UNIX_EPOCH + Duration::new(ctime_secs, ctime_nanos);
+    (
+        meta.len(),
+        meta.modified().expect("mtime"),
+        meta.ino(),
+        ctime,
+    )
+}
+
+fn write_source(root: &TempDir, text: &str) -> std::path::PathBuf {
+    let path = root.path().join("heavy/file.txt");
+    fs::create_dir_all(path.parent().unwrap()).expect("mkdir heavy");
+    fs::write(&path, text).expect("write source");
+
+    set_file_mtime(&path, UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    path
+}
+
+fn record_for(
+    cache: &mut ValidationCache,
+    store: &mut DiskStore,
+    path: &std::path::Path,
+) -> ContentId {
+    let bytes = fs::read(path).expect("read source");
+    let id = store.put(&bytes).expect("put");
+    let (size, mtime, inode, ctime) = entry_for(path);
+    cache.record(
+        "heavy/file.txt".to_string(),
+        CacheEntry {
+            size,
+            mtime,
+            inode,
+            ctime,
+            id,
+        },
+    );
+    id
+}
+
+#[test]
+fn cache_hits_on_unchanged_file() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "version one\n");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let mut cache = ValidationCache::open(store_dir.path());
+    assert!(cache.is_empty(), "fresh store has no cache yet");
+    let id = record_for(&mut cache, &mut store, &path);
+    cache.save().expect("save");
+
+    let reopened = ValidationCache::open(store_dir.path());
+    let (size, mtime, inode, ctime) = entry_for(&path);
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
+        Some(id),
+        "unchanged size+mtime+inode+ctime must be a hit"
+    );
+}
+
+#[test]
+fn cache_misses_on_mtime_change_with_same_size() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "touch me\n");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open");
+    let mut cache = ValidationCache::open(store_dir.path());
+    let id = record_for(&mut cache, &mut store, &path);
+    cache.save().expect("save");
+
+    let reopened = ValidationCache::open(store_dir.path());
+    let (size, mtime, inode, ctime) = entry_for(&path);
+    let touched = mtime + Duration::from_secs(1);
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, touched, inode, ctime),
+        None,
+        "a bumped mtime must be re-hashed even at the same size"
+    );
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
+        Some(id)
+    );
+}
+
+#[test]
+fn cache_misses_on_size_change_with_same_mtime() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "grow me\n");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open");
+    let mut cache = ValidationCache::open(store_dir.path());
+    let id = record_for(&mut cache, &mut store, &path);
+    cache.save().expect("save");
+
+    let reopened = ValidationCache::open(store_dir.path());
+    let (size, mtime, inode, ctime) = entry_for(&path);
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size + 1, mtime, inode, ctime),
+        None,
+        "a changed size must be re-hashed even at the same mtime"
+    );
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
+        Some(id)
+    );
+}
+
+#[test]
+fn cache_misses_after_content_change() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "before edit\n");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open");
+    let mut cache = ValidationCache::open(store_dir.path());
+    let old_id = record_for(&mut cache, &mut store, &path);
+    cache.save().expect("save");
+
+    fs::write(&path, "after edit, longer\n").expect("edit source");
+    let (size, mtime, inode, ctime) = entry_for(&path);
+
+    let reopened = ValidationCache::open(store_dir.path());
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
+        None
+    );
+    assert_ne!(store.put(b"after edit, longer\n").expect("put"), old_id);
+}
+
+#[test]
+fn pre_existing_store_without_cache_opens_empty_and_populates() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "first ingest ever\n");
+
+    let mut cache = ValidationCache::open(dir.path());
+    assert!(cache.is_empty(), "missing cache must open empty");
+
+    let id = record_for(&mut cache, &mut store, &path);
+    cache.save().expect("populate");
+
+    let reopened = ValidationCache::open(dir.path());
+    let (size, mtime, inode, ctime) = entry_for(&path);
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(
+        reopened.lookup("heavy/file.txt", size, mtime, inode, ctime),
+        Some(id)
+    );
+}
+
+#[test]
+fn deleted_cache_degrades_to_empty_not_error() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "cache me\n");
+
+    let mut cache = ValidationCache::open(dir.path());
+    record_for(&mut cache, &mut store, &path);
+    cache.save().expect("save");
+    fs::remove_file(dir.path().join("ingest-cache.tsv")).expect("delete cache");
+
+    let reopened = ValidationCache::open(dir.path());
+    assert!(reopened.is_empty(), "deleted cache must fall back to cold");
+    assert_eq!(
+        reopened.lookup(
+            "heavy/file.txt",
+            0,
+            SystemTime::UNIX_EPOCH,
+            0,
+            SystemTime::UNIX_EPOCH
+        ),
+        None
+    );
+}
+
+#[test]
+fn corrupt_cache_lines_are_dropped_not_trusted() {
+    let dir = temp_root();
+    fs::write(
+        dir.path().join("ingest-cache.tsv"),
+        "not a valid line\n\
+         heavy/short\t12\tx\t0\n\
+         heavy/badid\t5\t1\t2\tzzzz\n\
+         heavy/too\tmany\ttabs\there\tok\textra\n",
+    )
+    .expect("write garbage cache");
+
+    let cache = ValidationCache::open(dir.path());
+    assert!(
+        cache.is_empty(),
+        "garbage entries must vanish instead of serving wrong ids"
+    );
+}
+
+#[test]
+fn save_is_atomic_enough_to_round_trip() {
+    let dir = temp_root();
+    let mut cache = ValidationCache::open(dir.path());
+    cache.record(
+        "heavy/a.txt".into(),
+        CacheEntry {
+            size: 3,
+            mtime: UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(42),
+            inode: 12345,
+            ctime: UNIX_EPOCH + Duration::from_secs(1_700_000_001),
+            id: ContentId([7u8; 32]),
+        },
+    );
+    cache.record(
+        "heavy/nested/b.txt".into(),
+        CacheEntry {
+            size: 9,
+            mtime: UNIX_EPOCH + Duration::from_secs(1),
+            inode: 67890,
+            ctime: UNIX_EPOCH + Duration::from_secs(2),
+            id: ContentId([8u8; 32]),
+        },
+    );
+    cache.save().expect("save");
+
+    let reopened = ValidationCache::open(dir.path());
+    assert_eq!(reopened.len(), 2);
+    assert_eq!(
+        reopened.lookup(
+            "heavy/a.txt",
+            3,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(42),
+            12345,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_001),
+        ),
+        Some(ContentId([7u8; 32])),
+        "sub-second mtime precision and inode/ctime must survive the round trip"
+    );
+}
+
+use flashwt_store::IngestOptions;
+
+fn no_excludes() -> IngestOptions<'static> {
+    IngestOptions {
+        snapshots: false,
+        exclude: &|_| false,
+    }
+}
+
+fn write_ingest_tree(root: &std::path::Path) {
+    fs::create_dir_all(root.join("heavy/pkg")).expect("mkdir heavy/pkg");
+    fs::write(root.join("heavy/a.txt"), "alpha\n").expect("write a");
+    fs::write(root.join("heavy/pkg/b.txt"), "beta\n").expect("write b");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("a.txt", root.join("heavy/link.txt")).expect("symlink");
+}
+
+#[test]
+fn ingest_tree_walks_stores_and_summarizes_a_tree() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    write_ingest_tree(src.path());
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let ingested = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("ingest");
+
+    assert_eq!(
+        ingested.files.keys().collect::<Vec<_>>(),
+        ["heavy/a.txt", "heavy/pkg/b.txt"]
+    );
+    assert!(ingested.dirs.contains(&"heavy".to_string()));
+    assert!(ingested.dirs.contains(&"heavy/pkg".to_string()));
+    assert_eq!(ingested.file_sizes["heavy/a.txt"], 6);
+    assert_eq!(
+        ingested.symlinks.get("heavy/link.txt").map(String::as_str),
+        Some("a.txt"),
+        "symlink targets are recorded raw, never followed"
+    );
+
+    for (rel, id) in &ingested.files {
+        let expected = match rel.as_str() {
+            "heavy/a.txt" => "alpha\n",
+            "heavy/pkg/b.txt" => "beta\n",
+            other => panic!("unexpected ingested path {other}"),
+        };
+        assert_eq!(store.get(id).expect("get"), expected.as_bytes());
+    }
+}
+
+#[test]
+fn ingest_tree_records_directory_permission_bits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    write_ingest_tree(src.path());
+    fs::set_permissions(
+        src.path().join("heavy/pkg"),
+        fs::Permissions::from_mode(0o750),
+    )
+    .expect("chmod");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let ingested = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("ingest");
+
+    assert_eq!(ingested.dir_modes["heavy/pkg"] & 0o7777, 0o750);
+    assert_eq!(ingested.modes["heavy/a.txt"] & 0o7777, 0o644);
+}
+
+#[test]
+fn ingest_tree_rehashes_changed_content_and_feeds_the_cache() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    write_ingest_tree(src.path());
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let first = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("first ingest");
+
+    let warm = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("warm ingest");
+    assert_eq!(warm.files, first.files);
+
+    fs::write(src.path().join("heavy/a.txt"), "alpha, edited\n").expect("edit");
+    let second = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("re-ingest after edit");
+    assert_ne!(second.files["heavy/a.txt"], first.files["heavy/a.txt"]);
+    assert_eq!(
+        store.get(&second.files["heavy/a.txt"]).expect("get edited"),
+        b"alpha, edited\n"
+    );
+    assert_eq!(
+        second.files["heavy/pkg/b.txt"],
+        first.files["heavy/pkg/b.txt"]
+    );
+
+    let cache = ValidationCache::open(store_dir.path());
+    assert!(
+        cache.len() >= 2,
+        "ingest must populate the validation cache"
+    );
+}
+
+#[test]
+fn forced_mtime_collision_and_identical_size_rehashes_fresh_content() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let heavy = src.path().join("heavy");
+    fs::create_dir_all(&heavy).expect("mkdir");
+    let file = heavy.join("item.txt");
+    fs::write(&file, "initial content\n").expect("write initial");
+
+    let t0 = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    set_file_mtime(&file, t0);
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let first = store
+        .ingest_tree(src.path(), &heavy, &no_excludes())
+        .expect("first ingest");
+    let id1 = first.files["heavy/item.txt"];
+
+    fs::write(&file, "updated content\n").expect("write updated");
+
+    set_file_mtime(&file, t0);
+
+    let second = store
+        .ingest_tree(src.path(), &heavy, &no_excludes())
+        .expect("second ingest");
+    let id2 = second.files["heavy/item.txt"];
+    assert_ne!(
+        id1, id2,
+        "fresh content must be re-hashed despite mtime and size collision"
+    );
+    assert_eq!(
+        store.get(&id2).expect("get updated blob"),
+        b"updated content\n"
+    );
+}
+
+#[test]
+fn near_now_mtime_rehashes_even_with_identical_size_and_mtime() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    let heavy = src.path().join("heavy");
+    fs::create_dir_all(&heavy).expect("mkdir");
+    let file = heavy.join("fast.txt");
+    fs::write(&file, "rapid write 1\n").expect("write 1");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let first = store
+        .ingest_tree(src.path(), &heavy, &no_excludes())
+        .expect("first ingest");
+    let id1 = first.files["heavy/fast.txt"];
+
+    fs::write(&file, "rapid write 2\n").expect("write 2");
+
+    let second = store
+        .ingest_tree(src.path(), &heavy, &no_excludes())
+        .expect("second ingest");
+    let id2 = second.files["heavy/fast.txt"];
+    assert_ne!(
+        id1, id2,
+        "near-now rewrite must rehash rather than serving stale blob"
+    );
+    assert_eq!(store.get(&id2).expect("get"), b"rapid write 2\n");
+}
+
+#[test]
+fn ingest_tree_reputs_a_swept_blob_on_a_cache_hit() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    write_ingest_tree(src.path());
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let first = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("first ingest");
+
+    let id = first.files["heavy/a.txt"];
+    let hex = id.to_string();
+    let blob = store_dir
+        .path()
+        .join("objects")
+        .join(&hex[..2])
+        .join(&hex[2..]);
+    fs::remove_file(&blob).expect("sweep blob");
+    assert!(!store.contains(&id));
+
+    let second = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("re-ingest after sweep");
+    assert_eq!(second.files["heavy/a.txt"], id, "same bytes, same address");
+    assert!(store.contains(&id));
+    assert_eq!(store.get(&id).expect("get"), b"alpha\n");
+}
+
+#[test]
+fn ingest_tree_skips_excluded_paths_and_subtrees() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    write_ingest_tree(src.path());
+    fs::create_dir_all(src.path().join("heavy/skip")).expect("mkdir skip");
+    fs::write(src.path().join("heavy/skip/x.txt"), "skip me\n").expect("write x");
+    fs::write(src.path().join("heavy/skipme.txt"), "skip me too\n").expect("write skipme");
+
+    let options = IngestOptions {
+        snapshots: false,
+        exclude: &|rel: &str| rel == "heavy/skip" || rel.ends_with("skipme.txt"),
+    };
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let ingested = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &options)
+        .expect("ingest");
+
+    assert!(!ingested.files.contains_key("heavy/skipme.txt"));
+    assert!(!ingested.files.contains_key("heavy/skip/x.txt"));
+    assert!(!ingested.dirs.contains(&"heavy/skip".to_string()));
+    assert!(ingested.files.contains_key("heavy/a.txt"));
+}
+
+#[test]
+fn ingest_tree_fails_loudly_on_fifos_only_when_snapshots_enabled() {
+    let store_dir = temp_root();
+    let src = TempDir::new().expect("tempdir");
+    write_ingest_tree(src.path());
+    let fifo = src.path().join("heavy/pipe");
+    let c_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("cstr");
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0, "mkfifo");
+
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    assert!(
+        store
+            .ingest_tree(
+                src.path(),
+                &src.path().join("heavy"),
+                &IngestOptions {
+                    snapshots: true,
+                    exclude: &|_| false
+                }
+            )
+            .is_err(),
+        "snapshot mode must refuse content a manifest cannot represent"
+    );
+
+    let ingested = store
+        .ingest_tree(src.path(), &src.path().join("heavy"), &no_excludes())
+        .expect("ingest without snapshots");
+    assert!(!ingested.files.contains_key("heavy/pipe"));
+}
+
+use flashwt_store::VerifiedLedger;
+use sha2::Digest;
+use std::fs::FileTimes;
+
+fn tamper_blob(store_root: &std::path::Path, id: &ContentId, restore_mtime: bool) {
+    let hex = id.to_string();
+    let path = store_root.join("objects").join(&hex[..2]).join(&hex[2..]);
+    let meta = fs::metadata(&path).expect("stat blob");
+    let mtime = meta.modified().expect("blob mtime");
+    let mut bytes = fs::read(&path).expect("read blob");
+    assert!(!bytes.is_empty(), "tampering an empty blob proves nothing");
+    bytes[0] ^= 0xff;
+    fs::write(&path, &bytes).expect("tamper");
+    if restore_mtime {
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("reopen blob");
+        f.set_times(FileTimes::new().set_modified(mtime))
+            .expect("restore mtime");
+    } else {
+        let shifted = mtime + std::time::Duration::from_secs(60);
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("reopen blob");
+        f.set_times(FileTimes::new().set_modified(shifted))
+            .expect("shift mtime");
+    }
+}
+
+#[test]
+fn ensure_verified_hashes_once_then_trusts_the_fingerprint() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"verified once\n").expect("put");
+    drop(store);
+
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    tamper_blob(dir.path(), &id, true);
+    store
+        .ensure_verified(&id)
+        .expect("trust path must not re-hash");
+}
+
+#[test]
+fn ensure_verified_rehashes_when_the_fingerprint_moves() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"fingerprint me\n").expect("put");
+    drop(store);
+
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    tamper_blob(dir.path(), &id, false);
+    match store.ensure_verified(&id) {
+        Err(Error::Corrupted(c)) => assert_eq!(c, id),
+        other => panic!("expected Corrupted, got {other:?}"),
+    }
+}
+
+#[test]
+fn ensure_verified_records_nothing_on_a_mismatch() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"never trusted\n").expect("put");
+    drop(store);
+
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    tamper_blob(dir.path(), &id, false);
+    assert!(matches!(
+        store.ensure_verified(&id),
+        Err(Error::Corrupted(_))
+    ));
+    drop(store);
+
+    let store = DiskStore::open(dir.path()).expect("re-reopen");
+    assert!(matches!(
+        store.ensure_verified(&id),
+        Err(Error::Corrupted(_))
+    ));
+}
+
+#[test]
+fn first_touch_of_a_never_verified_blob_verifies() {
+    let dir = temp_root();
+
+    let id = ContentId([0xab_u8; 32]);
+    let hex = id.to_string();
+    let path = dir.path().join("objects").join(&hex[..2]).join(&hex[2..]);
+    fs::create_dir_all(path.parent().unwrap()).expect("mkdir shard");
+    fs::write(&path, b"bytes nobody hashed\n").expect("place blob by hand");
+
+    let store = DiskStore::open(dir.path()).expect("open");
+    match store.ensure_verified(&id) {
+        Err(Error::Corrupted(_)) => {}
+        other => panic!("first touch must verify, got {other:?}"),
+    }
+
+    let content = b"honestly addressed\n";
+    let good = ContentId(sha2::Sha256::digest(content).into());
+    let hex = good.to_string();
+    let gpath = dir.path().join("objects").join(&hex[..2]).join(&hex[2..]);
+    fs::create_dir_all(gpath.parent().unwrap()).expect("mkdir shard");
+    fs::write(&gpath, content).expect("place honest blob");
+    store.ensure_verified(&good).expect("first touch verifies");
+    tamper_blob(dir.path(), &good, true);
+    store
+        .ensure_verified(&good)
+        .expect("verified once means trusted after");
+}
+
+#[test]
+fn put_records_a_fingerprint_verified_by_construction() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"addressed by hash\n").expect("put");
+    drop(store);
+
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    tamper_blob(dir.path(), &id, true);
+    store
+        .ensure_verified(&id)
+        .expect("put's fingerprint must be persisted with the ledger");
+}
+
+#[test]
+fn delete_drops_the_ledger_entry_best_effort() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"swept away\n").expect("put");
+    store.delete(&id).expect("delete");
+    drop(store);
+
+    let hex = id.to_string();
+    let path = dir.path().join("objects").join(&hex[..2]).join(&hex[2..]);
+    fs::create_dir_all(path.parent().unwrap()).expect("mkdir shard");
+    fs::write(&path, b"different bytes\n").expect("reuse address");
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    match store.ensure_verified(&id) {
+        Err(Error::Corrupted(_)) => {}
+        other => panic!("stale trust must not survive deletion, got {other:?}"),
+    }
+}
+
+#[test]
+fn missing_or_corrupt_ledger_degrades_to_full_verification() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"no ledger survives\n").expect("put");
+    drop(store);
+    tamper_blob(dir.path(), &id, false);
+
+    fs::remove_file(dir.path().join("verified.tsv")).expect("rm ledger");
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    assert!(matches!(
+        store.ensure_verified(&id),
+        Err(Error::Corrupted(_))
+    ));
+
+    fs::write(
+        dir.path().join("verified.tsv"),
+        "garbage\nzz\t5\t1\t1\nab\toops\n",
+    )
+    .expect("corrupt the ledger");
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    assert!(matches!(
+        store.ensure_verified(&id),
+        Err(Error::Corrupted(_))
+    ));
+}
+
+#[test]
+fn get_stays_always_hash_regardless_of_the_ledger() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let id = store.put(b"api contract\n").expect("put");
+    drop(store);
+
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    tamper_blob(dir.path(), &id, true);
+
+    store.ensure_verified(&id).expect("ledger hit");
+    assert!(matches!(store.get(&id), Err(Error::Corrupted(_))));
+}
+
+#[test]
+fn unknown_content_stays_unknown_through_ensure_verified() {
+    let dir = temp_root();
+    let store = DiskStore::open(dir.path()).expect("open");
+    let missing = ContentId([4u8; 32]);
+    assert!(matches!(
+        store.ensure_verified(&missing),
+        Err(Error::UnknownContent(m)) if m == missing
+    ));
+}
+
+#[test]
+fn ledger_round_trips_sub_second_mtimes_through_disk() {
+    let dir = temp_root();
+    let content = b"precision\n";
+    let id = ContentId(sha2::Sha256::digest(content).into());
+    {
+        let mut store = DiskStore::open(dir.path()).expect("open");
+        store.put(content).expect("put");
+
+        let hex = id.to_string();
+        let path = dir.path().join("objects").join(&hex[..2]).join(&hex[2..]);
+        let f = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_times(FileTimes::new().set_modified(
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(7),
+        ))
+        .unwrap();
+        store.ensure_verified(&id).expect("verify");
+    }
+
+    let meta = {
+        let hex = id.to_string();
+        let path = dir.path().join("objects").join(&hex[..2]).join(&hex[2..]);
+        fs::metadata(&path).expect("blob survived")
+    };
+    let mtime = meta.modified().unwrap();
+    let store = DiskStore::open(dir.path()).expect("reopen");
+    store
+        .ensure_verified(&id)
+        .expect("nanosecond precision must survive the save");
+
+    let ledger = VerifiedLedger::open(dir.path());
+    assert!(
+        ledger.matches(&id, meta.len(), mtime),
+        "the persisted entry must match a fresh stat"
+    );
+    assert!(!ledger.matches(&id, meta.len() + 1, mtime));
+    assert!(!ledger.matches(&id, meta.len(), mtime + Duration::from_nanos(1)));
+}
+
+#[test]
+fn save_without_changes_is_a_noop_not_a_rewrite() {
+    let dir = temp_root();
+
+    let mut cache = ValidationCache::open(dir.path());
+    cache.save().expect("clean save");
+    assert!(
+        !dir.path().join("ingest-cache.tsv").exists(),
+        "a clean save must not create the cache file"
+    );
+
+    let mut store = DiskStore::open(dir.path()).expect("open");
+    let src = TempDir::new().expect("tempdir");
+    let path = write_source(&src, "dirty tracking\n");
+    record_for(&mut cache, &mut store, &path);
+    cache.save().expect("dirty save");
+    let before = fs::metadata(dir.path().join("ingest-cache.tsv"))
+        .expect("cache exists after dirty save")
+        .modified()
+        .expect("mtime");
+
+    let mut reopened = ValidationCache::open(dir.path());
+    reopened.save().expect("clean save on reopened cache");
+    let after = fs::metadata(dir.path().join("ingest-cache.tsv"))
+        .expect("cache still there")
+        .modified()
+        .expect("mtime");
+    assert_eq!(before, after, "clean save must not rewrite the TSV");
+}
+
+#[test]
+fn stream_hash_file_matches_for_bytes_across_sizes() {
+    let dir = TempDir::new().expect("tempdir");
+
+    let empty_path = dir.path().join("empty.txt");
+    fs::write(&empty_path, b"").expect("write empty");
+    assert_eq!(
+        stream_hash_file(&empty_path).expect("hash empty"),
+        ContentId::for_bytes(b"")
+    );
+
+    let small_path = dir.path().join("small.txt");
+    let small_data = b"hello streaming ingest world\n";
+    fs::write(&small_path, small_data).expect("write small");
+    assert_eq!(
+        stream_hash_file(&small_path).expect("hash small"),
+        ContentId::for_bytes(small_data)
+    );
+
+    let large_path = dir.path().join("large.bin");
+    let large_data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+    fs::write(&large_path, &large_data).expect("write large");
+    assert_eq!(
+        stream_hash_file(&large_path).expect("hash large"),
+        ContentId::for_bytes(&large_data)
+    );
+}
+
+#[test]
+fn put_file_streams_into_store_and_deduplicates() {
+    let store_dir = temp_root();
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let src = TempDir::new().expect("tempdir");
+
+    let file_path = src.path().join("chunked.bin");
+    let data: Vec<u8> = (0..128 * 1024).map(|i| (i % 173) as u8).collect();
+    fs::write(&file_path, &data).expect("write data");
+
+    let id = store.put_file(&file_path).expect("put_file");
+    assert_eq!(id, ContentId::for_bytes(&data));
+    assert_eq!(store.get(&id).expect("get"), data);
+
+    let duplicate_path = src.path().join("duplicate.bin");
+    fs::write(&duplicate_path, &data).expect("write duplicate");
+    let id2 = store.put_file(&duplicate_path).expect("put duplicate");
+    assert_eq!(id2, id);
+}
+
+#[test]
+fn parallel_cold_ingest_produces_identical_blob_ids_and_manifest_bytes() {
+    let src = TempDir::new().expect("tempdir");
+    let heavy = src.path().join("heavy");
+    fs::create_dir_all(&heavy).expect("mkdir heavy");
+
+    for dir_idx in 0..4 {
+        let sub = heavy.join(format!("pkg_{dir_idx}"));
+        fs::create_dir_all(&sub).expect("mkdir sub");
+        for file_idx in 0..30 {
+            let file_path = sub.join(format!("file_{file_idx}.dat"));
+            if file_idx % 5 == 0 {
+                let large_bytes: Vec<u8> = (0..80 * 1024)
+                    .map(|b| ((dir_idx * 31 + file_idx * 7 + b) % 256) as u8)
+                    .collect();
+                fs::write(&file_path, &large_bytes).expect("write large");
+            } else if file_idx % 3 == 0 {
+                fs::write(&file_path, b"shared duplicate file content\n").expect("write duplicate");
+            } else {
+                let content = format!("package {dir_idx} item {file_idx}\n");
+                fs::write(&file_path, content.as_bytes()).expect("write");
+            }
+        }
+    }
+
+    let store1_dir = temp_root();
+    let mut store1 = DiskStore::open(store1_dir.path()).expect("open store 1");
+    let options = IngestOptions {
+        snapshots: true,
+        exclude: &|_| false,
+    };
+    let ingested1 = store1
+        .ingest_tree(src.path(), &heavy, &options)
+        .expect("ingest 1");
+    let manifest1 = ingested1
+        .to_snapshot_manifest("heavy", None)
+        .expect("manifest 1");
+
+    let store2_dir = temp_root();
+    let mut store2 = DiskStore::open(store2_dir.path()).expect("open store 2");
+    let ingested2 = store2
+        .ingest_tree(src.path(), &heavy, &options)
+        .expect("ingest 2");
+    let manifest2 = ingested2
+        .to_snapshot_manifest("heavy", None)
+        .expect("manifest 2");
+
+    assert_eq!(ingested1.files, ingested2.files);
+    assert_eq!(ingested1.file_sizes, ingested2.file_sizes);
+    assert_eq!(ingested1.dirs, ingested2.dirs);
+    assert_eq!(ingested1.dir_modes, ingested2.dir_modes);
+    assert_eq!(ingested1.modes, ingested2.modes);
+
+    let bytes1 = manifest1.serialize();
+    let bytes2 = manifest2.serialize();
+    assert_eq!(
+        bytes1, bytes2,
+        "manifest bytes must be identical for identical inputs"
+    );
+    assert_eq!(manifest1.entries.len(), manifest2.entries.len());
+    assert_eq!(manifest1.total_size, manifest2.total_size);
+}
+
+#[test]
+fn put_batch_stores_and_deduplicates_blobs() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open store");
+
+    let items: Vec<&[u8]> = vec![
+        b"alpha payload",
+        b"beta payload",
+        b"alpha payload",
+        b"gamma payload",
+    ];
+
+    let ids = store.put_batch(&items).expect("put_batch");
+    assert_eq!(ids.len(), 4);
+    assert_eq!(ids[0], ids[2]);
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(ids[1], ids[3]);
+
+    assert_eq!(store.get(&ids[0]).expect("get alpha"), b"alpha payload");
+    assert_eq!(store.get(&ids[1]).expect("get beta"), b"beta payload");
+    assert_eq!(store.get(&ids[3]).expect("get gamma"), b"gamma payload");
+
+    let empty = store.put_batch(&[]).expect("put_batch empty");
+    assert!(empty.is_empty());
+
+    let delta = store
+        .put_batch(&[b"alpha payload", b"delta payload"])
+        .expect("put_batch delta");
+    assert_eq!(delta[0], ids[0]);
+    assert_eq!(store.get(&delta[1]).expect("get delta"), b"delta payload");
+}
+
+#[test]
+fn put_files_batch_streams_and_deduplicates() {
+    let store_dir = temp_root();
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let src = TempDir::new().expect("tempdir");
+
+    let path_a = src.path().join("file_a.bin");
+    let path_b = src.path().join("file_b.bin");
+    let path_c = src.path().join("file_c.bin");
+
+    let data_a = b"content for file A".to_vec();
+    let data_b = b"content for file B which is different".to_vec();
+    let data_c = data_a.clone();
+
+    fs::write(&path_a, &data_a).expect("write a");
+    fs::write(&path_b, &data_b).expect("write b");
+    fs::write(&path_c, &data_c).expect("write c");
+
+    let id_a = ContentId::for_bytes(&data_a);
+    let id_b = ContentId::for_bytes(&data_b);
+    let id_c = ContentId::for_bytes(&data_c);
+
+    let batch = vec![
+        (path_a.as_path(), id_a),
+        (path_b.as_path(), id_b),
+        (path_c.as_path(), id_c),
+    ];
+
+    let ids = store.put_files_batch(&batch).expect("put_files_batch");
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids[0], id_a);
+    assert_eq!(ids[1], id_b);
+    assert_eq!(ids[2], id_a);
+
+    assert_eq!(store.get(&id_a).expect("get a"), data_a);
+    assert_eq!(store.get(&id_b).expect("get b"), data_b);
+}
+
+#[test]
+fn batch_durability_hardware_sync_enabled() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open store");
+
+    unsafe {
+        std::env::set_var("FLASHWT_TEST_FORCE_SYNC", "1");
+    }
+    let res = store.put_batch(&[b"durability item 1", b"durability item 2"]);
+    unsafe {
+        std::env::remove_var("FLASHWT_TEST_FORCE_SYNC");
+    }
+
+    let ids = res.expect("put_batch with sync");
+    assert_eq!(ids.len(), 2);
+    assert_eq!(store.get(&ids[0]).expect("get 1"), b"durability item 1");
+    assert_eq!(store.get(&ids[1]).expect("get 2"), b"durability item 2");
+}
+
+#[test]
+fn interrupted_write_debris_leaves_no_partial_truth() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open store");
+
+    let content = b"resilient payload";
+    let id = ContentId::for_bytes(content);
+    let hex = id.to_string();
+    let shard_dir = dir.path().join("objects").join(&hex[..2]);
+    fs::create_dir_all(&shard_dir).expect("create shard dir");
+
+    let debris_path = shard_dir.join(".tmp_interrupted_write");
+    fs::write(&debris_path, b"incomplete bytes").expect("write debris");
+
+    assert!(!store.contains(&id));
+    assert!(matches!(store.get(&id), Err(Error::UnknownContent(_))));
+    let stored_ids = store.ids().expect("ids");
+    assert!(!stored_ids.contains(&id));
+
+    let final_id = store.put(content).expect("put");
+    assert_eq!(final_id, id);
+    assert!(store.contains(&id));
+    assert_eq!(store.get(&id).expect("get"), content);
+}

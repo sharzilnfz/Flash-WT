@@ -1,11 +1,11 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/sharzilnfz/wt/schema/v1.json",
-  "title": "WT Envelope v1 Schema",
-  "description": "Authoritative JSON schema for the wt CLI v1 machine-readable output envelope and command payloads.",
+  "$id": "https://github.com/sharzilnfz/Flash-WT/schema/v1.json",
+  "title": "Flash-WT Envelope v1 Schema",
+  "description": "Authoritative JSON schema for the flashwt CLI v1 machine-readable output envelope and command payloads.",
   "type": "object",
   "required": [
-    "wt_version",
+    "flashwt_version",
     "schema_version",
     "command",
     "status",
@@ -13,7 +13,7 @@
     "diagnostics"
   ],
   "properties": {
-    "wt_version": {
+    "flashwt_version": {
       "type": "string",
       "description": "Cargo package version of the binary that generated this envelope."
     },
@@ -39,7 +39,7 @@
         "lease",
         "doctor"
       ],
-      "description": "Canonical name of the invoked wt command."
+      "description": "Canonical name of the invoked flashwt command."
     },
     "status": {
       "type": "string",
@@ -337,7 +337,7 @@
         "total_bytes",
         "baseline_copy_duration_ms",
         "baseline_copy_bytes",
-        "wt_hydration_duration_ms",
+        "flashwt_hydration_duration_ms",
         "speedup_ratio",
         "hydration_method",
         "bytes_shared_cow",
@@ -352,7 +352,7 @@
         "total_bytes": { "type": "integer", "minimum": 0 },
         "baseline_copy_duration_ms": { "type": "integer", "minimum": 0 },
         "baseline_copy_bytes": { "type": "integer", "minimum": 0 },
-        "wt_hydration_duration_ms": { "type": "integer", "minimum": 0 },
+        "flashwt_hydration_duration_ms": { "type": "integer", "minimum": 0 },
         "speedup_ratio": { "type": "number" },
         "hydration_method": { "type": "string" },
         "bytes_shared_cow": { "type": "integer", "minimum": 0 },
@@ -453,18 +453,18 @@
     "DoctorEnvVars": {
       "type": "object",
       "properties": {
-        "wt_store": { "type": "string" },
-        "wt_snapshots": { "type": "string" },
-        "wt_snapshots_v2": { "type": "string" },
-        "wt_verify": { "type": "string" },
-        "wt_timing": { "type": "string" },
-        "wt_gc_grace": { "type": "string" },
-        "wt_snapshot_cap": { "type": "string" },
-        "wt_max_snapshot_bytes": { "type": "string" },
-        "wt_hardlink": { "type": "string" },
-        "wt_no_hardlink": { "type": "string" },
-        "wt_tiny_bypass": { "type": "string" },
-        "wt_no_tiny_bypass": { "type": "string" }
+        "flashwt_store": { "type": "string" },
+        "flashwt_snapshots": { "type": "string" },
+        "flashwt_snapshots_v2": { "type": "string" },
+        "flashwt_verify": { "type": "string" },
+        "flashwt_timing": { "type": "string" },
+        "flashwt_gc_grace": { "type": "string" },
+        "flashwt_snapshot_cap": { "type": "string" },
+        "flashwt_max_snapshot_bytes": { "type": "string" },
+        "flashwt_hardlink": { "type": "string" },
+        "flashwt_no_hardlink": { "type": "string" },
+        "flashwt_tiny_bypass": { "type": "string" },
+        "flashwt_no_tiny_bypass": { "type": "string" }
       },
       "additionalProperties": false
     },

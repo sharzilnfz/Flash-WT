@@ -20,7 +20,7 @@ workspace creation effectively free.
 ## Solution
 
 A single Rust binary, installed with brew or curl, that wraps git worktree
-creation. Running `wt create feature-x` produces a full working copy in
+creation. Running `flashwt create feature-x` produces a full working copy in
 seconds, with heavy untracked directories such as `node_modules`, build
 outputs, and caches already present. The directories are listed in a manifest
 file using gitignore syntax. Hydration copies links instead of bytes, using
@@ -35,7 +35,7 @@ Version 1 ships as an explicit command; an opt-in watcher daemon comes later
 
 ## User Stories
 
-1. As a developer on macOS, I want `wt create feature-x` to give me a working
+1. As a developer on macOS, I want `flashwt create feature-x` to give me a working
    copy with dependencies in seconds, so that switching branches stops costing
    me minutes.
 2. As a developer running several coding agents, I want to create many

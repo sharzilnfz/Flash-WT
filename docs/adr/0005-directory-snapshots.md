@@ -3,7 +3,7 @@
 We considered keeping per-file placement as the only hydration path, but a
 warm create pays an open + `fclonefileat` train for every file — thousands
 of syscalls where the filesystem offers one. APFS can clone a whole
-directory tree in a single recursive `clonefile(2)`, so `wt` now keeps
+directory tree in a single recursive `clonefile(2)`, so `flashwt` now keeps
 rebuildable whole-directory snapshots in the store and clones one out per
 heavy directory on a hit. This implements Phase 2 of
 AGENT_HANDOFF_PLAN_REVISED.md (fast-hydration ticket 08).
@@ -23,7 +23,7 @@ AGENT_HANDOFF_PLAN_REVISED.md (fast-hydration ticket 08).
   worktrees and machines-with-identical-trees.
 - **Integrity at publish.** Every file blob is proven before it is
   hardlinked into the staging tree (verified-ledger trust, or full hashing
-  under `WT_VERIFY=1`, which also bypasses hits entirely). After the
+  under `FLASHWT_VERIFY=1`, which also bypasses hits entirely). After the
   atomic rename, a hit performs zero blob reads — the same trust model as
   verified-ledger materialization, not a weaker one.
 - **Publish is the only write.** Staging under `snapshots/tmp/`, then one
@@ -39,7 +39,7 @@ AGENT_HANDOFF_PLAN_REVISED.md (fast-hydration ticket 08).
   mirror write, instead of N file placements.
 - Linux gets nothing yet: there is no single-call recursive reflink, so
   the gate is a no-op there rather than a disguised per-file copy.
-- Opt-in via `WT_SNAPSHOTS=1` until parity and benchmark gates pass;
+- Opt-in via `FLASHWT_SNAPSHOTS=1` until parity and benchmark gates pass;
   default stays off.
 
 ## Amendment (2026-08-26)
@@ -51,13 +51,13 @@ whose exec bits disagree with the record are replaced by private copies
 rather than chmod-ing the shared blob). Snapshot parity and ladder parity
 are now identical; the benchmark suite's gap tolerance exists only as a
 regression tripwire. Unreferenced snapshots are additionally bounded by
-an LRU retention cap (`WT_SNAPSHOT_CAP`, default 64).
+an LRU retention cap (`FLASHWT_SNAPSHOT_CAP`, default 64).
 
 ## Amendment (2026-08-29)
 
 Snapshots are no longer opt-in. The original gate kept the default off
-until parity and benchmark gates passed; those gates passed, so `wt` now
+until parity and benchmark gates passed; those gates passed, so `flashwt` now
 probes the host at startup and enables snapshot hydration by default on
-macOS APFS. `WT_SNAPSHOTS=0` opts out and forces the per-file ladder;
-`WT_VERIFY=1` still bypasses hits entirely. The parity tripwire and the
+macOS APFS. `FLASHWT_SNAPSHOTS=0` opts out and forces the per-file ladder;
+`FLASHWT_VERIFY=1` still bypasses hits entirely. The parity tripwire and the
 LRU/disk caps above carry over unchanged.

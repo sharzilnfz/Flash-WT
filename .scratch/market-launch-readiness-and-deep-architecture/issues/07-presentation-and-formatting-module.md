@@ -10,7 +10,7 @@ Multiple command modules (`create.rs`, `clean.rs`, `list.rs`, `demo.rs`) indepen
 
 ## Work
 
-1. Introduce a deep `output` module in `crates/wt-cli/src/output.rs` that encapsulates:
+1. Introduce a deep `output` module in `crates/flashwt-cli/src/output.rs` that encapsulates:
    - Byte unit scaling and formatting (`HumanBytes`).
    - Duration representation (`HumanDuration`).
    - Digit grouping for file and object counts (`HumanCount`).
@@ -20,17 +20,17 @@ Multiple command modules (`create.rs`, `clean.rs`, `list.rs`, `demo.rs`) indepen
 
 ## Files Owned
 
-- `crates/wt-cli/src/output.rs`
-- `crates/wt-cli/src/main.rs`
-- `crates/wt-cli/src/commands/create.rs`
-- `crates/wt-cli/src/commands/clean.rs`
-- `crates/wt-cli/src/commands/list.rs`
-- `crates/wt-cli/src/commands/demo.rs`
-- `crates/wt-cli/tests/output.rs`
+- `crates/flashwt-cli/src/output.rs`
+- `crates/flashwt-cli/src/main.rs`
+- `crates/flashwt-cli/src/commands/create.rs`
+- `crates/flashwt-cli/src/commands/clean.rs`
+- `crates/flashwt-cli/src/commands/list.rs`
+- `crates/flashwt-cli/src/commands/demo.rs`
+- `crates/flashwt-cli/tests/output.rs`
 
 ## Done When
 
-- [ ] Presentation helpers reside in `crates/wt-cli/src/output.rs`.
+- [ ] Presentation helpers reside in `crates/flashwt-cli/src/output.rs`.
 - [ ] `create.rs`, `clean.rs`, `list.rs`, and `demo.rs` use the unified presentation module.
 - [ ] No duplicate `format_bytes` or `format_duration` functions remain in command handlers.
 - [ ] Unit tests for `output.rs` pass with comprehensive edge-case coverage.

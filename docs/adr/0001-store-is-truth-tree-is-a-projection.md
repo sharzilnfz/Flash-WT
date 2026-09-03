@@ -21,7 +21,7 @@ than made faster underneath.
 
 - Editors and build tools keep working on real files. Both humans and agents
   interact with normal on-disk files in the projected tree.
-- Explicit hydration (`wt hydrate` or `wt new`) is the sole mechanism for
+- Explicit hydration (`flashwt hydrate` or `flashwt new`) is the sole mechanism for
   materializing files from the store into trees.
 - There is no background watcher daemon, automatic synchronization layer, or
   bidirectional tree-store sync. Edits in the tree stay private to that tree.

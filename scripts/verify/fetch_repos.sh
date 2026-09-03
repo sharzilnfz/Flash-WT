@@ -1,18 +1,8 @@
 #!/usr/bin/env bash
-# scripts/verify/fetch_repos.sh — Real-world repository integration and setup manager.
-#
-# Prepares realistic git repositories for real-world integration verification:
-#  1. Node.js repo with deeply nested node_modules, .bin symlinks, package.json
-#  2. Rust workspace with Cargo.toml, target/debug/ deps, rlibs, binaries
-#  3. Python project with pyproject.toml, .venv/, site-packages, pycache, symlinks
-#  4. Multi-ecosystem monorepo with web, rust, and python under a unified .wtinclude
-#
-# Can be run standalone or sourced by test suites.
 
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck disable=SC1091
 . "$DIR/generators.sh"
 
 init_git_repo() {
@@ -57,15 +47,14 @@ node_modules/
 dist/
 EOF
 
-    cat << 'EOF' > "$target_dir/.wtinclude"
+    cat << 'EOF' > "$target_dir/.flashwtinclude"
 node_modules/
 dist/
 EOF
 
-    git -C "$target_dir" add package.json index.js .gitignore .wtinclude
+    git -C "$target_dir" add package.json index.js .gitignore .flashwtinclude
     git -C "$target_dir" commit -qm "feat: initial commit of node service"
 
-    # Populate realistic node_modules
     generate_tree_d "$target_dir/node_modules" "$file_count"
 }
 
@@ -98,14 +87,13 @@ target/
 .DS_Store
 EOF
 
-    cat << 'EOF' > "$target_dir/.wtinclude"
+    cat << 'EOF' > "$target_dir/.flashwtinclude"
 target/
 EOF
 
-    git -C "$target_dir" add Cargo.toml src/main.rs .gitignore .wtinclude
+    git -C "$target_dir" add Cargo.toml src/main.rs .gitignore .flashwtinclude
     git -C "$target_dir" commit -qm "feat: initial commit of rust workspace"
 
-    # Populate realistic target/debug tree
     generate_tree_rust_target "$target_dir/target" "$file_count"
 }
 
@@ -138,15 +126,14 @@ __pycache__/
 .DS_Store
 EOF
 
-    cat << 'EOF' > "$target_dir/.wtinclude"
+    cat << 'EOF' > "$target_dir/.flashwtinclude"
 .venv/
 __pycache__/
 EOF
 
-    git -C "$target_dir" add pyproject.toml app/main.py .gitignore .wtinclude
+    git -C "$target_dir" add pyproject.toml app/main.py .gitignore .flashwtinclude
     git -C "$target_dir" commit -qm "feat: initial commit of python project"
 
-    # Populate realistic .venv tree
     generate_tree_python_venv "$target_dir/.venv" "$file_count"
 }
 
@@ -167,11 +154,10 @@ EOF
 
     generate_tree_monorepo "$target_dir"
 
-    git -C "$target_dir" add .gitignore .wtinclude apps/web/src crates/core/src services/api/app.py
+    git -C "$target_dir" add .gitignore .flashwtinclude apps/web/src crates/core/src services/api/app.py
     git -C "$target_dir" commit -qm "feat: initial commit of multi-ecosystem monorepo"
 }
 
-# CLI entrypoint when executed directly
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     cmd="${1:-help}"
     dest="${2:-}"
@@ -211,3 +197,4 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             ;;
     esac
 fi
+

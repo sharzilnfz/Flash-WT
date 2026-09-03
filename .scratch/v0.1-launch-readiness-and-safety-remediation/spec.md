@@ -12,8 +12,8 @@ Currently, the tool suffers from critical data safety defects, storage engine co
 3. The APFS lockfile fast-path serves stale cached snapshots when nested files are modified without changing the lockfile.
 4. Linux server-side copy (`copy_file_range`) silently truncates files on early EOF or short writes, while Btrfs subvolumes are unnecessarily locked out of reflink acceleration.
 5. Interrupting operations with `SIGINT` (`Ctrl+C`) leaks orphan worktrees, branches, and active store leases because no process signal handlers exist.
-6. The CLI binary name collides directly with *Worktrunk* (`wt`), causing package manager and executable conflicts.
-7. Automated release workflows produce tarballs with mismatched filename prefixes (`wt-0.1.0-*` vs `wt-v0.1.0-*`), breaking Homebrew installation and the curl installer.
+6. The CLI binary name collides directly with *Worktrunk* (`flashwt`), causing package manager and executable conflicts.
+7. Automated release workflows produce tarballs with mismatched filename prefixes (`flashwt-0.1.0-*` vs `flashwt-v0.1.0-*`), breaking Homebrew installation and the curl installer.
 
 ## Solution
 
@@ -41,7 +41,7 @@ Harden the tool into a safe, reliable, and honestly marketed local hydration eng
 10. As a Python developer using editable packages (`pip install -e .`), I want worktree hydration to rewrite absolute paths in `.pth` files, so that my virtual environment imports code from the new worktree checkout rather than the source directory.
 11. As a Python developer with binary launcher scripts in `.venv/bin`, I want non-UTF-8 executables with shebang lines to be handled gracefully without crashing hydration, so that virtual environments remain fully functional.
 12. As a developer working across multiple distinct repositories on the same machine, I want branch stacking diagnostics to only check the active repository, so that similar branch names in unrelated projects never trigger false warnings.
-13. As an operator configuring the tool with environment variables, I want `WT_SNAPSHOTS=false` and `WT_SNAPSHOTS=no` to disable snapshots as expected, so that standard boolean flag formats work intuitively.
+13. As an operator configuring the tool with environment variables, I want `FLASHWT_SNAPSHOTS=false` and `FLASHWT_SNAPSHOTS=no` to disable snapshots as expected, so that standard boolean flag formats work intuitively.
 14. As a developer installing the tool via Homebrew or curl, I want release archive names to match what the installer and formula request, so that installation succeeds on every published tag.
 15. As a developer running in a Docker container as `root`, I want hardlinked worktrees to prevent accidental mutation of the global content store, so that containerized test runs do not poison other worktrees.
 16. As an autonomous coding agent executing a command via `scratch --run`, I want child output to stream cleanly without corrupting the parent JSON stdout envelope, so that automation parsers do not encounter syntax errors.
@@ -88,7 +88,7 @@ Harden the tool into a safe, reliable, and honestly marketed local hydration eng
 
 ### 8. Standalone Hydration Interface & Packaging Normalization
 - Expose a dedicated command (`hydrate <path>`) that ingests and materializes heavy untracked directories for an already existing worktree or directory.
-- Align release packaging scripts and GitHub Actions workflows to use consistent `v`-prefixed archive filenames (`wt-v<version>-<target>.tar.gz`).
+- Align release packaging scripts and GitHub Actions workflows to use consistent `v`-prefixed archive filenames (`flashwt-v<version>-<target>.tar.gz`).
 - Standardize on single-binary release distribution and update Homebrew formula templates accordingly.
 
 ---
@@ -97,7 +97,7 @@ Harden the tool into a safe, reliable, and honestly marketed local hydration eng
 
 ### Seams for Testing
 All testing will occur at the **highest external CLI binary seam**:
-- Test through the compiled binary entry point (`assert_cmd` / `Command`) driving real Git repositories and isolated temporary store instances (`WT_STORE=<tempdir>`).
+- Test through the compiled binary entry point (`assert_cmd` / `Command`) driving real Git repositories and isolated temporary store instances (`FLASHWT_STORE=<tempdir>`).
 - Driving through the top CLI boundary guarantees end-to-end verification of arguments, environment parsing, Git interactions, filesystem clone/copy mechanics, and JSON envelope output simultaneously.
 - No internal private struct unit testing where an external CLI invocation can prove the behavior.
 
@@ -107,10 +107,10 @@ All testing will occur at the **highest external CLI binary seam**:
 3. **Multi-Platform Matrix:** Test APFS clone mechanics on macOS, and reflink / `copy_file_range` / fallback behavior on Linux.
 
 ### Prior Art in Codebase
-- [`crates/wt-cli/tests/clean.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/tests/clean.rs): Worktree cleanup candidate selection and deletion tests.
-- [`crates/wt-cli/tests/cow_materialization.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/tests/cow_materialization.rs): Private write isolation and block-level copy-on-write assertions.
-- [`crates/wt-cli/tests/lease_sweep.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/tests/lease_sweep.rs): Ephemeral lease expiration and mark-and-sweep lifecycle tests.
-- [`crates/wt-cli/tests/toolchain_relocation.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/wt-cli/tests/toolchain_relocation.rs): Python virtualenv and Cargo build artifact relocation assertions.
+- [`crates/flashwt-cli/tests/clean.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/flashwt-cli/tests/clean.rs): Worktree cleanup candidate selection and deletion tests.
+- [`crates/flashwt-cli/tests/cow_materialization.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/flashwt-cli/tests/cow_materialization.rs): Private write isolation and block-level copy-on-write assertions.
+- [`crates/flashwt-cli/tests/lease_sweep.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/flashwt-cli/tests/lease_sweep.rs): Ephemeral lease expiration and mark-and-sweep lifecycle tests.
+- [`crates/flashwt-cli/tests/toolchain_relocation.rs`](file:///Users/sharzilnafis/Projects/dumps/idea1/crates/flashwt-cli/tests/toolchain_relocation.rs): Python virtualenv and Cargo build artifact relocation assertions.
 
 ---
 

@@ -39,13 +39,13 @@ mounts; macOS `/` is the sealed system volume and correctly reports
 unsupported).
 
 CLI messages: when linking is refused by the filesystem it prints
-"hardlink unavailable on this filesystem: ..."; `WT_NO_HARDLINK=1`
+"hardlink unavailable on this filesystem: ..."; `FLASHWT_NO_HARDLINK=1`
 disables linking outright with its own line. Byte-copy fallbacks stay
 private and writable.
 
 Tests: unit tests on the backend trait seam (shared readonly inodes,
 blocked rewrites, rename-over isolation), store tests for `link_out`
-(corrupt/unknown content never lands), and `crates/wt-cli/tests/
+(corrupt/unknown content never lands), and `crates/flashwt-cli/tests/
 hardlink_safety.rs` through the CLI seam: shared-inode proof across
 two worktrees, poison attempt with a third worktree hydrating clean
 bytes afterwards, the four-pattern torture suite, and the disabled-

@@ -1,31 +1,14 @@
 #!/usr/bin/env bash
-# scripts/verify/run_all.sh — Master test suite runner and telemetry aggregator for Flash WT.
-#
-# Orchestrates all 5 verification suites:
-#  - 01_cli_matrix
-#  - 02_flash_apfs
-#  - 03_real_repos
-#  - 04_isolation_storage
-#  - 05_chaos_resilience
-#
-# Flags:
-#   --quick          Use smaller fixtures for rapid verification
-#   --all            Run full production matrix across all 5 suites
-#   --suite <name>   Run a specific suite (e.g. 01, cli, apfs, real, isolation, chaos)
-#   --runs <n>       Iteration count for benchmark samples (default 1)
-#   --github         Format logs and outputs for GitHub Actions
-#   -h, --help       Show this help message
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SUITES_DIR="$SCRIPT_DIR/suites"
-ARTIFACTS_DIR="${ARTIFACTS_DIR:-$REPO_ROOT/artifacts/verify-wt}"
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-$REPO_ROOT/artifacts/verify-flashwt}"
 
 mkdir -p "$ARTIFACTS_DIR"
 
-# Defaults
 QUICK=0
 RUN_ALL=1
 TARGET_SUITE=""
@@ -34,7 +17,7 @@ GITHUB=0
 
 usage() {
     cat << EOF
-Flash WT Master Verification Runner
+Flash-WT Master Verification Runner
 
 Usage: $0 [OPTIONS]
 
@@ -86,16 +69,14 @@ done
 
 export QUICK GITHUB
 
-# Binary resolution
-WT_BIN="${WT_BIN:-$REPO_ROOT/target/release/wt}"
-if [ ! -x "$WT_BIN" ]; then
+FLASHWT_BIN="${FLASHWT_BIN:-$REPO_ROOT/target/release/flashwt}"
+if [ ! -x "$FLASHWT_BIN" ]; then
     echo "run_all: Building release binary..."
-    cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p wt-cli
-    WT_BIN="$REPO_ROOT/target/release/wt"
+    cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p flashwt-cli
+    FLASHWT_BIN="$REPO_ROOT/target/release/flashwt"
 fi
-export WT_BIN
+export FLASHWT_BIN
 
-# System Telemetry
 OS_NAME="$(uname -s)"
 OS_KERNEL="$(uname -r)"
 ARCH_NAME="$(uname -m)"
@@ -104,12 +85,11 @@ GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo "un
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 echo "======================================================================"
-echo " Flash WT Master Verification Rig"
+echo " Flash-WT Master Verification Rig"
 echo " Host: $OS_NAME $ARCH_NAME ($CPU_COUNT cores) | Git: $GIT_COMMIT"
 echo " Mode: $([ "$QUICK" -eq 1 ] && echo "QUICK" || echo "FULL") | Runs: $RUNS"
 echo "======================================================================"
 
-# Determine suites to run
 declare -a SUITES_TO_RUN=()
 
 if [ -n "$TARGET_SUITE" ]; then
@@ -144,7 +124,6 @@ RUNNER_START_TIME=$(perl -MTime::HiRes=time -e 'printf "%.6f\n", time')
 TOTAL_SUITES_PASSED=0
 TOTAL_SUITES_FAILED=0
 
-# Clean old suite results in artifacts directory
 rm -f "$ARTIFACTS_DIR"/suite_*.json
 
 for suite in "${SUITES_TO_RUN[@]}"; do
@@ -162,7 +141,6 @@ done
 RUNNER_END_TIME=$(perl -MTime::HiRes=time -e 'printf "%.6f\n", time')
 TOTAL_ELAPSED=$(awk -v a="$RUNNER_START_TIME" -v b="$RUNNER_END_TIME" 'BEGIN { printf "%.3f", b - a }')
 
-# Aggregate results into raw_data.json
 RAW_DATA_FILE="$ARTIFACTS_DIR/raw_data.json"
 REPORT_MD_FILE="$ARTIFACTS_DIR/REPORT.md"
 
@@ -223,11 +201,9 @@ with open(raw_file, 'w') as f:
 print(f'Successfully compiled raw telemetry into {raw_file}')
 " "$ARTIFACTS_DIR" "$RAW_DATA_FILE" "$TOTAL_SUITES_FAILED" "$OS_NAME" "$OS_KERNEL" "$ARCH_NAME" "$CPU_COUNT" "$GIT_COMMIT" "$TIMESTAMP" "$QUICK" "$TOTAL_ELAPSED" "$TOTAL_SUITES_PASSED"
 
-# Generate Master Markdown Report
 echo "Invoking report generator..."
 "$SCRIPT_DIR/generate_report.sh" "$RAW_DATA_FILE" "$REPORT_MD_FILE"
 
-# GitHub Actions Step Summary if requested
 if [ "$GITHUB" -eq 1 ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     cat "$REPORT_MD_FILE" >> "$GITHUB_STEP_SUMMARY"
 fi
@@ -242,3 +218,4 @@ if [ "$TOTAL_SUITES_FAILED" -gt 0 ]; then
     exit 1
 fi
 exit 0
+

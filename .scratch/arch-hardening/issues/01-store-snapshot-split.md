@@ -2,8 +2,8 @@
 
 Status: ready-for-agent
 Owner branch: `arch/store-refactor`
-Owns: `crates/wt-store/src/snapshot.rs` and everything it becomes, plus
-re-exports in `crates/wt-store/src/lib.rs`.
+Owns: `crates/flashwt-store/src/snapshot.rs` and everything it becomes, plus
+re-exports in `crates/flashwt-store/src/lib.rs`.
 
 ## Problem
 
@@ -32,7 +32,7 @@ snapshots valid on one path and debris on the other.
    functions become thin wrappers supplying their closure.
 3. Flatten the double `Result<Result<PublishOutcome, BuildError>, Error>`:
    add `BuildError::Io(crate::Error)` so both methods return
-   `Result<PublishOutcome, BuildError>`. Update the ~3 wt-cli call sites is
+   `Result<PublishOutcome, BuildError>`. Update the ~3 flashwt-cli call sites is
    ticket 03's job; here just keep lib compiling if possible, otherwise note
    the break in the commit message so integration resolves it.
 4. Replace the trailing `Option<&mut SnapshotBuildTiming>` params with a
@@ -53,9 +53,9 @@ snapshots valid on one path and debris on the other.
 
 ## Done when
 
-- `cargo test -p wt-store` passes; `cargo clippy -p wt-store --all-targets` clean.
+- `cargo test -p flashwt-store` passes; `cargo clippy -p flashwt-store --all-targets` clean.
 - snapshot.rs no longer exists as a single file; all former public items still
-  reachable from `wt_store`.
+  reachable from `flashwt_store`.
 
 ## Comments
 

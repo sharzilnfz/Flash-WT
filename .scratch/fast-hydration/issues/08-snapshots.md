@@ -1,6 +1,6 @@
 # 08: Whole-directory snapshots (macOS/APFS, opt-in)
 
-Implements Phase 2 of AGENT_HANDOFF_PLAN_REVISED.md. One snapshot per heavy directory behind `WT_SNAPSHOTS=1`: canonical manifest, hardlink-to-blob tree, atomic publish, single recursive `clonefile(2)` on hits, integrity at publish, `WT_VERIFY=1` bypasses hits.
+Implements Phase 2 of AGENT_HANDOFF_PLAN_REVISED.md. One snapshot per heavy directory behind `FLASHWT_SNAPSHOTS=1`: canonical manifest, hardlink-to-blob tree, atomic publish, single recursive `clonefile(2)` on hits, integrity at publish, `FLASHWT_VERIFY=1` bypasses hits.
 
 **Status:** done (merged; default remains off pending real-world soak)
 
@@ -17,10 +17,10 @@ Large fixture: 40,000 files, 800 packages, 96% duplicate content (1,648 unique b
 |---|---|---|
 | fresh install baseline | 11.52s | 11.35s |
 | direct recursive CoW (`cp -Rc`) | 7.97s | 7.95s |
-| wt per-file ladder (dual-write GC) | 14.99s | 11.78s |
-| wt mark-sweep cutover only | — | 11.7s |
-| **wt `WT_SNAPSHOTS=1` (miss builds / hit clones)** | 24.1s | **6.5s** |
-| **wt snapshots + mark-sweep-no-refs** | — | **6.2s** |
+| flashwt per-file ladder (dual-write GC) | 14.99s | 11.78s |
+| flashwt mark-sweep cutover only | — | 11.7s |
+| **flashwt `FLASHWT_SNAPSHOTS=1` (miss builds / hit clones)** | 24.1s | **6.5s** |
+| **flashwt snapshots + mark-sweep-no-refs** | — | **6.2s** |
 
 Stage split, snapshot cold: ingest 5.7s + references 2.6s + build/publish 15.4s.
 Snapshot hits also preserve symlinks and executable modes that the per-file

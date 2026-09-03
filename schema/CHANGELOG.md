@@ -5,7 +5,7 @@
 ### Frozen Contract
 - Authoritative Envelope v1 schema published at `schema/v1.json`.
 - Root envelope format frozen:
-  - `wt_version`: string
+  - `flashwt_version`: string
   - `schema_version`: integer (1)
   - `command`: string
   - `status`: string ("ok" | "error")
@@ -30,4 +30,4 @@
 - Any future field added to v1 payloads must be optional with `skip_serializing_if = "Option::is_none"`.
 - Existing non-optional fields may not be removed or renamed.
 - Error diagnostics use stable uppercase codes.
-- Mutating commands persist atomic `wt-receipt.json` files enabling crash recovery.
+- Mutating commands persist atomic `flashwt-receipt.json` files enabling crash recovery.

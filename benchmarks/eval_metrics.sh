@@ -1,25 +1,19 @@
 #!/usr/bin/env bash
-# eval_metrics.sh — JSON metrics schema, stage log parser, and statistics accumulator.
-# Sourced by eval harnesses or executed directly to parse and aggregate test logs.
 
 set -euo pipefail
 
-# Millisecond-resolution clock without compile step.
 now() {
     perl -MTime::HiRes=time -e 'printf "%.6f\n", time'
 }
 
-# Elapsed seconds between two timestamps (3 decimal places).
 elapsed() { # start end -> seconds, 3 decimals
     awk -v a="$1" -v b="$2" 'BEGIN { printf "%.3f", b - a }'
 }
 
-# Elapsed milliseconds between two timestamps (integer ms).
 elapsed_ms() { # start end -> ms integer
     awk -v a="$1" -v b="$2" 'BEGIN { printf "%.0f", (b - a) * 1000 }'
 }
 
-# Median of numeric arguments on argv formatted to 3 decimal places.
 median() { # numbers on argv -> median, 3 decimals
     printf '%s\n' "$@" | sort -g | awk '
         { v[NR] = $1 }
@@ -29,9 +23,7 @@ median() { # numbers on argv -> median, 3 decimals
         }'
 }
 
-# Format median or "-" if string/list is empty.
 median_or_dash() { # possibly-empty number string -> median or "-"
-    # shellcheck disable=SC2086
     set -- $1
     if [ "$#" -eq 0 ]; then
         echo "-"
@@ -40,19 +32,15 @@ median_or_dash() { # possibly-empty number string -> median or "-"
     fi
 }
 
-# Cell median alias for sample lists.
 cell_median() {
-    # shellcheck disable=SC2086
     set -- $1
     median "$@"
 }
 
-# First N lines of stdin without closing the pipe early.
 first_lines() { # n
     awk -v n="$1" 'NR <= n { buf = buf (NR > 1 ? "\n" : "") $0 } END { if (NR) printf "%s\n", buf }'
 }
 
-# Unified SHA256 checksum calculation across Darwin (shasum) and Linux (sha256sum).
 sha256_hash() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "$1" | awk '{print $1}'
@@ -61,8 +49,6 @@ sha256_hash() {
     fi
 }
 
-# Compute comprehensive statistical distributions (count, min, max, mean, median, p95, stdev, iqr).
-# Input: numbers on stdin or argv. Output: JSON fragment string.
 stats_to_json() {
     perl -e '
         use strict;
@@ -91,7 +77,6 @@ stats_to_json() {
         my $sum = sum(@vals);
         my $mean = $sum / $n;
 
-        # Median
         my $median;
         if ($n % 2 == 1) {
             $median = $vals[int($n / 2)];
@@ -99,19 +84,16 @@ stats_to_json() {
             $median = ($vals[$n / 2 - 1] + $vals[$n / 2]) / 2.0;
         }
 
-        # Percentile 95 (nearest rank or linear interpolation)
         my $p95_idx = int(0.95 * $n);
         $p95_idx = $n - 1 if $p95_idx >= $n;
         my $p95 = $vals[$p95_idx];
 
-        # Standard deviation
         my $sq_sum = 0;
         for my $v (@vals) {
             $sq_sum += ($v - $mean) ** 2;
         }
         my $stdev = $n > 1 ? sqrt($sq_sum / ($n - 1)) : 0.0;
 
-        # Interquartile range (IQR = Q3 - Q1)
         my $q1 = $vals[int(0.25 * $n)];
         my $q3 = $vals[int(0.75 * $n)];
         $q3 = $vals[-1] if int(0.75 * $n) >= $n;
@@ -122,15 +104,13 @@ stats_to_json() {
     ' "$@"
 }
 
-# Parse wt-stage lines from a log file.
-# Emits key=value pairs for known stage names.
 parse_stage_log() {
     local logfile=$1
     [ -f "$logfile" ] || return 0
 
     awk '
-        /^wt-stage / {
-            sub(/^wt-stage /, "", $0)
+        /^flashwt-stage / {
+            sub(/^flashwt-stage /, "", $0)
             split($0, kv, "=")
             if (length(kv[1]) > 0 && length(kv[2]) > 0) {
                 print kv[1] "=" kv[2]
@@ -139,7 +119,6 @@ parse_stage_log() {
     ' "$logfile"
 }
 
-# Get host system telemetry as a JSON object.
 system_telemetry_json() {
     local os kernel arch cpus
     os=$(uname -s)
@@ -156,10 +135,9 @@ system_telemetry_json() {
         "$os" "$kernel" "$arch" "$cpus"
 }
 
-# Format a complete scenario evaluation result into JSON.
-# Args: scenario_name, scenario_phase, files, packages, wall_stats_json, stages_json, fidelity_json, disk_json
 build_scenario_json() {
     local name=$1 phase=$2 files=$3 pkgs=$4 wall_stats=$5 stages=$6 fidelity=$7 disk=$8
     printf '{"scenario":"%s","phase":"%s","files":%d,"packages":%d,"wall_clock_ms":%s,"stages":%s,"fidelity":%s,"disk":%s}' \
         "$name" "$phase" "$files" "$pkgs" "$wall_stats" "$stages" "$fidelity" "$disk"
 }
+

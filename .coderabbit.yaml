@@ -1,4 +1,3 @@
-# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 language: "en-US"
 tone_instructions: "Be concise, direct, and technically rigorous. Focus on logic, correctness, error handling, and performance. Do not nitpick formatting or stylistic preferences."
 
@@ -34,11 +33,11 @@ reviews:
   path_instructions:
     - path: "crates/**/*.rs"
       instructions: |
-        - This is `wt` (instant worktrees CLI), a performance-critical systems tool in Rust.
+        - This is `flashwt` (instant worktrees CLI), a performance-critical systems tool in Rust.
         - Ensure zero-cost abstractions, minimal heap allocations, and lock-free/non-blocking operations on hot paths.
         - Respect the Store vs. Tree architectural boundary: Store is immutable content-addressed storage; Tree is an ephemeral projection. No implicit background syncing.
         - Adhere to the workspace lint policy: avoid `unwrap()` and `expect()` in non-test production code; return structured errors via `thiserror`.
-        - Test conventions: Store flushes bypass hardware `fsync` in test environments (`WT_TEST_NO_SYNC=1` or `cfg!(test)`). Do not add manual fsync calls into test paths.
+        - Test conventions: Store flushes bypass hardware `fsync` in test environments (`FLASHWT_TEST_NO_SYNC=1` or `cfg!(test)`). Do not add manual fsync calls into test paths.
     - path: "scripts/**/*.sh"
       instructions: |
         - Ensure strict error handling (`set -euo pipefail`).
@@ -47,3 +46,4 @@ reviews:
 
 chat:
   auto_reply: true
+

@@ -11,5 +11,5 @@ Status: ready-for-agent
 2. Update boolean environment variable parser in `config.rs` to recognize `"0"`, `"false"`, `"no"`, and `"off"` (case-insensitive) as `false`, and treat empty strings as omitted/default.
 
 ## Verification
-- Add test verifying that `WT_SNAPSHOTS=false` correctly disables snapshot projection.
+- Add test verifying that `FLASHWT_SNAPSHOTS=false` correctly disables snapshot projection.
 - Add test asserting that branch stacking checks ignore worktree mirrors from other repositories.

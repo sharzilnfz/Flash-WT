@@ -1,18 +1,9 @@
 #!/usr/bin/env bash
-# scripts/verify/generate_report.sh — Compiles raw verification telemetry into artifacts/verify-wt/REPORT.md.
-#
-# Generates:
-#  1. Executive Summary & Status KPI Table
-#  2. Flash Performance Scoreboard (Cold vs Warm vs v2 vs Fallback vs cp -Rc)
-#  3. APFS Storage Deduplication Matrix (Logical vs Physical across N worktrees)
-#  4. CLI Matrix Checklist (All 11 subcommands)
-#  5. Real Repo Results (Node, Rust, Python, Monorepo)
-#  6. Resilience Audit (Concurrency, Bit-Rot, Crypto Verify, SIGKILL recovery)
 
 set -euo pipefail
 
-RAW_DATA_PATH="${1:-artifacts/verify-wt/raw_data.json}"
-REPORT_OUTPUT_PATH="${2:-artifacts/verify-wt/REPORT.md}"
+RAW_DATA_PATH="${1:-artifacts/verify-flashwt/raw_data.json}"
+REPORT_OUTPUT_PATH="${2:-artifacts/verify-flashwt/REPORT.md}"
 
 [ -f "$RAW_DATA_PATH" ] || {
     echo "generate_report: error: $RAW_DATA_PATH does not exist" >&2
@@ -60,8 +51,7 @@ cpus_val = telemetry.get("cpus", 1)
 duration_val = telemetry.get("total_duration_seconds", 0.0)
 mode_str = "Quick Mode" if telemetry.get("quick_mode") else "Full Production Matrix"
 
-# 1. Header
-p("# ⚡ Flash WT Verification & Performance Report")
+p("# ⚡ Flash-WT Verification & Performance Report")
 p("")
 p(f"**Overall Status**: {status_badge} | **Commit**: `{commit_str}` | **Timestamp**: `{timestamp_str}`")
 p("")
@@ -69,10 +59,9 @@ p(f"- **System**: {os_str} ({arch_str}) | Kernel `{kernel_str}` | {cpus_val} CPU
 p(f"- **Total Test Duration**: {duration_val:.2f}s | **Mode**: {mode_str}")
 p("")
 
-# 2. Executive Summary
 p("## 1. Executive Summary")
 p("")
-p("Flash WT (`flashwt` / `wt`) provides near-instantaneous git worktree hydration and isolated developer sandboxes by combining an APFS whole-tree clonefile architecture with content-addressed store deduplication.")
+p("Flash-WT (`flashwt`) provides near-instantaneous git worktree hydration and isolated developer sandboxes by combining an APFS whole-tree clonefile architecture with content-addressed store deduplication.")
 p("")
 p("This report captures automated end-to-end proofs across the full CLI matrix, APFS performance benchmarks, multi-ecosystem repository hydration, volume-level physical disk accounting, and chaos fault-injection resilience.")
 p("")
@@ -105,7 +94,6 @@ chaos_status = "Zero Deadlocks / Zero Corruption" if (t_chaos and t_chaos.get("s
 p(f"| **Crash & Concurrency** | {chaos_status} | Clean Locks & Self-Healing | ✅ PASS |")
 p("")
 
-# 3. Flash Performance Scoreboard
 p("## 2. Flash Performance Scoreboard")
 p("")
 p("Measurements captured on macOS APFS comparing cold ingestion against whole-tree clonefile snapshots, incremental rebuilds, and standard recursive filesystem copying.")
@@ -118,24 +106,23 @@ cold_ms = t_cold.get("metrics", {}).get("wall_ms", "-") if t_cold else "-"
 p(f"| **Cold Ingestion (Unprimed Store)** | `{cold_ms} ms` | 1.0x (Baseline) | Initial store blob ingestion and snapshot creation |")
 
 warm_ms = t_warm.get("metrics", {}).get("warm_wall_ms", "-") if t_warm else "-"
-p(f"| **Warm Snapshot Hit (Flash WT)** | `{warm_ms} ms` | **{warm_speedup}x** vs Cold | APFS Whole-Tree `clonefile()` materialization |")
+p(f"| **Warm Snapshot Hit (Flash-WT)** | `{warm_ms} ms` | **{warm_speedup}x** vs Cold | APFS Whole-Tree `clonefile()` materialization |")
 
 t_v2 = find_test("02_flash_apfs", "snapshot_v2_diff")
 v2_ms = t_v2.get("metrics", {}).get("v2_wall_ms", "-") if t_v2 else "-"
-p(f"| **Incremental Snapshot v2 (`WT_SNAPSHOTS_V2=1`)** | `{v2_ms} ms` | O(diff) Sub-second | Diff-based snapshot clone + 3 modified packages |")
+p(f"| **Incremental Snapshot v2 (`FLASHWT_SNAPSHOTS_V2=1`)** | `{v2_ms} ms` | O(diff) Sub-second | Diff-based snapshot clone + 3 modified packages |")
 
 t_fallback = find_test("02_flash_apfs", "per_file_fallback")
 fallback_ms = t_fallback.get("metrics", {}).get("fallback_wall_ms", "-") if t_fallback else "-"
 fallback_speedup = t_fallback.get("metrics", {}).get("speedup", "-") if t_fallback else "-"
-p(f"| **Per-File Fallback (`WT_SNAPSHOTS=0`)** | `{fallback_ms} ms` | {fallback_speedup}x vs Snapshot | Iterative per-file clonefile ladder fallback |")
+p(f"| **Per-File Fallback (`FLASHWT_SNAPSHOTS=0`)** | `{fallback_ms} ms` | {fallback_speedup}x vs Snapshot | Iterative per-file clonefile ladder fallback |")
 
 t_cp = find_test("02_flash_apfs", "raw_copy_comparison")
 cp_ms = t_cp.get("metrics", {}).get("cp_wall_ms", "-") if t_cp else "-"
 cp_speedup = t_cp.get("metrics", {}).get("speedup", "-") if t_cp else "-"
-p(f"| **Raw Recursive Copy (`cp -Rc`)** | `{cp_ms} ms` | {cp_speedup}x vs Flash WT | Direct filesystem copy without store sharing |")
+p(f"| **Raw Recursive Copy (`cp -Rc`)** | `{cp_ms} ms` | {cp_speedup}x vs Flash-WT | Direct filesystem copy without store sharing |")
 p("")
 
-# 4. APFS Storage Deduplication Matrix
 p("## 3. APFS Storage Deduplication Matrix")
 p("")
 p("Validation of true physical disk allocation measured via filesystem volume free-space probes (`df -k`). Proves that N concurrent worktrees share physical disk blocks on APFS copy-on-write storage.")
@@ -145,13 +132,13 @@ p("| :---: | :---: | :---: | :---: | :---: |")
 
 if t_vol and "metrics" in t_vol:
     m = t_vol["metrics"]
-    log5 = m.get("logical_5_wt_bytes", 0)
+    log5 = m.get("logical_5_flashwt_bytes", 0)
     phys5 = m.get("physical_delta_bytes", 0)
     store_bytes = m.get("store_allocated_bytes", 0)
     d_ratio = m.get("dedup_ratio", 1.0)
     log_mb = log5 / 1048576.0
     phys_mb = max(phys5, store_bytes) / 1048576.0
-    
+
     p(f"| 1 Worktree | {log_mb / 5.0:.2f} MB | {phys_mb:.2f} MB (Store Primed) | 1.0x | Base store allocation |")
     p(f"| 3 Worktrees | {(log_mb / 5.0) * 3:.2f} MB | ~{phys_mb:.2f} MB | ~3.0x | 0 MB additional dirty blocks |")
     p(f"| 5 Worktrees | **{log_mb:.2f} MB** | **{phys_mb:.2f} MB** | **{d_ratio}x** | CoW shared physical storage blocks |")
@@ -161,24 +148,23 @@ else:
     p("| 5 Worktrees | 750.0 MB | 150.5 MB | 4.98x | CoW block sharing |")
 p("")
 
-# 5. CLI Matrix Checklist
 p("## 4. Comprehensive 11-Subcommand CLI Matrix")
 p("")
 p("| Subcommand | Tested Scenarios & Flags | Status | Contract Proof |")
 p("| :--- | :--- | :---: | :--- |")
 
 cli_tests = [
-    ("wt init", "starter manifest, --force overwrite, --dir subdir", "init_basic", "Created valid `.wtinclude` with default ignores"),
-    ("wt new / wt create", "--base branch, --manifest custom, --dir dest", "create_worktree", "Worktree created, registered in git, files hydrated"),
-    ("wt hydrate", "in-place hydration without creating a branch", "hydrate_in_place", "Hydrated existing dir from donor origin"),
-    ("wt list / wt ls", "JSON envelope, worktrees array, disk savings", "list_and_ls", "Accurate savings ledger and worktree tracking"),
-    ("wt scratch / wt isolate", "ephemeral execution, --run, --ttl leases", "scratch_run", "Command ran in sandbox; auto-cleaned on exit"),
-    ("wt clean / wt remove", "single clean, clean --all batch purge, --force", "clean_all", "Reclaimed worktrees and removed store mirrors"),
-    ("wt sweep", "--age 0s mark-sweep GC unreferenced blobs", "sweep_gc", "Unreferenced blobs collected; live refs protected"),
-    ("wt scrub", "cryptographic CAS audit, --dry-run vs repair", "scrub_dry_run_and_repair", "Scanned all store blobs and snapshots"),
-    ("wt store migrate", "--activate-mark-sweep activation", "store_migrate", "Switched GC mode to mark-sweep without loss"),
-    ("wt demo", "self-contained benchmark, mutation isolation", "demo_command", "Executed 10k fixture benchmark & verified CoW"),
-    ("wt completions", "bash, zsh, fish, elvish, powershell", "completions_all_shells", "Generated valid completion tokens across all 5 shells")
+    ("flashwt init", "starter manifest, --force overwrite, --dir subdir", "init_basic", "Created valid `.flashwtinclude` with default ignores"),
+    ("flashwt new / flashwt create", "--base branch, --manifest custom, --dir dest", "create_worktree", "Worktree created, registered in git, files hydrated"),
+    ("flashwt hydrate", "in-place hydration without creating a branch", "hydrate_in_place", "Hydrated existing dir from donor origin"),
+    ("flashwt list / flashwt ls", "JSON envelope, worktrees array, disk savings", "list_and_ls", "Accurate savings ledger and worktree tracking"),
+    ("flashwt scratch / flashwt isolate", "ephemeral execution, --run, --ttl leases", "scratch_run", "Command ran in sandbox; auto-cleaned on exit"),
+    ("flashwt clean / flashwt remove", "single clean, clean --all batch purge, --force", "clean_all", "Reclaimed worktrees and removed store mirrors"),
+    ("flashwt sweep", "--age 0s mark-sweep GC unreferenced blobs", "sweep_gc", "Unreferenced blobs collected; live refs protected"),
+    ("flashwt scrub", "cryptographic CAS audit, --dry-run vs repair", "scrub_dry_run_and_repair", "Scanned all store blobs and snapshots"),
+    ("flashwt store migrate", "--activate-mark-sweep activation", "store_migrate", "Switched GC mode to mark-sweep without loss"),
+    ("flashwt demo", "self-contained benchmark, mutation isolation", "demo_command", "Executed 10k fixture benchmark & verified CoW"),
+    ("flashwt completions", "bash, zsh, fish, elvish, powershell", "completions_all_shells", "Generated valid completion tokens across all 5 shells")
 ]
 
 for cmd, flags, tid, proof in cli_tests:
@@ -192,7 +178,6 @@ for cmd, flags, tid, proof in cli_tests:
     p(f"| `{cmd}` | {flags} | {st} | {proof} |")
 p("")
 
-# 6. Real Repository Results
 p("## 5. Real-World Multi-Ecosystem Repository Integration")
 p("")
 p("| Ecosystem | Target Directories | Complexity Characteristics | Hydration Time | Triple-Axis Parity |")
@@ -212,16 +197,15 @@ for eco, dirs, comp, tid in real_ecosystems:
     p(f"| **{eco}** | `{dirs}` | {comp} | `{dur}` | {st} |")
 p("")
 
-# 7. Chaos & Resilience Audit
 p("## 6. Chaos & Fault-Injection Resilience Audit")
 p("")
 p("| Fault Injection Scenario | Injected Condition | Observed Behavior | Self-Healing Verification | Status |")
 p("| :--- | :--- | :--- | :--- | :---: |")
 
 chaos_tests = [
-    ("5x Concurrent Workers", "Simultaneous `wt new` pointing at same store", "Contended lockfiles acquired in order without crash", "All 5 worktrees hydrated and verified intact", "concurrency_5x"),
-    ("Bit-Rot Injection", "Tampered 3 bytes inside CAS blob", "`wt scrub --dry-run` detects corrupted hash; `wt scrub` purges", "Store integrity restored; corrupted blob purged", "bit_rot_scrub"),
-    ("Cryptographic Validation", "`WT_VERIFY=1` on tampered blob", "Detected checksum divergence; refused corrupt blob", "Bypassed cache or re-ingested clean content", "crypto_verify"),
+    ("5x Concurrent Workers", "Simultaneous `flashwt new` pointing at same store", "Contended lockfiles acquired in order without crash", "All 5 worktrees hydrated and verified intact", "concurrency_5x"),
+    ("Bit-Rot Injection", "Tampered 3 bytes inside CAS blob", "`flashwt scrub --dry-run` detects corrupted hash; `flashwt scrub` purges", "Store integrity restored; corrupted blob purged", "bit_rot_scrub"),
+    ("Cryptographic Validation", "`FLASHWT_VERIFY=1` on tampered blob", "Detected checksum divergence; refused corrupt blob", "Bypassed cache or re-ingested clean content", "crypto_verify"),
     ("Process Interruption (Crash)", "`kill -9` (SIGKILL) sent mid-staging", "Store locks released by OS; no stranded lock deadlocks", "Immediate subsequent hydration succeeded 100%", "sigkill_recovery")
 ]
 
@@ -231,10 +215,9 @@ for title, cond, obs, heal, tid in chaos_tests:
     p(f"| **{title}** | {cond} | {obs} | {heal} | {st} |")
 p("")
 
-# 8. Conclusion
 p("## 7. Verdict & Sign-Off")
 p("")
-p("All verification criteria defined in the automated evaluation harness specification were thoroughly evaluated. Flash WT exhibits robust APFS snapshot acceleration, correct copy-on-write storage deduplication, strict mutation isolation, cross-ecosystem fidelity, and crash-resilient store self-healing.")
+p("All verification criteria defined in the automated evaluation harness specification were thoroughly evaluated. Flash-WT exhibits robust APFS snapshot acceleration, correct copy-on-write storage deduplication, strict mutation isolation, cross-ecosystem fidelity, and crash-resilient store self-healing.")
 p("")
 final_status = summary.get("overall_status", "UNKNOWN")
 p(f"**Final Status: {final_status}** — Production-Ready.")
@@ -244,3 +227,4 @@ with open(out_file, "w") as f:
 
 print(f"Report compiled successfully to {out_file}")
 PYEOF
+

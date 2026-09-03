@@ -1,33 +1,14 @@
 #!/usr/bin/env bash
-# eval.sh — Automated Verification and Evaluation Rig for `wt`.
-#
-# Runs comprehensive before-and-after evaluation, differential benchmarking,
-# triple-axis fidelity verification, volume storage accounting, and regression gating.
-#
-# Usage:
-#   ./benchmarks/eval.sh [--base <ref_or_path>] [--candidate <ref_or_path>]
-#                        [--runs <n>] [--quick] [--scenarios <list>]
-#                        [--threshold <pct>] [--json <path>] [--markdown <path>]
-#                        [--verify] [--chaos]
-#
-# Examples:
-#   ./benchmarks/eval.sh --quick --verify
-#   ./benchmarks/eval.sh --base main --candidate feat/opt --threshold 5 --markdown pr_report.md
 
 set -euo pipefail
 
 BENCH_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$BENCH_DIR/.." && pwd)"
 
-# shellcheck disable=SC1091
 . "$BENCH_DIR/fixture.sh"
-# shellcheck disable=SC1091
 . "$BENCH_DIR/fixture_matrix.sh"
-# shellcheck disable=SC1091
 . "$BENCH_DIR/eval_metrics.sh"
-# shellcheck disable=SC1091
 . "$BENCH_DIR/eval_storage.sh"
-# shellcheck disable=SC1091
 . "$BENCH_DIR/chaos.sh"
 
 BASE_ARG=""
@@ -109,41 +90,39 @@ if [ "$QUICK" -eq 1 ]; then
     RUNS=1
 fi
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/wt-eval.XXXXXX")"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/flashwt-eval.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-# Resolve or build binaries
 resolve_binary() {
     local target=$1
     local out_name=$2
 
     if [ -z "$target" ] || [ "$target" = "current" ]; then
-        if [ ! -f "$REPO_ROOT/target/release/flashwt" ] && [ ! -f "$REPO_ROOT/target/release/wt" ]; then
+        if [ ! -f "$REPO_ROOT/target/release/flashwt" ] && [ ! -f "$REPO_ROOT/target/release/flashwt" ]; then
             echo "eval: building release binary for current worktree..."
-            cargo build --release --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p wt-cli
+            cargo build --release --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p flashwt-cli
         fi
         if [ -f "$REPO_ROOT/target/release/flashwt" ]; then
             echo "$REPO_ROOT/target/release/flashwt"
         else
-            echo "$REPO_ROOT/target/release/wt"
+            echo "$REPO_ROOT/target/release/flashwt"
         fi
     elif [ -x "$target" ]; then
         echo "$target"
     else
-        # Git revision
         echo "eval: checking out and building git ref '$target'..."
         local build_dir="$WORK/build-$out_name"
         mkdir -p "$build_dir"
         git -C "$REPO_ROOT" worktree add -q "$build_dir" "$target"
         (
             cd "$build_dir" &&
-                cargo build --release --quiet --manifest-path "$build_dir/Cargo.toml" -p wt-cli
+                cargo build --release --quiet --manifest-path "$build_dir/Cargo.toml" -p flashwt-cli
         )
         local bin="$WORK/bin-$out_name"
         if [ -f "$build_dir/target/release/flashwt" ]; then
             cp "$build_dir/target/release/flashwt" "$bin"
         else
-            cp "$build_dir/target/release/wt" "$bin"
+            cp "$build_dir/target/release/flashwt" "$bin"
         fi
         git -C "$REPO_ROOT" worktree remove --force "$build_dir" >/dev/null 2>&1 || rm -rf "$build_dir"
         echo "$bin"
@@ -151,7 +130,7 @@ resolve_binary() {
 }
 
 echo "========================================================"
-echo "          wt Automated Evaluation & Verification Rig     "
+echo "          flashwt Automated Evaluation & Verification Rig     "
 echo "========================================================"
 
 CANDIDATE_BIN=$(resolve_binary "$CANDIDATE_ARG" "candidate")
@@ -169,8 +148,6 @@ echo "Baseline binary:  $BASE_BIN"
 echo "Scenarios:        $SCENARIOS"
 echo "Runs:             $RUNS (verify=$VERIFY, threshold=${THRESHOLD_PCT}%)"
 
-
-# Verify tree helper
 eval_verify_tree() { # src dest
     local src=$1 dest=$2
     if [ "$VERIFY" -eq 0 ]; then
@@ -181,18 +158,13 @@ eval_verify_tree() { # src dest
         return 0
     fi
 
-    # Byte diff
     diff -rq "$src" "$dest" >/dev/null || die "byte discrepancy between $src and $dest"
 
-    # Modes diff
     diff <(list_modes "$src") <(list_modes "$dest") >/dev/null || die "mode discrepancy between $src and $dest"
 
-    # Symlink diff
     diff <(list_symlinks "$src") <(list_symlinks "$dest") >/dev/null || die "symlink discrepancy between $src and $dest"
 }
 
-# Evaluate a single scenario for a given binary
-# Outputs JSON summary object for the scenario
 run_eval_scenario() {
     local bin=$1 label=$2 scenario_id=$3 gen_fn=$4 file_count=$5
 
@@ -207,32 +179,28 @@ run_eval_scenario() {
     git -C "$origin" config user.email eval@example.com
     git -C "$origin" config user.name Eval
     printf 'heavy/\n' >"$origin/.gitignore"
-    printf 'heavy/\n' >"$origin/.wtinclude"
+    printf 'heavy/\n' >"$origin/.flashwtinclude"
     printf 'export const ok = true;\n' >"$origin/index.js"
     git -C "$origin" add .
     git -C "$origin" commit -qm init
 
-    # Generate fixture
     "$gen_fn" "$origin/heavy" "$file_count"
     local count
     count=$(count_files "$origin/heavy")
 
-    # Storage baseline
     local app=0 alloc=0
     set -- $(tree_disk_usage "$origin/heavy")
     app=${1:-0}
     alloc=${2:-0}
 
-    # Warm store population run
-    local seed_dest="$sc_work/wt-seed"
+    local seed_dest="$sc_work/flashwt-seed"
     (
         cd "$origin" &&
-            WT_STORE="$store_warm" WT_TIMING=1 "$bin" create "seed" --dir "$seed_dest" >/dev/null 2>&1
+            FLASHWT_STORE="$store_warm" FLASHWT_TIMING=1 "$bin" create "seed" --dir "$seed_dest" >/dev/null 2>&1
     )
     eval_verify_tree "$origin/heavy" "$seed_dest/heavy"
     git -C "$origin" worktree remove --force "$seed_dest" >/dev/null 2>&1 || rm -rf "$seed_dest"
 
-    # Warm runs collection
     local warm_walls=()
     local warm_ingest=()
     local warm_materialize=()
@@ -240,20 +208,19 @@ run_eval_scenario() {
 
     local r=1
     while [ "$r" -le "$RUNS" ]; do
-        local run_dest="$sc_work/wt-warm-$r"
+        local run_dest="$sc_work/flashwt-warm-$r"
         local log="$sc_work/warm-$r.log"
         local t0 t1
         t0=$(now)
         (
             cd "$origin" &&
-                WT_STORE="$store_warm" WT_TIMING=1 "$bin" create "warm-$r" --dir "$run_dest" >"$log" 2>&1
-        ) || die "wt create warm-$r failed for $label"
+                FLASHWT_STORE="$store_warm" FLASHWT_TIMING=1 "$bin" create "warm-$r" --dir "$run_dest" >"$log" 2>&1
+        ) || die "flashwt create warm-$r failed for $label"
         t1=$(now)
         local wall_ms
         wall_ms=$(elapsed_ms "$t0" "$t1")
         warm_walls+=("$wall_ms")
 
-        # Parse stages
         while IFS='=' read -r k v; do
             case "$k" in
                 ingest) warm_ingest+=("$v") ;;
@@ -267,7 +234,6 @@ run_eval_scenario() {
         r=$((r + 1))
     done
 
-    # Compute JSON stats
     local wall_json ingest_json mat_json ref_json stages_json disk_json fidelity_json
     wall_json=$(stats_to_json "${warm_walls[@]}")
     ingest_json=$(stats_to_json "${warm_ingest[@]:-0}")
@@ -282,7 +248,6 @@ run_eval_scenario() {
     build_scenario_json "$scenario_id" "warm" "$count" 0 "$wall_json" "$stages_json" "$fidelity_json" "$disk_json"
 }
 
-# Main execution loop
 echo
 echo "== Executing Evaluation Matrix =="
 
@@ -317,11 +282,9 @@ for sc in "${scenario_list[@]}"; do
     base_res=$(run_eval_scenario "$BASE_BIN" "base" "$sc" "$fn" "$fc")
     cand_res=$(run_eval_scenario "$CANDIDATE_BIN" "cand" "$sc" "$fn" "$fc")
 
-    # Extract medians via perl
     b_med=$(echo "$base_res" | perl -MJSON::PP -e 'my $d=decode_json(<STDIN>); print $d->{wall_clock_ms}->{median}')
     c_med=$(echo "$cand_res" | perl -MJSON::PP -e 'my $d=decode_json(<STDIN>); print $d->{wall_clock_ms}->{median}')
 
-    # Compute delta pct: (cand - base) / base * 100
     delta_pct=$(awk -v b="$b_med" -v c="$c_med" 'BEGIN { if (b > 0) printf "%.2f", ((c - b) / b) * 100; else print "0.00" }')
     speedup=$(awk -v b="$b_med" -v c="$c_med" 'BEGIN { if (c > 0) printf "%.2fx", b / c; else print "1.00x" }')
 
@@ -336,7 +299,6 @@ for sc in "${scenario_list[@]}"; do
     SCENARIO_RESULTS+=("{\"scenario\":\"$sc\",\"base\":$base_res,\"candidate\":$cand_res,\"delta_pct\":$delta_pct,\"speedup\":\"$speedup\",\"status\":\"$status\"}")
 done
 
-# Run chaos test if requested
 CHAOS_STATUS="SKIPPED"
 if [ "$DO_CHAOS" -eq 1 ]; then
     echo
@@ -348,7 +310,6 @@ if [ "$DO_CHAOS" -eq 1 ]; then
     fi
 fi
 
-# Assemble complete JSON Report
 TELEMETRY=$(system_telemetry_json)
 JOINED_SCENARIOS=$(IFS=,; echo "${SCENARIO_RESULTS[*]}")
 OVERALL_STATUS="PASS"
@@ -369,7 +330,6 @@ if [ -n "$JSON_OUT" ]; then
     echo "Saved JSON report to: $JSON_OUT"
 fi
 
-# Build Markdown PR Report
 MD_BUF=""
 MD_BUF+="# Automated Verification & Evaluation Report Card"$'\n\n'
 MD_BUF+="**Status:** \`$OVERALL_STATUS\` | **Chaos:** \`$CHAOS_STATUS\` | **Regression Threshold:** \`+${THRESHOLD_PCT}%\`"$'\n\n'
@@ -402,3 +362,4 @@ if [ "$OVERALL_STATUS" = "FAIL" ]; then
     exit 1
 fi
 exit 0
+

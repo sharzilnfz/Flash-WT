@@ -10,7 +10,7 @@ Blocked by: `06-cli-dead-code-clap-aliases-and-dep-pruning.md`
 
 ## Work
 
-1. Deepen `gitops` into a cohesive `workspace` module in `wt-cli`.
+1. Deepen `gitops` into a cohesive `workspace` module in `flashwt-cli`.
 2. Move porcelain parsing, worktree metadata mapping, and merge-ancestor checks behind the workspace interface.
 3. Provide a typed `WorkspaceEngine` for discovering, creating, validating, and deleting git worktrees.
 4. Refactor `clean.rs`, `list.rs`, `create.rs`, and `gc.rs` to consume the deep workspace module.
@@ -18,13 +18,13 @@ Blocked by: `06-cli-dead-code-clap-aliases-and-dep-pruning.md`
 
 ## Files Owned
 
-- `crates/wt-cli/src/workspace.rs` (or `crates/wt-cli/src/gitops.rs`)
-- `crates/wt-cli/src/commands/clean.rs`
-- `crates/wt-cli/src/commands/list.rs`
-- `crates/wt-cli/src/commands/create.rs`
-- `crates/wt-cli/src/gc.rs`
-- `crates/wt-cli/tests/list.rs`
-- `crates/wt-cli/tests/clean.rs`
+- `crates/flashwt-cli/src/workspace.rs` (or `crates/flashwt-cli/src/gitops.rs`)
+- `crates/flashwt-cli/src/commands/clean.rs`
+- `crates/flashwt-cli/src/commands/list.rs`
+- `crates/flashwt-cli/src/commands/create.rs`
+- `crates/flashwt-cli/src/gc.rs`
+- `crates/flashwt-cli/tests/list.rs`
+- `crates/flashwt-cli/tests/clean.rs`
 
 ## Done When
 

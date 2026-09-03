@@ -7,7 +7,7 @@
 **Status:** ready-for-agent
 
 - [ ] Automated git worktree provisioning for compiling baseline and candidate binaries in isolation.
-- [ ] Test orchestrator managing isolated `WT_STORE` and throwaway origin git repositories per run.
+- [ ] Test orchestrator managing isolated `FLASHWT_STORE` and throwaway origin git repositories per run.
 - [ ] Interleaved run scheduler alternating baseline and candidate executions across N runs (default N=5) to eliminate thermal and disk cache bias.
 - [ ] Automated differential analysis calculating absolute differences and percentage changes for every stage metric and wall-clock total.
 - [ ] Integration tests demonstrating end-to-end differential comparison between two builds on small fixtures.

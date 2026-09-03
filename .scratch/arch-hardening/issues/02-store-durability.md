@@ -1,9 +1,9 @@
-# 02: wt-store durability, concurrency, streaming verify
+# 02: flashwt-store durability, concurrency, streaming verify
 
 Status: ready-for-agent
 Owner branch: `arch/store-refactor` (agent does ticket 01 first, then this)
-Owns: `crates/wt-store/src/{disk,gc,mirror,verified,validation,snapindex,bulkwalk}.rs`,
-new `crates/wt-store/src/fsutil.rs`, plus `crates/wt-store/src/snapdiff.rs`.
+Owns: `crates/flashwt-store/src/{disk,gc,mirror,verified,validation,snapindex,bulkwalk}.rs`,
+new `crates/flashwt-store/src/fsutil.rs`, plus `crates/flashwt-store/src/snapdiff.rs`.
 Must run AFTER ticket 01 in the same worktree so snapshot/ metadata-write
 fsync hooks land on the post-split code.
 
@@ -63,10 +63,10 @@ path.
 
 ## Done when
 
-- `cargo test -p wt-store` passes including snapshot/tests.rs tamper tests
+- `cargo test -p flashwt-store` passes including snapshot/tests.rs tamper tests
   (they force mtime changes past kernel clock ticks; make sure durability
   changes don't break them).
-- `cargo clippy -p wt-store --all-targets` clean.
+- `cargo clippy -p flashwt-store --all-targets` clean.
 - A crash between write and rename can no longer leave mirror or gc-mode
   empty/truncated at their final names (reasoned argument in commit message).
 

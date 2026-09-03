@@ -2,7 +2,7 @@
 
 Status: ready-for-agent
 
-`DiskStore::put` (crates/wt-store/src/disk.rs ~343-354) currently does
+`DiskStore::put` (crates/flashwt-store/src/disk.rs ~343-354) currently does
 sync_all + parent-dir fsync per NEW blob. On a cold ingest of 40k unique
 files that is ~80k device flushes on the hot loop. It also contradicts the
 cost model comment at the top of fsutil.rs ("once per create/publish, not
@@ -34,7 +34,7 @@ per blob").
 ## Comments
 
 Recon from the halted first attempt (no code was changed): regression lives
-in `DiskStore::put`, crates/wt-store/src/disk.rs ~343-354 (`sync_all` +
+in `DiskStore::put`, crates/flashwt-store/src/disk.rs ~343-354 (`sync_all` +
 `sync_parent_dir` per NEW blob). The cost-model comment it violates is at
 the top of fsutil.rs. Warm creates are unaffected (put short-circuits on
 `path.exists()`).
@@ -42,4 +42,4 @@ the top of fsutil.rs. Warm creates are unaffected (put short-circuits on
 For benchmark numbers later: `benchmarks/run.sh --scenario d --runs 1` runs
 the large-fixture suite once (baseline/cow/cold/warm; no single-cell
 selection without editing the script). Stage-level cold ingest timings need
-`WT_TIMING=1`.
+`FLASHWT_TIMING=1`.

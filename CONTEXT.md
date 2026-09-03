@@ -12,7 +12,7 @@ source of truth for code. Inspired by git's object database.
 **Tree (or projection)**
 The normal folder of files on disk that editors, build tools, and humans see.
 Not the source of truth. Rebuildable from the store at any time. Explicit
-hydration (`wt hydrate` or `wt new`) is the sole synchronization mechanism.
+hydration (`flashwt hydrate` or `flashwt new`) is the sole synchronization mechanism.
 There is no background sync daemon, filesystem watcher, or automatic
 bidirectional tree-store synchronization.
 
@@ -34,7 +34,7 @@ file contents are rewritten, only linked or cloned.
 **Human path / agent path**
 Both humans and agents edit normal files in the tree. Neither humans nor agents
 bypass the filesystem to mutate the store directly. Both trigger explicit CLI
-commands (`wt new`, `wt hydrate`) when they need to populate or update heavy
+commands (`flashwt new`, `flashwt hydrate`) when they need to populate or update heavy
 directories.
 
 **Mirror**
@@ -53,6 +53,6 @@ it from blobs first. Cache only. The blobs remain the truth (ADR-0005).
 **Grace period**
 How long the store waits before collecting unreferenced blobs, snapshots, or
 whole dead-worktree mirrors. Defaults to 15 minutes, overridable with
-`WT_GC_GRACE`. Deletion needs both "no live root" and "older than the grace
+`FLASHWT_GC_GRACE`. Deletion needs both "no live root" and "older than the grace
 period", so a kill at any point can only leak reclaimable cache data, never
 collect live data.

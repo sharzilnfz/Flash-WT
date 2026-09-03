@@ -4,7 +4,7 @@ Status: ready-for-agent
 
 The method `SelectionIndex::record_hit` early-returns when the hash is
 already at the ring front, but the free function `record_hit`
-(crates/wt-store/src/snapindex.rs ~216-266) ignores that and unconditionally
+(crates/flashwt-store/src/snapindex.rs ~216-266) ignores that and unconditionally
 loads the index and saves it through temp+rename. Every snapshot hit pays a
 pointless write on the fastest path the tool has.
 

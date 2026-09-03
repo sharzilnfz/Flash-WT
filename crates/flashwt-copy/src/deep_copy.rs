@@ -1,0 +1,53 @@
+use std::path::Path;
+
+use crate::copy_tree::copy_tree;
+use crate::{BackendKind, CopyBackend, Error, Result};
+
+#[derive(Debug, Default)]
+pub struct DeepCopyBackend;
+
+impl CopyBackend for DeepCopyBackend {
+    fn kind(&self) -> BackendKind {
+        BackendKind::DeepCopy
+    }
+
+    fn supports(&self, _dir: &Path) -> bool {
+        true
+    }
+
+    fn copy_dir(&self, src: &Path, dest: &Path) -> Result<()> {
+        crate::copy_tree::staged_copy(dest, &mut |staging| {
+            let mut copy_file =
+                |from: &Path, to: &Path| crate::sys::buffered_copy_file(from, to).map(|_| ());
+            copy_tree(src, staging, &mut copy_file).map_err(Error::Io)
+        })
+    }
+}
+
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Error;
+    use std::fs;
+
+    #[test]
+    fn copies_nested_tree_and_rejects_existing_dest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(src.join("a/b")).expect("mkdir");
+        fs::write(src.join("a/b/f.txt"), "deep bytes\n").expect("write");
+
+        let dest = dir.path().join("dest");
+        DeepCopyBackend.copy_dir(&src, &dest).expect("copy_dir");
+        assert_eq!(
+            fs::read_to_string(dest.join("a/b/f.txt")).expect("read"),
+            "deep bytes\n"
+        );
+
+        assert!(matches!(
+            DeepCopyBackend.copy_dir(&src, &dest),
+            Err(Error::DestinationExists)
+        ));
+    }
+}

@@ -8,6 +8,6 @@
 
 - [ ] Rust `target/` fixture generator producing realistic debug binaries, incremental compilation artifact hashes, and rlibs across multi-crate layouts.
 - [ ] Python `.venv` fixture generator creating nested `site-packages`, bytecode cache `.pyc` files, and executable wrapper symlinks in `bin/`.
-- [ ] Concurrent fan-out generator launching 10 to 50 parallel `wt create` worker processes targeting the same shared store root.
+- [ ] Concurrent fan-out generator launching 10 to 50 parallel `flashwt create` worker processes targeting the same shared store root.
 - [ ] Concurrency metrics collector tracking lock wait durations, race conditions, and peak memory consumption during parallel hydration.
 - [ ] Fixture validation tests verifying that generated directory trees conform to expected file counts, directory depths, and deduplication ratios.

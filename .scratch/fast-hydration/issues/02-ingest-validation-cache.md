@@ -1,6 +1,6 @@
 # 02: Ingest validation cache
 
-**What to build:** Warm `wt create` stops paying for unchanged files. A validation cache kept beside the store records, for every ingested path, its size, mtime, and content id from the last run. On the next ingest, files whose size and mtime still match reuse their existing blob without being read or hashed; everything else goes through the normal read-and-hash path. A user who edits one package between worktree creations pays only for that package. Existing stores keep working — the cache is additive, not a store format change.
+**What to build:** Warm `flashwt create` stops paying for unchanged files. A validation cache kept beside the store records, for every ingested path, its size, mtime, and content id from the last run. On the next ingest, files whose size and mtime still match reuse their existing blob without being read or hashed; everything else goes through the normal read-and-hash path. A user who edits one package between worktree creations pays only for that package. Existing stores keep working — the cache is additive, not a store format change.
 
 Correctness does not depend on trusting mtimes: hash verification at materialize time stays in place, so if cached metadata ever lies about content, the mismatch fails loudly before bad bytes land in a fresh tree.
 

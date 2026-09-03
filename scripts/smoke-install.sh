@@ -1,12 +1,4 @@
 #!/bin/sh
-# Exercise both install paths without a GitHub release.
-#
-#   ./scripts/smoke-install.sh
-#
-# The curl path is tested end to end against a local directory laid out
-# exactly like a release. The brew path is tested too when Homebrew is
-# available: an older version is installed first, then upgraded, which
-# covers both "installs cleanly" and "upgrades cleanly".
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -42,56 +34,43 @@ sha256_file() {
   fi
 }
 
-# Lay out the dist directory like GitHub's release downloads: one
-# directory per tag, holding the tarballs and checksums. The same binary
-# is packaged under all three target names so the generated formula has
-# a complete set of checksums.
 package() {
   V=$1
   TAG_DIR="$DIST/v$V"
   mkdir -p "$TAG_DIR"
   for T in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
-    # Top-level directory inside the tarball, matching what CI packages.
-    DIR="$WORK/wt-v$V-$T"
+    DIR="$WORK/flashwt-v$V-$T"
     mkdir "$DIR"
     if [ "$V" = "$VERSION" ]; then
-      if [ -f target/release/flashwt ]; then
-        cp target/release/flashwt "$DIR/flashwt"
-      else
-        cp target/release/wt "$DIR/flashwt"
-      fi
-      ln -s flashwt "$DIR/flash-wt"
-      ln -s flashwt "$DIR/wt"
+      cp target/release/flashwt "$DIR/flashwt"
+      ln -s flashwt "$DIR/flash-flashwt"
     else
-      # The stand-in older version must be distinguishable from the real
-      # one so the upgrade assertions below mean something.
       printf '#!/bin/sh\necho "flashwt %s"\n' "$V" >"$DIR/flashwt"
       chmod +x "$DIR/flashwt"
-      ln -s flashwt "$DIR/flash-wt"
-      ln -s flashwt "$DIR/wt"
+      ln -s flashwt "$DIR/flash-flashwt"
     fi
-    tar czf "$TAG_DIR/wt-v$V-$T.tar.gz" -C "$WORK" "wt-v$V-$T"
+    tar czf "$TAG_DIR/flashwt-v$V-$T.tar.gz" -C "$WORK" "flashwt-v$V-$T"
     (
-      cd "$TAG_DIR" && sha256_file "wt-v$V-$T.tar.gz"
-    ) >"$TAG_DIR/wt-v$V-$T.tar.gz.sha256"
+      cd "$TAG_DIR" && sha256_file "flashwt-v$V-$T.tar.gz"
+    ) >"$TAG_DIR/flashwt-v$V-$T.tar.gz.sha256"
   done
 }
 package "$VERSION"
 package "$OLD_VERSION"
 
 echo "== curl installer path"
-WT_DIST_DIR="$DIST/v$VERSION" WT_VERSION="v$VERSION" WT_BIN_DIR="$WORK/bin" \
+FLASHWT_DIST_DIR="$DIST/v$VERSION" FLASHWT_VERSION="v$VERSION" FLASHWT_BIN_DIR="$WORK/bin" \
   sh install.sh
-GOT=$("$WORK/bin/wt" --version)
-[ "$GOT" = "flashwt $VERSION" ] || [ "$GOT" = "wt $VERSION" ] || [ "$GOT" = "wt-hydrate $VERSION" ] ||
-  { echo "smoke: expected 'flashwt $VERSION', 'wt $VERSION' or 'wt-hydrate $VERSION', got '$GOT'" >&2; exit 1; }
-echo "ok: curl path installed wt $VERSION and verified it runs"
+GOT=$("$WORK/bin/flashwt" --version)
+[ "$GOT" = "flashwt $VERSION" ] ||
+  { echo "smoke: expected 'flashwt $VERSION', got '$GOT'" >&2; exit 1; }
+echo "ok: curl path installed flashwt $VERSION and verified it runs"
 
 echo "== checksum rejection"
 mkdir -p "$WORK/bad"
-cp "$DIST/v$VERSION/wt-v$VERSION-$TARGET.tar.gz" "$WORK/bad/"
-printf 'deadbeef\n' >"$WORK/bad/wt-v$VERSION-$TARGET.tar.gz.sha256"
-if WT_DIST_DIR="$WORK/bad" WT_VERSION="v$VERSION" WT_BIN_DIR="$WORK/bin2" \
+cp "$DIST/v$VERSION/flashwt-v$VERSION-$TARGET.tar.gz" "$WORK/bad/"
+printf 'deadbeef\n' >"$WORK/bad/flashwt-v$VERSION-$TARGET.tar.gz.sha256"
+if FLASHWT_DIST_DIR="$WORK/bad" FLASHWT_VERSION="v$VERSION" FLASHWT_BIN_DIR="$WORK/bin2" \
   sh install.sh 2>/dev/null; then
   echo "smoke: installer accepted a corrupt download" >&2
   exit 1
@@ -106,30 +85,30 @@ fi
 echo "== brew formula path"
 formula_for() {
   V=$1
-  WT_REPO=local/smoke WT_DOWNLOAD_BASE="file://$DIST" \
+  FLASHFLASHWT_REPO=local/smoke FLASHWT_DOWNLOAD_BASE="file://$DIST" \
     ./scripts/gen-formula.sh "$V" "$DIST/v$V"
 }
 
-# Recent Homebrew refuses bare formula files, so stage a throwaway tap.
 export HOMEBREW_NO_AUTO_UPDATE=1
 TAP="$(brew --repository)/Library/Taps/local/homebrew-smoke"
 rm -rf "$TAP"
 mkdir -p "$TAP/Formula"
 git init -q "$TAP"
 
-formula_for "$OLD_VERSION" >"$TAP/Formula/wt.rb"
-brew uninstall --ignore-dependencies wt >/dev/null 2>&1 || true
-brew install local/smoke/wt
-GOT=$("$(brew --prefix)/bin/wt" --version)
-[ "$GOT" = "flashwt $OLD_VERSION" ] || [ "$GOT" = "wt $OLD_VERSION" ] || [ "$GOT" = "wt-hydrate $OLD_VERSION" ] ||
+formula_for "$OLD_VERSION" >"$TAP/Formula/flashwt.rb"
+brew uninstall --ignore-dependencies flashwt >/dev/null 2>&1 || true
+brew install local/smoke/flashwt
+GOT=$("$(brew --prefix)/bin/flashwt" --version)
+[ "$GOT" = "flashwt $OLD_VERSION" ] ||
   { echo "smoke: brew install produced '$GOT'" >&2; exit 1; }
-echo "ok: brew installed wt $OLD_VERSION"
+echo "ok: brew installed flashwt $OLD_VERSION"
 
-formula_for "$VERSION" >"$TAP/Formula/wt.rb"
-brew upgrade wt
-GOT=$("$(brew --prefix)/bin/wt" --version)
-[ "$GOT" = "flashwt $VERSION" ] || [ "$GOT" = "wt $VERSION" ] || [ "$GOT" = "wt-hydrate $VERSION" ] ||
+formula_for "$VERSION" >"$TAP/Formula/flashwt.rb"
+brew upgrade flashwt
+GOT=$("$(brew --prefix)/bin/flashwt" --version)
+[ "$GOT" = "flashwt $VERSION" ] ||
   { echo "smoke: brew upgrade produced '$GOT'" >&2; exit 1; }
-echo "ok: brew upgraded wt to $VERSION"
+echo "ok: brew upgraded flashwt to $VERSION"
 
-brew uninstall wt || true
+brew uninstall flashwt || true
+

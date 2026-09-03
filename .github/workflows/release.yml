@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 env:
-  WT_REPO: sharzilnfz/wt
+  FLASHFLASHWT_REPO: sharzilnfz/Flash-WT
 
 jobs:
   build:
@@ -52,18 +52,15 @@ jobs:
             codesign --force --options runtime --timestamp --sign "$MACOS_IDENTITY" "$BIN"
             rm -f cert.p12
           else
-            # No Developer ID certificate configured for this run; fall back
-            # to an ad-hoc signature so the binary still carries a valid one.
             codesign --force --sign - "$BIN"
           fi
       - name: Package
         run: |
-          DIR="wt-v${VERSION}-${{ matrix.target }}"
+          DIR="flashwt-v${VERSION}-${{ matrix.target }}"
           mkdir "$DIR"
           cp "target/${{ matrix.target }}/release/flashwt" "$DIR/"
-          ln -s flashwt "$DIR/flash-wt"
-          ln -s flashwt "$DIR/wt"
-          cp README.md "$DIR/"
+          ln -s flashwt "$DIR/flash-flashwt"
+                    cp README.md "$DIR/"
           for shell in bash zsh fish; do
             "target/${{ matrix.target }}/release/flashwt" completions "$shell" >"$DIR/flashwt.$shell"
           done
@@ -73,8 +70,8 @@ jobs:
         with:
           name: dist-${{ matrix.target }}
           path: |
-            wt-v${{ env.VERSION }}-*.tar.gz
-            wt-v${{ env.VERSION }}-*.tar.gz.sha256
+            flashwt-v${{ env.VERSION }}-*.tar.gz
+            flashwt-v${{ env.VERSION }}-*.tar.gz.sha256
 
   release:
     needs: build
@@ -90,14 +87,15 @@ jobs:
       - name: Generate brew formula with real checksums
         run: |
           mkdir -p Formula-generated
-          ./scripts/gen-formula.sh "$VERSION" dist > Formula-generated/wt.rb
+          ./scripts/gen-formula.sh "$VERSION" dist > Formula-generated/flashwt.rb
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp Formula-generated/wt.rb dist/wt.rb
+          cp Formula-generated/flashwt.rb dist/flashwt.rb
           gh release create "v$VERSION" \
-            --repo "$WT_REPO" \
+            --repo "$FLASHWT_REPO" \
             --title "v$VERSION" \
             --generate-notes \
-            dist/*.tar.gz dist/*.tar.gz.sha256 dist/wt.rb
+            dist/*.tar.gz dist/*.tar.gz.sha256 dist/flashwt.rb
+

@@ -18,10 +18,10 @@ the README and launch post, so claims are verifiable by anyone.
 
 Implemented on `fleet/08-benchmarks`:
 
-- `benchmarks/run.sh`: one command. Builds `wt` (or honors `WT_BIN`),
+- `benchmarks/run.sh`: one command. Builds `flashwt` (or honors `FLASHWT_BIN`),
   generates a fixture repo in a throwaway tempdir, times plain
   `git worktree add` + fresh install (fixture tree written file by
-  file — what an install does at the FS level) against `wt create`,
+  file — what an install does at the FS level) against `flashwt create`,
   cold (empty store) and warm (shared populated store). Every timed
   run is verified against the source fixture (byte-compare with
   `--verify`, file-count always) so unattended CI can't ship a fast
@@ -33,7 +33,7 @@ Implemented on `fleet/08-benchmarks`:
   macos-latest + ubuntu-latest.
 
 Verified locally on macOS arm64 (Darwin 25.6.0), full mode: baseline
-cold 9.5s / warm 9.0s; wt cold 15.0s / warm 15.9s. Honest finding for
+cold 9.5s / warm 9.0s; flashwt cold 15.0s / warm 15.9s. Honest finding for
 the launch post: hydration is currently store-ingest + full rewrite
 (ticket 05's materialize writes every byte), so it loses to baseline
 until clonefile-backed materialization is wired in. The suite will

@@ -1,4 +1,4 @@
-# wt — whole-product handoff
+# flashwt — whole-product handoff
 
 Date: 2026-08-23. This document is self-contained and separate from the
 working handoffs under `.scratch/`. It answers: what is this product,
@@ -9,16 +9,16 @@ left to do.
 
 ## 1. What the product is
 
-`wt` is a single, dependency-free binary that creates git worktrees with
+`flashwt` is a single, dependency-free binary that creates git worktrees with
 heavy untracked directories already in place.
 
 ```
-wt create my-feature
+flashwt create my-feature
 ```
 
 One command produces a new worktree at `<repo>-my-feature` on a new
 branch, with `node_modules/`, `target/`, caches, and whatever else the
-project's `.wtinclude` manifest lists — hydrated instantly through a
+project's `.flashwtinclude` manifest lists — hydrated instantly through a
 content-addressed store. Nothing is re-downloaded, re-installed, or
 rewritten byte-by-byte; files are hardlinked or copy-on-write cloned
 out of a local object store, the same way git shares objects between
@@ -49,8 +49,8 @@ files whose contents already exist somewhere else on the same disk.
 
 ## 3. The solution
 
-A content-addressed store (`~/.cache/wt/store` by default, overridable
-with `WT_STORE`) sits beside your projects:
+A content-addressed store (`~/.cache/flashwt/store` by default, overridable
+with `FLASHWT_STORE`) sits beside your projects:
 
 1. **Ingest** — on first use, unique file contents from heavy
    directories are hashed (SHA-256) and stored once as immutable
@@ -61,11 +61,11 @@ with `WT_STORE`) sits beside your projects:
    hardlinks. Files share the store's physical blocks until first
    write; they are private, fully writable, and indistinguishable from
    real files to editors and build tools.
-3. **Snapshot cache** (opt-in, macOS/APFS, `WT_SNAPSHOTS=1`) — whole
+3. **Snapshot cache** (opt-in, macOS/APFS, `FLASHWT_SNAPSHOTS=1`) — whole
    directory trees are cached as snapshot images; a matching hydrate
    becomes one recursive `clonefile(2)` call (~0.45s for 40,000
    files).
-4. **v2 incremental rebuilds** (opt-in, `WT_SNAPSHOTS_V2=1`) — when
+4. **v2 incremental rebuilds** (opt-in, `FLASHWT_SNAPSHOTS_V2=1`) — when
    dependencies change slightly, the previous snapshot is diffed
    against the new state and the rebuild is one whole-tree clone plus
    an in-place delta of just the changed paths. No full relink train.
@@ -76,12 +76,12 @@ with `WT_STORE`) sits beside your projects:
 
 Integrity model: blobs are hash-verified once and then trusted while
 size+mtime stay unchanged (a verified-blob ledger tracks this);
-`WT_VERIFY=1` forces full re-hashing for paranoid runs, and under v2
+`FLASHWT_VERIFY=1` forces full re-hashing for paranoid runs, and under v2
 it hashes every staged file before publishing a snapshot.
 
 ## 4. Measured benefits (40k files / 800 packages fixture)
 
-| Scenario | Baseline | With wt |
+| Scenario | Baseline | With flashwt |
 |---|---|---|
 | Warm environment create | 11.35s fresh install | **~1.5s** |
 | Same vs raw APFS clone (`cp -Rc`) | 7.95s | ~1.5s |
@@ -104,17 +104,17 @@ Additional benefits that don't show in wall time:
 agentic-coding wave where parallel machine environments are becoming
 the default workflow.
 
-**Adjacent tools and why wt is different:**
+**Adjacent tools and why flashwt is different:**
 
-| Alternative | Gap wt fills |
+| Alternative | Gap flashwt fills |
 |---|---|
-| Plain `git worktree add` + reinstall | Worktrees share tracked files but not heavy untracked dirs; every worktree still pays the install. wt makes the untracked bulk free. |
-| pnpm / yarn PnP | Dedupe within one JS package manager's layout. wt is ecosystem-agnostic and works at the filesystem level for any heavy directory. |
-| `cp -Rc` / clonefile scripts | A bare recursive APFS clone measures ~8s at 40k files and has no dedup across projects, no integrity checking, no GC, no CLI. wt warm path is faster (~1.5s) because it skips unchanged subtrees entirely. |
-| Docker / devcontainers | Solve reproducibility, not iteration speed on the same host; heavyweight and a workflow change. wt changes nothing about how you work. |
-| Build caches (turborepo, nx, sccache) | Cache build *outputs* keyed by inputs. wt solves environment *materialization* — a complementary layer, not a competitor. |
+| Plain `git worktree add` + reinstall | Worktrees share tracked files but not heavy untracked dirs; every worktree still pays the install. flashwt makes the untracked bulk free. |
+| pnpm / yarn PnP | Dedupe within one JS package manager's layout. flashwt is ecosystem-agnostic and works at the filesystem level for any heavy directory. |
+| `cp -Rc` / clonefile scripts | A bare recursive APFS clone measures ~8s at 40k files and has no dedup across projects, no integrity checking, no GC, no CLI. flashwt warm path is faster (~1.5s) because it skips unchanged subtrees entirely. |
+| Docker / devcontainers | Solve reproducibility, not iteration speed on the same host; heavyweight and a workflow change. flashwt changes nothing about how you work. |
+| Build caches (turborepo, nx, sccache) | Cache build *outputs* keyed by inputs. flashwt solves environment *materialization* — a complementary layer, not a competitor. |
 
-**Honest positioning statement**: wt is fastest on macOS/APFS where
+**Honest positioning statement**: flashwt is fastest on macOS/APFS where
 clonefile exists; Linux works via reflink/fallback copies but without
 the snapshot fast path. It is v0.1.0-maturity: feature-complete for
 its core promise, hardened by tests, not yet soaked on third-party
@@ -128,16 +128,16 @@ workloads.
 | Directory snapshots | Whole-tree APFS clone (~1.3s warm) | Per-file placement ladder | Per-file placement ladder | Per-file placement ladder |
 | Incremental rebuilds | Tree clone + selective relink | Per-file delta placement | Per-file delta placement | Per-file delta placement |
 | Storage deduplication | Zero-copy CoW extents | Zero-copy CoW extents | Physical disk consumption | Physical disk consumption |
-| Hardlink mode (`WT_HARDLINK=1`) | Read-only shared inodes | Read-only shared inodes | Read-only shared inodes | Refused across mounts |
+| Hardlink mode (`FLASHWT_HARDLINK=1`) | Read-only shared inodes | Read-only shared inodes | Read-only shared inodes | Refused across mounts |
 | Fallback diagnostics | Surfaces reason on non-APFS | Reports backend and refusal reason | Reports backend and refusal reason | Reports backend and refusal reason |
 
 When acceleration is refused (e.g. cross-device mounts or missing kernel support), fallback runs explicitly report the chosen backend and the refusal reason in both terminal output and JSON envelopes.
 
 ## 6. Current state (as of this handoff)
 
-- **Code**: three crates — `wt-cli` (command surface, hydration
-  orchestration), `wt-store` (object store, snapshots, snapdiff/snapindex,
-  bulk walker, GC, verified ledger), `wt-copy` (copy backends: clonefile,
+- **Code**: three crates — `flashwt-cli` (command surface, hydration
+  orchestration), `flashwt-store` (object store, snapshots, snapdiff/snapindex,
+  bulk walker, GC, verified ledger), `flashwt-copy` (copy backends: clonefile,
   hardlink, deep copy). Workspace builds with LTO, stripped release.
 - **Quality gates**: 167 tests green; `cargo fmt` and
   `cargo clippy --all-targets -D warnings` clean; CI runs these on both
@@ -146,8 +146,8 @@ When acceleration is refused (e.g. cross-device mounts or missing kernel support
   binaries plus unsigned Linux tarballs, generates SHA-256 checksums
   and a Homebrew formula; `install.sh` verifies checksums;
   `scripts/smoke-install.sh` exercises both install paths.
-- **Commands**: `wt create`, `wt remove`, `wt sweep`,
-  `wt store migrate` (GC cutover).
+- **Commands**: `flashwt create`, `flashwt remove`, `flashwt sweep`,
+  `flashwt store migrate` (GC cutover).
 - **Design records**: six ADRs in `docs/adr/` covering store-as-truth,
   tool-agnostic hydration, single-binary stance, mark-and-sweep GC,
   directory snapshots, and the evaluation (and rejection, with
@@ -168,12 +168,12 @@ When acceleration is refused (e.g. cross-device mounts or missing kernel support
 
 ## 7. What comes next, in order
 
-1. Push to GitHub (`github.com/sharzilnfz/wt`) and cut `v0.1.0` so
+1. Push to GitHub (`github.com/sharzilnfz/Flash-WT`) and cut `v0.1.0` so
    release CI produces real artifacts; verify curl and brew installs
    end-to-end.
-2. Soak both gates (`WT_SNAPSHOTS=1 WT_SNAPSHOTS_V2=1`) on daily
+2. Soak both gates (`FLASHWT_SNAPSHOTS=1 FLASHWT_SNAPSHOTS_V2=1`) on daily
    workloads; decide default-on based on tickets 08/09 data.
-3. Run the GC cutover on the live store (`wt store migrate
+3. Run the GC cutover on the live store (`flashwt store migrate
    --activate-mark-sweep`, later `--drop-legacy-refs`).
 4. Deferred ideas: LRU retention cap for unreferenced snapshots,
    scrub command, cold-build speedup if APFS link serialization ever
@@ -183,9 +183,9 @@ When acceleration is refused (e.g. cross-device mounts or missing kernel support
 
 ```
 crates/
-  wt-cli/      CLI, hydration orchestration, integration tests
-  wt-store/    object store, snapshots, diff/index, bulk walk, GC, ledger
-  wt-copy/     clonefile/hardlink/deep-copy backends
+  flashwt-cli/      CLI, hydration orchestration, integration tests
+  flashwt-store/    object store, snapshots, diff/index, bulk walk, GC, ledger
+  flashwt-copy/     clonefile/hardlink/deep-copy backends
 benchmarks/    run.sh (scenarios a–d), v2-bench.sh, fixture.sh
 docs/adr/      architecture decision records 0001–0006
 Formula/       Homebrew formula (generated, carries checksums)

@@ -1,15 +1,15 @@
-# Handoff: state of `wt` after the hydration performance build-out
+# Handoff: state of `flashwt` after the hydration performance build-out
 
 Date: 2026-08-23. Branch `master`, HEAD `fa1866f`. Working tree clean.
 135 tests green (`cargo test`), clippy clean. This document is
 self-contained; an external agent or a future you needs nothing else.
 
-## 1. What `wt` is
+## 1. What `flashwt` is
 
-`wt` is a CLI that makes agentic coding cheap around git worktrees.
+`flashwt` is a CLI that makes agentic coding cheap around git worktrees.
 Agents create many worktrees per day; each one normally pays full
 dependency installs and rebuilds of untracked heavy directories
-(`node_modules`, `target`, caches). `wt create` makes the git worktree
+(`node_modules`, `target`, caches). `flashwt create` makes the git worktree
 and fills ("hydrates") those heavy directories from a per-machine
 content-addressed store instead of reinstalling.
 
@@ -24,9 +24,9 @@ worktree depends on; mirrors are what garbage collection trusts.
 
 Rust workspace, three crates:
 
-### wt-store
+### flashwt-store
 
-`DiskStore`, rooted at `~/.cache/wt/store` (override with `$WT_STORE`).
+`DiskStore`, rooted at `~/.cache/flashwt/store` (override with `$FLASHWT_STORE`).
 Everything inside one root directory:
 
 ```
@@ -46,22 +46,22 @@ ingest-cache.tsv         path -> (size, mtime, blob id) so unchanged source
                          files are not re-read on later ingests
 verified.tsv             blob id -> (size, mtime) fingerprint recorded when
                          its hash was last proven; materialization trusts
-                         these without re-hashing. WT_VERIFY=1 disables trust.
+                         these without re-hashing. FLASHWT_VERIFY=1 disables trust.
 snapshots/<hash>/        whole-directory snapshot: manifest.tsv (canonical),
                          .complete marker, tree/ = hardlinks to blobs
 snapshots/tmp/           staging for builds; debris collected after grace
 ```
 
-### wt-copy
+### flashwt-copy
 
 Placement strategies behind the `FileMaterialize` trait: `CloneOut`
 (macOS default, per-file `fclonefileat(2)`), `HardlinkOut` (opt-in,
 experimental), byte copy as universal fallback.
 
-### wt-cli — the `wt create` flow
+### flashwt-cli — the `flashwt create` flow
 
 1. `git worktree add` into `<repo>-<name>` (or `--dir`).
-2. Read `.wtinclude` patterns, walk each heavy directory.
+2. Read `.flashwtinclude` patterns, walk each heavy directory.
 3. **Ingest**: every regular file is hashed and stored once (validation
    cache skips unchanged files). Symlinks and empty dirs are recorded in
    the ingest result. Non-regular files fail loudly under snapshots.
@@ -69,30 +69,30 @@ experimental), byte copy as universal fallback.
    one snapshot); legacy refcount updates happen too unless the store is
    in `mark-sweep-no-refs` mode.
 5. **Materialize** per heavy directory:
-   - With `WT_SNAPSHOTS=1` on macOS/APFS: compute the canonical manifest
+   - With `FLASHWT_SNAPSHOTS=1` on macOS/APFS: compute the canonical manifest
      hash. Hit (valid published snapshot): verify policy already
      satisfied at publish, so clone the whole `tree/` with ONE recursive
      `clonefile(2)` into place. Miss: verify each blob per policy
-     (ledger trust, full hash under `WT_VERIFY=1`), hardlink into a
+     (ledger trust, full hash under `FLASHWT_VERIFY=1`), hardlink into a
      staging tree, apply normalized modes, publish atomically, then
      clone. Any clonefile refusal falls back to the per-file ladder.
    - Without the gate: per-file verify-then-place through the strategy
      ladder (verify first so corruption never lands).
-6. Print a summary; with `WT_TIMING=1` emit `wt-stage ingest=N`,
+6. Print a summary; with `FLASHWT_TIMING=1` emit `flashwt-stage ingest=N`,
    `references=N`, `materialize=N`, `snapshot=N`, `total=N` (ms) on stderr.
 
-### Garbage collection (`wt sweep`)
+### Garbage collection (`flashwt sweep`)
 
 Three modes, chosen by the `<store>/gc-mode` marker:
 
 - **legacy** (default): collects by refcount age exactly as before, but
   also computes mirror marks and reports disagreements (audit parity).
-- **mark-sweep** (after `wt store migrate --activate-mark-sweep`):
+- **mark-sweep** (after `flashwt store migrate --activate-mark-sweep`):
   liveness comes from valid mirrors only. A mirror is live when its
   recorded worktree path exists, gitdir exists, and either the
-  `wt-hydrated.tsv` sidecar exists or the mirror is younger than the
+  `flashwt-hydrated.tsv` sidecar exists or the mirror is younger than the
   grace period. Blobs, unreferenced snapshots, and dead mirrors are
-  collected only after the grace period (`WT_GC_GRACE`, default 15m).
+  collected only after the grace period (`FLASHWT_GC_GRACE`, default 15m).
   refs/ files still get maintained but are ignored.
 - **mark-sweep-no-refs** (after `--drop-legacy-refs`, prints a loud
   warning): refcount files stop being maintained entirely. Pre-cutover
@@ -108,15 +108,15 @@ existence, which survives out-of-band `rm -rf` of worktrees.
 - `fa0e628` Phase 0: realistic Scenario D benchmark fixture plus stage
   timing capture.
 - `197b07a` Phase 2: APFS whole-directory snapshots behind
-  `WT_SNAPSHOTS=1`. ADR-0005.
+  `FLASHWT_SNAPSHOTS=1`. ADR-0005.
 - `25aac28` Benchmark fixes found at scale (SIGPIPE-safe line capture;
   honest single-level fixture nesting).
 - `fa1866f` Snapshot build skips no-op chmods; measured numbers recorded.
-- `5d34edc` Step 0: fine-grained WT_TIMING stage attribution.
+- `5d34edc` Step 0: fine-grained FLASHWT_TIMING stage attribution.
 - `fdba0df` Step 0 follow-up: getattrlistbulk bulk walk, dirty-flag
   cache saves, buffered ledgers (ingest -85%, references -86%).
 - `9f1f0e6` v2: diff-based incremental snapshot rebuilds behind
-  `WT_SNAPSHOTS_V2=1` (selection index, sorted-merge diff). Ticket 09.
+  `FLASHWT_SNAPSHOTS_V2=1` (selection index, sorted-merge diff). Ticket 09.
 - `4053f07` v2 hardening: crash, eviction-race, GC-interaction tests;
   fixed sweep collecting `snapshots/index.tsv` as debris.
 - `ed2c3ee` benchmarks: reproducible `v2-bench.sh`; Linux CI job.
@@ -147,9 +147,9 @@ consistent across both.
 |---|---|---|
 | fresh install baseline | 11.35s | — |
 | direct recursive CoW clone (`cp -Rc`) | 7.95s | — |
-| wt per-file ladder | 11.78s | ~13s |
-| **wt, WT_SNAPSHOTS=1** | **6.5s** | **~1.6s** |
-| wt, snapshots + no-refs cutover | 6.2s | ~1.5s |
+| flashwt per-file ladder | 11.78s | ~13s |
+| **flashwt, FLASHWT_SNAPSHOTS=1** | **6.5s** | **~1.6s** |
+| flashwt, snapshots + no-refs cutover | 6.2s | ~1.5s |
 
 The warm-hit jump between sessions is the Step 0 follow-up work:
 ingest and references stages carried ~6s of syscall overhead that the
@@ -160,7 +160,7 @@ Recursive clonefile was measured directly: ~0.45s for 40k files.
 
 Cold full build (first create after content change): ~15-19s of which
 the link train dominates (APFS serializes link(2) at ~300us/file).
-With `WT_SNAPSHOTS_V2=1`, a rebuild after small changes costs one
+With `FLASHWT_SNAPSHOTS_V2=1`, a rebuild after small changes costs one
 whole-tree clonefile plus O(changed) delta work:
 
 | Scenario (loaded machine) | v1 rebuild | v2 incremental |
@@ -169,18 +169,18 @@ whole-tree clonefile plus O(changed) delta work:
 | hit-rate poison: one `.DS_Store` | 18.0s | **5.7s** |
 
 v2's residual cost is ingest (~3.3s loaded / ~0.6s warm-cache walk) +
-references + git worktree add. Reproduce: `WT_BENCH_SAMPLES=2
+references + git worktree add. Reproduce: `FLASHWT_BENCH_SAMPLES=2
 ./benchmarks/v2-bench.sh` (every hydrated tree diff -r'd against the
 donor; mismatch aborts).
 
-Small fixture (4k files): snapshots do not pay yet, wt warm is ~2.2s vs
+Small fixture (4k files): snapshots do not pay yet, flashwt warm is ~2.2s vs
 baseline 1.9s.
 
 Fidelity: snapshot-hydrated trees preserve symlinks, executable bits,
 and empty directories exactly. The per-file ladder drops exec bits and
 symlinks (counted and reported as known gaps by the suite's `--verify`;
 bytes and presence are exact everywhere and any mismatch fails the run).
-Under v2, `WT_VERIFY=1` hashes every staged file before publish.
+Under v2, `FLASHWT_VERIFY=1` hashes every staged file before publish.
 
 Reproduce anything with:
 
@@ -190,21 +190,21 @@ cargo test                       # 167 tests
 ./benchmarks/v2-bench.sh         # v1-vs-v2 bump/poisoning table
 ```
 
-Environment knobs: `WT_STORE`, `WT_SNAPSHOTS=1`, `WT_SNAPSHOTS_V2=1`,
-`WT_VERIFY=1`, `WT_HARDLINK=1`, `WT_NO_HARDLINK=1`, `WT_GC_GRACE`
-(e.g. 15m), `WT_TIMING=1`.
+Environment knobs: `FLASHWT_STORE`, `FLASHWT_SNAPSHOTS=1`, `FLASHWT_SNAPSHOTS_V2=1`,
+`FLASHWT_VERIFY=1`, `FLASHWT_HARDLINK=1`, `FLASHWT_NO_HARDLINK=1`, `FLASHWT_GC_GRACE`
+(e.g. 15m), `FLASHWT_TIMING=1`.
 
 ## 5. Known limitations
 
 - Snapshots and v2 rebuilds are macOS/APFS only and opt-in
-  (`WT_SNAPSHOTS=1`, plus `WT_SNAPSHOTS_V2=1` for incremental
+  (`FLASHWT_SNAPSHOTS=1`, plus `FLASHWT_SNAPSHOTS_V2=1` for incremental
   rebuilds). Linux has no recursive reflink primitive, so the gates
   are no-ops there by design; the Linux CI job proves the rest of the
   suite passes.
 - The per-file ladder's fidelity gaps above; use the snapshot gate
   when they matter.
 - A same-size, same-mtime bit flip can slip past the verified ledger
-  between checks. That is the accepted trust model; `WT_VERIFY=1`
+  between checks. That is the accepted trust model; `FLASHWT_VERIFY=1`
   exists for paranoid runs (and under v2 it hashes every staged file
   before publish). A scrub command is the future answer, not more
   hashing on hot paths.
@@ -217,15 +217,15 @@ Environment knobs: `WT_STORE`, `WT_SNAPSHOTS=1`, `WT_SNAPSHOTS_V2=1`,
 
 ## 6. What to do next, in order
 
-1. **Soak both gates on real agent workloads**: `WT_SNAPSHOTS=1
-   WT_SNAPSHOTS_V2=1`. Watch for hit rates, post-bump behavior on
+1. **Soak both gates on real agent workloads**: `FLASHWT_SNAPSHOTS=1
+   FLASHWT_SNAPSHOTS_V2=1`. Watch for hit rates, post-bump behavior on
    real dependency changes, and any fidelity surprises. Tickets 08
    and 09 hold the numbers behind a default-on decision.
 2. **Run the GC cutover on your real store**, only after you are sure
    no pre-cutover binary will touch it again:
    ```sh
-   wt store migrate --activate-mark-sweep
-   wt store migrate --drop-legacy-refs   # loud warning; irreversible stance
+   flashwt store migrate --activate-mark-sweep
+   flashwt store migrate --drop-legacy-refs   # loud warning; irreversible stance
    ```
    Until then everything works in dual-write mode. With the Step 0
    fixes the references stage is already down to ~0.4-0.5s, so this

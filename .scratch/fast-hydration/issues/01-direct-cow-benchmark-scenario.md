@@ -6,7 +6,7 @@
 
 **Status:** ready-for-human
 
-- [x] Benchmark output includes three scenarios: worktree-plus-install baseline, direct recursive CoW clone, and `wt create` (cold and warm)
+- [x] Benchmark output includes three scenarios: worktree-plus-install baseline, direct recursive CoW clone, and `flashwt create` (cold and warm)
 - [x] The new scenario's hydrated tree passes the same verification as the others (byte-compare with `--verify`, file-count otherwise)
 - [x] `--quick` mode covers all three scenarios so CI exercises each
 - [x] Results report physical disk usage of the destination tree alongside wall time

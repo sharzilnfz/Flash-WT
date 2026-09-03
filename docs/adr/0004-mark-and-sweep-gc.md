@@ -1,7 +1,7 @@
 # Store-local mark-and-sweep garbage collection
 
 We considered keeping refcount-driven collection (ticket 06) as the only
-scheme, but `wt create` pays one temp-write-rename refcount update per
+scheme, but `flashwt create` pays one temp-write-rename refcount update per
 distinct blob — roughly half a second on a 4,000-file fixture — and
 refcounts cannot answer "which worktrees still need this blob?" without
 scanning every repository on the machine. Instead, each successful create
@@ -17,11 +17,11 @@ those mirrors. This implements Phase 1 of AGENT_HANDOFF_PLAN_REVISED.md
   percent-escaped, published by write-temp-then-rename. One atomic write
   per successful create replaces thousands of per-blob ref writes.
 - **Root validation is filesystem-existence based**: recorded worktree path
-  is a directory, gitdir exists, and either the `wt-hydrated.tsv` sidecar
+  is a directory, gitdir exists, and either the `flashwt-hydrated.tsv` sidecar
   survives or the mirror is younger than the grace period. No
   `git worktree list`: git's administrative records outlive `rm -rf` until
   pruned, so they are not a liveness oracle.
-- **Grace period gates everything**: default 15 minutes (`WT_GC_GRACE`),
+- **Grace period gates everything**: default 15 minutes (`FLASHWT_GC_GRACE`),
   overridable per sweep with an explicit `--age`. Blobs, snapshots,
   snapshot temp data, and stale mirrors are all deletable only past the
   grace period. A mirror inside the grace window keeps protecting its
@@ -42,12 +42,12 @@ an explicit cutover:
 
 1. **Now (dual-write)**: creates/removes keep maintaining `refs/` exactly
    as before; mirrors are additive. Legacy-mode sweeps run a mark-vs-refs
-   audit and print disagreements as `wt-gc-audit:` lines — parity evidence,
+   audit and print disagreements as `flashwt-gc-audit:` lines — parity evidence,
    silent when the two schemes agree.
-2. **`wt store migrate --activate-mark-sweep`**: sets `gc-mode=mark-sweep`.
+2. **`flashwt store migrate --activate-mark-sweep`**: sets `gc-mode=mark-sweep`.
    Sweep collects from live-mirror marks plus the grace period; refs/ stay
    maintained but ignored for liveness. Pre-change binaries remain safe.
-3. **`wt store migrate --drop-legacy-refs`**: loud warning, purges every
+3. **`flashwt store migrate --drop-legacy-refs`**: loud warning, purges every
    ref file, sets `gc-mode=mark-sweep-no-refs`; creates stop touching
    refs/ entirely. One-way; pre-cutover binaries must not use the store.
 

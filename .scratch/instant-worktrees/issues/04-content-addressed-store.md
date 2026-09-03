@@ -20,7 +20,7 @@ source-of-truth layer from ADR-0001.
 
 ### What was built
 
-`DiskStore` in `crates/wt-store/src/disk.rs`, replacing `StubStore`
+`DiskStore` in `crates/flashwt-store/src/disk.rs`, replacing `StubStore`
 (the trait itself is untouched). Layout inside the root it owns:
 blobs at `objects/<2 hex>/<62 hex>` named by SHA-256 digest; decimal
 refcount files at `refs/<64 hex>`. Blobs are written to a temp file in
@@ -37,7 +37,7 @@ Contract notes for tickets 05/06:
 - New dependency: `sha2` (hash function stays an implementation detail
   of this crate, as the trait doc requires).
 
-Twelve integration tests in `crates/wt-store/tests/store.rs` cover all
+Twelve integration tests in `crates/flashwt-store/tests/store.rs` cover all
 five acceptance items (corruption simulated by clobbering every file
 under a temp root, so tests need no knowledge of the internal layout).
 Full suite runs in well under a second; workspace tests stay green;

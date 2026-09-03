@@ -1,7 +1,7 @@
 # Spec: architecture hardening and simplification
 
-Branch: `arch/hardening-and-simplify`. Three parallel audits (wt-store, wt-cli,
-wt-copy + workspace hygiene) found no ADR conflicts. Every ticket below
+Branch: `arch/hardening-and-simplify`. Three parallel audits (flashwt-store, flashwt-cli,
+flashwt-copy + workspace hygiene) found no ADR conflicts. Every ticket below
 strengthens existing decisions (mark-and-sweep GC, snapshots-as-cache,
 explicit-first CLI); none reopens them.
 
@@ -32,9 +32,9 @@ explicit-first CLI); none reopens them.
 
 - Wave 1 (done): three audit sub-agents produced the findings.
 - Wave 2 (parallel, isolated worktrees):
-  - Ticket 01 + 02 → branch `arch/store-refactor` (owns `crates/wt-store/**`)
-  - Ticket 03 → branch `arch/cli-refactor` (owns `crates/wt-cli/**`)
-  - Ticket 04 → branch `arch/copy-harden` (owns `crates/wt-copy/**`)
+  - Ticket 01 + 02 → branch `arch/store-refactor` (owns `crates/flashwt-store/**`)
+  - Ticket 03 → branch `arch/cli-refactor` (owns `crates/flashwt-cli/**`)
+  - Ticket 04 → branch `arch/copy-harden` (owns `crates/flashwt-copy/**`)
 - Wave 3 (sequential on integration branch): ticket 05, workspace-wide.
 - Wave 4: full verification (`cargo fmt --check`, `clippy -D warnings` on
   macOS, full test suite), blast-radius review via codebase-memory, index

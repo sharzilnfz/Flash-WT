@@ -5,7 +5,7 @@ Status: ready-for-agent
 ## Context
 
 Candidates C1-C4 landed as an uncommitted worktree diff on top of HEAD `dfc8c72`.
-Lib tests are green: 36 passed in `wt-cli`, 23 passed in `wt-copy`, 83 passed in `wt-store`.
+Lib tests are green: 36 passed in `flashwt-cli`, 23 passed in `flashwt-copy`, 83 passed in `flashwt-store`.
 The end-of-run two-axis code review found zero hard Standards breaches but real Spec partials plus three Standards smells.
 This ticket owns every remaining gap so the deepening can be finished later in small verifiable units.
 
@@ -20,9 +20,9 @@ Spec sources: `/var/folders/y9/hnkm2lv91n5chc4116wp_hf40000gn/T/architecture-rev
 - Route the empty-worktree mirror publish through the same store entry point instead of originating in CLI.
 
 ### C2 remainder: WorkspaceEngine not deepened
-- Replace free helpers `remove_worktree_files` and `cleanup_pending` in `crates/wt-cli/src/gc.rs` with `WorkspaceEngine` methods that own remove, prune, branch delete, size, and fs sweep.
+- Replace free helpers `remove_worktree_files` and `cleanup_pending` in `crates/flashwt-cli/src/gc.rs` with `WorkspaceEngine` methods that own remove, prune, branch delete, size, and fs sweep.
 - Unify the three divergent retirement sequences: `gc::remove`, sweep dead leases, `ScratchGuard::cleanup`.
-- Fix the stale ordering comment in `crates/wt-cli/src/gc.rs:18-25` to match actual parse-first, remove-then-release order.
+- Fix the stale ordering comment in `crates/flashwt-cli/src/gc.rs:18-25` to match actual parse-first, remove-then-release order.
 
 ### C4 remainder: six maps remain
 - Finish the unify: `ingest_tree` returns `Manifest` directly and `Ingested` with six parallel maps goes away.
@@ -41,21 +41,21 @@ Spec sources: `/var/folders/y9/hnkm2lv91n5chc4116wp_hf40000gn/T/architecture-rev
 - Speculative Generality: `into_snapshot_manifest` has no caller. Delete or use.
 
 ## Files Owned
-- `crates/wt-store/src/hydrate.rs`
-- `crates/wt-cli/src/hydrate.rs`
-- `crates/wt-store/src/ingest.rs`
-- `crates/wt-store/src/snapshot/projection.rs`
-- `crates/wt-store/src/snapshot/publish.rs`
-- `crates/wt-store/src/gc.rs`
-- `crates/wt-cli/src/gc.rs`
-- `crates/wt-copy/src/materialize.rs`
-- `crates/wt-store/tests/hydrate.rs`
-- `crates/wt-copy/tests/engine.rs`
+- `crates/flashwt-store/src/hydrate.rs`
+- `crates/flashwt-cli/src/hydrate.rs`
+- `crates/flashwt-store/src/ingest.rs`
+- `crates/flashwt-store/src/snapshot/projection.rs`
+- `crates/flashwt-store/src/snapshot/publish.rs`
+- `crates/flashwt-store/src/gc.rs`
+- `crates/flashwt-cli/src/gc.rs`
+- `crates/flashwt-copy/src/materialize.rs`
+- `crates/flashwt-store/tests/hydrate.rs`
+- `crates/flashwt-copy/tests/engine.rs`
 
 ## Acceptance
 - `cargo test --lib` stays green across all three crates.
 - Targeted suites stay green: store hydrate tests, CLI `create_hydrates`, lockfile tests, snapshot tests, storage tests, gc tests, command tests, presentation tests.
-- `cargo clippy -p wt-copy -p wt-store --all-targets` clean.
+- `cargo clippy -p flashwt-copy -p flashwt-store --all-targets` clean.
 - No JSON envelope change. No `Manifest` wire-format change. Ledger stays 3-column `rel blob id` everywhere with single mirror publish per dir.
 - Each bullet above lands as its own small commit so a single revert undoes one slice.
 

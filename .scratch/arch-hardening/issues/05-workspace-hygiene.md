@@ -27,10 +27,10 @@ blanket-deny restriction lints.
    (measure actual MSRV before pinning). Add `[workspace.dependencies]` for
    libc, tempfile, sha2, clap, thiserror; members inherit with
  `<dep>.workspace = true`.
-3. Drop libc from wt-cli: replace the single
+3. Drop libc from flashwt-cli: replace the single
    `e.raw_os_error() == Some(libc::ENOENT)` with
    `e.kind() == io::ErrorKind::NotFound`; delete the dep. Remove the dead
-   empty `[dev-dependencies]` section in wt-store/Cargo.toml.
+   empty `[dev-dependencies]` section in flashwt-store/Cargo.toml.
 4. CI (.github/workflows/ci.yml):
    - macOS job step running `cargo clippy --all-targets --locked -- -D
      warnings` so cfg(macos) code (clonefile, bulkwalk externs) finally gets

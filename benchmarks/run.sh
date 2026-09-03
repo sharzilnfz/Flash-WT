@@ -1,66 +1,11 @@
 #!/usr/bin/env bash
-# Tickets 08 + 01 + T06: public benchmark suite.
-#
-# One command reproduces the macOS-versus-Linux scenario numbers on
-# whatever machine it runs on: plain `git worktree add` plus a fresh
-# dependency install (simulated by writing the same fixture tree file
-# by file, which is what an install does at the filesystem level),
-# a direct recursive CoW clone of the heavy tree (the strongest
-# simple alternative to any store), and `wt create`, against identical
-# generated fixtures. Prints markdown results tables suitable for
-# pasting into the README and launch post, plus physical disk usage of
-# each hydrated tree, plus per-stage wt create timings when the CLI's
-# WT_TIMING instrumentation is present.
-#
-# Two fixture shapes run by default:
-#
-#   scenarios A-C  published shape: thousands of tiny unique files
-#                  across hundreds of package directories
-#                  (`--files`, default 4000)
-#   scenario D     realistic node_modules-like shape (T06): ~40k files
-#                  across ~800 packages, ~96% duplicate content across
-#                  packages, mixed executable bits, nested and empty
-#                  directories, .bin-style symlinks
-#
-# Usage:
-#   ./benchmarks/run.sh [--files N] [--runs N] [--quick] [--verify]
-#                       [--scenario LIST]
-#
-#   --files N       A-C fixture file count (default 4000)
-#   --runs N        timed runs per scenario (default 3)
-#   --quick         tiny fixtures, single run; smoke mode for CI
-#   --verify        deep-verify every hydrated tree after its run:
-#                   byte-compare regular files, compare symlink targets,
-#                   compare directory/file modes
-#   --scenario LIST comma-separated subset of a,b,c,d (default all;
-#                   e.g. --scenario d runs only the large-fixture suite)
-#
-# Set WT_BIN=/path/to/wt to reuse a prebuilt binary instead of running
-# cargo. Everything runs in a throwaway temp directory; nothing on the
-# machine is touched.
-#
-# STAGE-TIMING CONTRACT: when the CLI is built with WT_TIMING support,
-# `WT_TIMING=1 wt create` prints exactly one line per stage, on stdout
-# or stderr, in this exact format:
-#
-#   wt-stage <name>=<milliseconds>
-#
-# with name ∈ { ingest, references, materialize, total }. This script
-# captures those lines out of each wt create log and reports the
-# per-stage medians alongside the wall-clock table. When the
-# instrumentation is not merged yet (no such lines in any log), every
-# stage column prints "-" instead of failing: the suite measures what
-# the binary can tell it today.
 
 set -euo pipefail
 
 BENCH_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$BENCH_DIR/.." && pwd)"
-# shellcheck disable=SC1091  # sourced at runtime, same directory
 . "$BENCH_DIR/fixture.sh"
-# shellcheck disable=SC1091
 . "$BENCH_DIR/eval_metrics.sh"
-# shellcheck disable=SC1091
 . "$BENCH_DIR/eval_storage.sh"
 
 FILES_DEFAULT=4000
@@ -134,63 +79,28 @@ for s in $scenarios; do
 done
 IFS=$oldIFS
 
-BIN=${WT_BIN:-}
+BIN=${FLASHWT_BIN:-}
 if [ -z "$BIN" ]; then
     echo "building release binary..."
     cargo build --release --quiet \
-        --manifest-path "$REPO_ROOT/Cargo.toml" -p wt-cli
+        --manifest-path "$REPO_ROOT/Cargo.toml" -p flashwt-cli
     if [ -x "$REPO_ROOT/target/release/flashwt" ]; then
         BIN="$REPO_ROOT/target/release/flashwt"
     else
-        BIN="$REPO_ROOT/target/release/wt"
+        BIN="$REPO_ROOT/target/release/flashwt"
     fi
 fi
 [ -x "$BIN" ] || die "binary not runnable at $BIN"
 
-
-# Direct-CoW scenario mechanism (ticket 01). Exactly one command per
-# platform, chosen up front; no fallback chains that could silently
-# turn the scenario into something else.
-#
-#   macOS: `cp -c` clones every file through copyfile(3) with
-#     COPYFILE_CLONE, which lands in fclonefileat(2) — clonefile(2)
-#     semantics per file. Same physics wt's CoW materialization uses.
-#   Linux: GNU cp's `--reflink=auto` issues FICLONE per file on
-#     filesystems with shared-extent support (btrfs, xfs, f2fs...).
-#     On a filesystem without CoW (e.g. ext4 on stock CI runners)
-#     auto degrades to a plain byte copy. That degradation is
-#     deliberate and visible rather than fatal: CI runs this suite on
-#     ext4, and the disk-usage report below shows whether sharing
-#     actually happened (allocated << apparent) or not (allocated ~=
-#     apparent). We never mix in hardlinks.
 case "$(uname -s)" in
     Darwin) COW_CP=(cp -Rc) ;;
     Linux) COW_CP=(cp -Ra --reflink=auto) ;;
     *) die "no direct-CoW clone mechanism known for $(uname -s)" ;;
 esac
 
-# Physical disk usage of a tree (ticket 01). Two raw numbers:
-#
-#   apparent  = sum of logical file bytes (st_size). What the files
-#               claim to weigh.
-#   allocated = sum of st_blocks * 512 over regular files. Blocks the
-#               filesystem reports as backing those files.
-#
-# Known limitation, documented instead of papered over: on APFS a
-# cloned file reports its FULL st_blocks while every block is still
-# shared with its source, and st_blocks never shrinks back after the
-# share ends. So `allocated` here is an upper bound on physical
-# usage, NOT the tree's private footprint beyond shared blocks —
-# naive `du` overcounts for exactly the same reason. Distinguishing
-# shared from private storage needs volume-level free-space deltas,
-# which no per-tree syscall exposes. Both numbers are reported raw;
-# the signal lives in comparing them within and across scenarios.
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/wt-bench.XXXXXX")"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/flashwt-bench.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-# ---------------------------------------------------------------------------
-# Verification: deep-verify regular files, directory/file modes, and symlinks.
-# ---------------------------------------------------------------------------
 verify_tree() { # src dest
     local src=$1 dest=$2
     if [ "$verify" -eq 0 ]; then
@@ -212,13 +122,6 @@ drop_worktree() {
         rm -rf "$1"
 }
 
-# ---------------------------------------------------------------------------
-# Scenario runners. Each sets run_time, run_app, and run_alloc as
-# globals instead of echoing a stats line: a runner invoked through
-# command substitution could not abort the suite on failure (die would
-# kill only the subshell and read would carry on with partial input).
-# ---------------------------------------------------------------------------
-
 baseline_run() { # name
     name=$1
     dest="$WORK/$name"
@@ -232,23 +135,19 @@ baseline_run() { # name
     run_time=$(elapsed "$t0" "$t1")
 }
 
-# Scenario B: wt create, hydration through the store. Each call gets
-# a unique branch name; the store path decides cold versus warm.
-# Runs always carry WT_TIMING=1 so merged instrumentation shows up
-# here without edits (see the stage-timing contract in the header).
-wt_run() { # name store phase
+flashwt_run() { # name store phase
     name=$1
     store=$2
     phase=$3
-    dest="$WORK/wt-$name"
+    dest="$WORK/flashwt-$name"
     t0=$(now)
     (
         cd "$SRC" &&
-            WT_STORE="$store" WT_TIMING=1 "$BIN" create "$name" \
+            FLASHWT_STORE="$store" FLASHWT_TIMING=1 "$BIN" create "$name" \
                 --dir "$dest" >"$WORK/$name.log" 2>&1
     ) || {
         cat "$WORK/$name.log" >&2
-        die "wt create $name failed"
+        die "flashwt create $name failed"
     }
     t1=$(now)
     record_stages "$phase" "$WORK/$name.log"
@@ -258,11 +157,6 @@ wt_run() { # name store phase
     run_time=$(elapsed "$t0" "$t1")
 }
 
-# Scenario C (ticket 01): direct recursive CoW clone of the heavy
-# tree, straight from source into the destination — the simplest
-# alternative any store-based hydration has to beat. Timed, verified,
-# and torn down exactly like the other scenarios. The destination is
-# a plain directory, not a git worktree, so it goes away with rm -rf.
 cow_run() { # name
     name=$1
     dest="$WORK/cow-$name"
@@ -277,11 +171,6 @@ cow_run() { # name
     run_time=$(elapsed "$t0" "$t1")
 }
 
-# ---------------------------------------------------------------------------
-# Stage-timing capture. Implements the parsing side of the contract
-# documented in the header: scan a wt create log using parse_stage_log
-# and bucket the milliseconds by phase (cold/warm).
-# ---------------------------------------------------------------------------
 stage_cold_ingest=""
 stage_cold_references=""
 stage_cold_materialize=""
@@ -318,11 +207,6 @@ stage_row() { # phase label -> one markdown stage-median row
             ;;
     esac
 }
-
-# ---------------------------------------------------------------------------
-# One fixture suite: set up an origin repo + heavy tree, run every
-# selected scenario against it, print its results section.
-# ---------------------------------------------------------------------------
 
 platform="$(uname -s) $(uname -r) $(uname -m)"
 
@@ -361,7 +245,7 @@ run_suite() { # label generator_function file_count
         printf 'export const m%d = %d;\n' "$i" "$i" >"$SRC/src/mod-$i.js"
         i=$((i + 1))
     done
-    printf 'node_modules/\n' >"$SRC/.wtinclude"
+    printf 'node_modules/\n' >"$SRC/.flashwtinclude"
     git -C "$SRC" add .
     git -C "$SRC" commit -qm init
 
@@ -370,7 +254,7 @@ run_suite() { # label generator_function file_count
     [ "$count" -eq "$suite_files" ] ||
         die "fixture generator produced $count files, expected $suite_files"
 
-    echo "== suite '$suite_label': benchmarking baseline x$runs, direct cow x$runs, wt cold x$runs, wt warm x$runs..."
+    echo "== suite '$suite_label': benchmarking baseline x$runs, direct cow x$runs, flashwt cold x$runs, flashwt warm x$runs..."
 
     base_times=""
     base_app=0
@@ -399,34 +283,31 @@ run_suite() { # label generator_function file_count
     done
 
     cold_times=""
-    wt_app=0
-    wt_alloc=0
+    flashwt_app=0
+    flashwt_alloc=0
     ri=1
     while [ "$ri" -le "$runs" ]; do
-        wt_run "cold-$ri" "$WORK/store-cold-$ri" cold
+        flashwt_run "cold-$ri" "$WORK/store-cold-$ri" cold
         cold_times="$cold_times $run_time"
-        wt_app=$run_app
-        wt_alloc=$run_allocated
-        echo "  wt cold run $ri: ${run_time}s"
+        flashwt_app=$run_app
+        flashwt_alloc=$run_allocated
+        echo "  flashwt cold run $ri: ${run_time}s"
         ri=$((ri + 1))
     done
 
     warm_store="$WORK/store-warm-$suite_label"
-    wt_run "warm-store-0" "$warm_store" warm # populate, untimed
+    flashwt_run "warm-store-0" "$warm_store" warm # populate, untimed
     warm_times=""
     ri=1
     while [ "$ri" -le "$runs" ]; do
-        wt_run "warm-$ri" "$warm_store" warm
+        flashwt_run "warm-$ri" "$warm_store" warm
         warm_times="$warm_times $run_time"
-        wt_app=$run_app
-        wt_alloc=$run_allocated
-        echo "  wt warm run $ri: ${run_time}s"
+        flashwt_app=$run_app
+        flashwt_alloc=$run_allocated
+        echo "  flashwt warm run $ri: ${run_time}s"
         ri=$((ri + 1))
     done
 
-    # Cold baseline = first run (nothing cached); warm = median of the
-    # rest. Same split for every scenario.
-    # shellcheck disable=SC2086  # deliberate word split over the times
     set -- $base_times
     base_cold=$1
     shift
@@ -435,7 +316,6 @@ run_suite() { # label generator_function file_count
         base_warm=$(median "$@")
     fi
 
-    # shellcheck disable=SC2086  # deliberate word split over the times
     set -- $cow_times
     cow_cold=$1
     shift
@@ -444,12 +324,12 @@ run_suite() { # label generator_function file_count
         cow_warm=$(median "$@")
     fi
 
-    wt_cold=$(median_or_dash "$cold_times")
-    wt_warm=$(median_or_dash "$warm_times")
+    flashwt_cold=$(median_or_dash "$cold_times")
+    flashwt_warm=$(median_or_dash "$warm_times")
 
     speedup="-"
-    if [ "$base_warm" != "-" ] && awk -v w="$wt_warm" 'BEGIN { exit !(w > 0) }'; then
-        speedup=$(awk -v b="$base_warm" -v w="$wt_warm" 'BEGIN { printf "%.1f", b / w }')
+    if [ "$base_warm" != "-" ] && awk -v w="$flashwt_warm" 'BEGIN { exit !(w > 0) }'; then
+        speedup=$(awk -v b="$base_warm" -v w="$flashwt_warm" 'BEGIN { printf "%.1f", b / w }')
     fi
 
     echo
@@ -465,27 +345,20 @@ run_suite() { # label generator_function file_count
         echo "- Every run file-count verified against the source fixture"
     fi
     echo
-    # Apparent = sum of st_size over regular files. Allocated = sum of
-    # st_blocks * 512. On APFS a cloned file reports full blocks while
-    # still sharing them with their source, so allocated is an UPPER
-    # BOUND on physical usage, not the private footprint; naive du has
-    # the same bias (see disk_usage above). The signal is in comparing
-    # allocated against apparent within a row, and rows against each
-    # other.
     echo "| Scenario | Cold (s) | Warm (s) | Apparent (bytes) | Allocated (bytes) |"
     echo "|---|---|---|---|---|"
     echo "| git worktree add + fresh dependency install | $base_cold | $base_warm | $base_app | $base_alloc |"
     echo "| direct recursive CoW clone (${COW_CP[*]}) | $cow_cold | $cow_warm | $cow_app | $cow_alloc |"
-    echo "| wt create (store hydration) | $wt_cold | $wt_warm | $wt_app | $wt_alloc |"
+    echo "| flashwt create (store hydration) | $flashwt_cold | $flashwt_warm | $flashwt_app | $flashwt_alloc |"
     echo
     echo "Apparent size sums logical file bytes; allocated sums st_blocks x 512."
     echo "Cloned files report full blocks while still sharing them with their"
     echo "source, so allocated is an upper bound on physical usage — it does not"
     echo "isolate private (unshared) storage."
     echo
-    echo "### wt create stage timings (ms, median of timed runs)"
+    echo "### flashwt create stage timings (ms, median of timed runs)"
     echo
-    echo "Contract: \`WT_TIMING=1 wt create\` emits \`wt-stage <name>=<milliseconds>\`"
+    echo "Contract: \`FLASHWT_TIMING=1 flashwt create\` emits \`flashwt-stage <name>=<milliseconds>\`"
     echo "per stage; \"-\" means the binary printed no such lines."
     echo
     echo "| Fixture | Phase | Ingest (ms) | References (ms) | Materialize (ms) | Total (ms) |"
@@ -500,13 +373,13 @@ run_suite() { # label generator_function file_count
     echo "Raw times (s):"
     echo "- baseline:$base_times"
     echo "- direct cow:$cow_times"
-    echo "- wt cold:$cold_times"
-    echo "- wt warm:$warm_times"
+    echo "- flashwt cold:$cold_times"
+    echo "- flashwt warm:$warm_times"
 
     rm -rf "$SRC"
 }
 
-echo "Benchmarking wt on platform: $platform"
+echo "Benchmarking flashwt on platform: $platform"
 echo "Scenarios selected: $scenarios"
 
 if [ "$do_small" -eq 1 ]; then
@@ -515,3 +388,4 @@ fi
 if [ "$do_large" -eq 1 ]; then
     run_suite "large" generate_tree_d "$d_files"
 fi
+

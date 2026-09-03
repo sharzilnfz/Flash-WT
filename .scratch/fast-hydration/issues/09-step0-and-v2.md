@@ -4,7 +4,7 @@
 
 ## Step 0: resolve H1 vs H2 (done)
 
-Fine-grained `WT_TIMING` stages landed (`5d34edc`): `git-worktree`,
+Fine-grained `FLASHWT_TIMING` stages landed (`5d34edc`): `git-worktree`,
 `ingest`, `references`, `verify`/`place`, `snapshot-lookup`,
 `snapshot-clonefile`, `snapshot-build-{verify,link-train,publish}`,
 plus `snapshot-mode=hit|build|v2` and v2 counters later.
@@ -23,13 +23,13 @@ sidecar writers.
 
 Warm snapshot hit at 40k files: **6.5s -> ~1.4s** (clean machine).
 
-## v2 incremental rebuilds (`9f1f0e6`, gate WT_SNAPSHOTS_V2=1)
+## v2 incremental rebuilds (`9f1f0e6`, gate FLASHWT_SNAPSHOTS_V2=1)
 
 Selection index (`snapshots/index.tsv`, ring of K=3 hashes),
 tamper-evident manifest loader, sorted-merge diff with maximal
 unchanged-subtree units, incremental publish with per-unit clonefile
 and per-unit link fallback. Any failure falls back to the full v1
-build; `WT_VERIFY=1` hashes cloned units before rename.
+build; `FLASHWT_VERIFY=1` hashes cloned units before rename.
 
 Measured (loaded machine; ratios trustworthy):
 
@@ -45,7 +45,7 @@ call overhead ~= 5.7s of snapshot stage even when ~20 files changed.
 Replaced with ONE clonefile of the old tree into staging plus an
 in-place delta inside the private CoW copy (deepest-first deletions,
 verify-then-link for added/modified blobs, chmod for mode flips,
-structural+hash pass under WT_VERIFY=1). Snapshot stage collapsed from
+structural+hash pass under FLASHWT_VERIFY=1). Snapshot stage collapsed from
 6.9s to well under 1s; post-bump totals landed at 5.3s loaded (~2.5s
 clean-machine estimate).
 

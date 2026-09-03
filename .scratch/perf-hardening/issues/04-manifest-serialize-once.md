@@ -12,7 +12,7 @@ roughly a quarter-million short-lived allocations per pass at 40k entries.
 1. Serialize once into a pre-reserved Vec<u8> during Manifest::new; store the
    bytes (private field) and reuse them for the durable_write of
    manifest.tsv in snapshot/publish.rs. Hash the same bytes.
-2. Same treatment for StoreMirror::serialize (crates/wt-store/src/mirror.rs)
+2. Same treatment for StoreMirror::serialize (crates/flashwt-store/src/mirror.rs)
    where cheap: pre-reserve, avoid per-id to_string() chains. Do not change
    output formats — tests pin them.
 3. Watch out for borrows: if self-referential storage of bytes fights the

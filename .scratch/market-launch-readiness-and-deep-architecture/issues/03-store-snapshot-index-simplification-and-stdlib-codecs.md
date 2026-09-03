@@ -19,14 +19,14 @@ Snapshot metadata persistence in `SelectionIndex` relies on multi-file WAL journ
 
 ## Files Owned
 
-- `crates/wt-store/src/snapindex.rs`
-- `crates/wt-store/src/validation.rs`
-- `crates/wt-store/src/verified.rs`
-- `crates/wt-store/src/bulkwalk.rs`
-- `crates/wt-store/src/content_id.rs`
-- `crates/wt-store/src/fsutil.rs`
-- `crates/wt-store/src/scrub.rs`
-- `crates/wt-store/src/snapshot/tree.rs`
+- `crates/flashwt-store/src/snapindex.rs`
+- `crates/flashwt-store/src/validation.rs`
+- `crates/flashwt-store/src/verified.rs`
+- `crates/flashwt-store/src/bulkwalk.rs`
+- `crates/flashwt-store/src/content_id.rs`
+- `crates/flashwt-store/src/fsutil.rs`
+- `crates/flashwt-store/src/scrub.rs`
+- `crates/flashwt-store/src/snapshot/tree.rs`
 
 ## Done When
 

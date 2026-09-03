@@ -3,7 +3,7 @@ Status: ready-for-agent
 # Issue 01: CLI Clean Data Loss Prevention and Force Semantics
 
 ## Problem
-`wt clean <name>` and `wt clean --all` currently use forced removal semantics (`git worktree remove --force` and `git branch -D`) without checking for uncommitted files or unmerged branches. Removal errors are swallowed, and false success receipts are emitted to stdout/JSON. Additionally, store GC mirrors are deleted before verifying filesystem removal.
+`flashwt clean <name>` and `flashwt clean --all` currently use forced removal semantics (`git worktree remove --force` and `git branch -D`) without checking for uncommitted files or unmerged branches. Removal errors are swallowed, and false success receipts are emitted to stdout/JSON. Additionally, store GC mirrors are deleted before verifying filesystem removal.
 
 ## Requirements
 1. Inspect worktree dirty state using porcelain Git status before removal.

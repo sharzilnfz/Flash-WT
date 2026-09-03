@@ -26,15 +26,15 @@ Implemented on branch `fleet/09-distribution`:
   packages tarballs plus sha256 sidecars; macOS binaries are codesigned
   with Developer ID when `MACOS_CERTIFICATE`/`MACOS_IDENTITY` secrets are
   configured, ad-hoc otherwise; publishes the release with a checksummed,
-  ready-to-use brew formula (`wt.rb`).
+  ready-to-use brew formula (`flashwt.rb`).
 - `.github/workflows/ci.yml` — cargo test plus the installer smoke script
   on macOS and Linux runners on every push, so the install paths are
   exercised before any tag exists.
 - `install.sh` — curl installer: platform detection, checksum
   verification before extraction, install to `~/.local/bin`
-  (`WT_BIN_DIR` to override), runs `wt --version` to prove the binary
+  (`FLASHWT_BIN_DIR` to override), runs `flashwt --version` to prove the binary
   works, PATH hint if needed.
-- `Formula/wt.rb` + `scripts/gen-formula.sh` — formula template with
+- `Formula/flashwt.rb` + `scripts/gen-formula.sh` — formula template with
   per-target checksum placeholders; generation fills version, download
   base, and checksums from release artifacts.
 - `scripts/smoke-install.sh` — exercises both paths without a release:
@@ -52,7 +52,7 @@ Left for a human (needs things only a real tag/fresh machine provides):
 
 1. The unchecked acceptance item: fresh-machine verification of both
    install paths against a published release.
-2. `WT_REPO` defaults to `sharzilnafis/wt` (no git remote exists yet).
+2. `FLASHFLASHWT_REPO` defaults to `sharzilnfz/Flash-WT` (no git remote exists yet).
    When the repo lands on GitHub, update the default in `install.sh`,
    the `env:` block in `release.yml`, and the README URLs if it differs.
 3. Signing falls back to ad-hoc until `MACOS_CERTIFICATE`,

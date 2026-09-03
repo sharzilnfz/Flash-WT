@@ -17,5 +17,5 @@ One design seam needs real work: the copy-backend trait is directory-shaped (clo
 - [x] Corrupt store content still fails loudly before landing in a fresh tree
 - [x] Filesystems refusing CoW fall back to byte copies without user-visible failure
 - [x] Opt-in flag restores hardlink behavior; default path no longer links shared inodes
-- [x] GC reference counting works unchanged: removal after `wt remove` releases what hydration claimed
+- [x] GC reference counting works unchanged: removal after `flashwt remove` releases what hydration claimed
 - [x] e2e tests assert writability, privacy-after-write, dedup, corruption, and GC through the existing CLI seam

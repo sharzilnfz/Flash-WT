@@ -1,8 +1,8 @@
-# 04: wt-copy hardening — source policy, atomic copies, sys consolidation
+# 04: flashwt-copy hardening — source policy, atomic copies, sys consolidation
 
 Status: ready-for-agent
 Owner branch: `arch/copy-harden`
-Owns: `crates/wt-copy/**`.
+Owns: `crates/flashwt-copy/**`.
 
 ## Problem
 
@@ -19,7 +19,7 @@ boilerplate across backends.
 1. Source-side safety seam: widen select_backend to take a source-immutability
    hint (e.g. `SourcePolicy { Immutable, Any }`) or src+dest signatures. When
    the caller cannot promise immutability, hardlink falls through to deep
-   copy. Update the two call sites + wt-cli usage. Document in lib.rs that
+   copy. Update the two call sites + flashwt-cli usage. Document in lib.rs that
    hydration from the Store is Immutable; from live checkouts is Any.
 2. Atomic copy contract: each backend materializes into
    `<dest>.<pid>.tmp` created exclusively, then renames onto dest; on error
@@ -52,8 +52,8 @@ boilerplate across backends.
 
 ## Done when
 
-- `cargo test -p wt-copy` passes including new cases.
-- `cargo clippy -p wt-copy --all-targets` clean.
+- `cargo test -p flashwt-copy` passes including new cases.
+- `cargo clippy -p flashwt-copy --all-targets` clean.
 - No code path can point hardlink at a source the caller didn't declare
   immutable.
 

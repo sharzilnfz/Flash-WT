@@ -4,9 +4,9 @@ Status: ready-for-agent
 
 ## Problem Statement
 
-`wt create` is slower than the thing it replaces. The public benchmark shows
+`flashwt create` is slower than the thing it replaces. The public benchmark shows
 3.79s cold and 3.26s warm against a 1.69s baseline of plain `git worktree add`
-plus a fresh install. A developer or agent reaching for `wt` today pays a tax
+plus a fresh install. A developer or agent reaching for `flashwt` today pays a tax
 on every worktree, on the promise of speed that the tool does not yet deliver.
 
 Two causes, both measured:
@@ -20,7 +20,7 @@ Two causes, both measured:
    checkouts.
 
 Separately, the benchmark suite cannot answer the main architectural
-question. It compares `wt` against worktree-plus-install, but never against
+question. It compares `flashwt` against worktree-plus-install, but never against
 the simplest alternative: a direct recursive APFS clone from an existing
 tree. Until that number exists, nobody can say whether the content-addressed
 store earns its place in the hot path.
@@ -44,10 +44,10 @@ make hydrated trees behave like normal writable checkouts.
 ## User Stories
 
 1. As an agent creating many worktrees across a fleet, I want warm
-   `wt create` to complete well under a second, so that spinning up ten
+   `flashwt create` to complete well under a second, so that spinning up ten
    parallel agents does not serialize on filesystem work.
 2. As a developer whose teammate just ran `npm install`, I want my next
-   `wt create` to skip re-hashing unchanged files, so that hydration cost
+   `flashwt create` to skip re-hashing unchanged files, so that hydration cost
    scales with what changed rather than with tree size.
 3. As a developer running `cargo clean` in my main checkout, I want the
    next worktree to hydrate anyway, because the store still holds the
@@ -68,7 +68,7 @@ make hydrated trees behave like normal writable checkouts.
    output like every other scenario, so that a fast-but-wrong result can
     never ship.
 9. As a user on a non-APFS filesystem, I want materialization to fall back
-   gracefully (reflink where verified, then byte copies), so that `wt`
+   gracefully (reflink where verified, then byte copies), so that `flashwt`
    works everywhere even if CoW is unavailable.
 10. As a cautious user, I want an escape hatch that forces byte-copy
     materialization, so that exotic filesystem behavior can always be
@@ -138,7 +138,7 @@ Tests assert external behavior only: bytes in trees, permissions on files,
 counts in reports, timings in the benchmark table. Nothing inspects internal
 cache structures or backend dispatch.
 
-- Existing wt-cli e2e seams (`WT_STORE` isolation, temp fixtures) cover:
+- Existing flashwt-cli e2e seams (`FLASHWT_STORE` isolation, temp fixtures) cover:
   hydration after source edits reflects the edits; hydration after touching
   a file without editing it still produces correct bytes; hydrated files
   are writable and st_nlink-independent under the default path; a second
@@ -151,7 +151,7 @@ cache structures or backend dispatch.
 - The benchmark suite is its own seam: the new scenario must pass the same
   `--verify` byte comparison as the others, and `--quick` mode must include
   it so CI exercises all three.
-- Prior art: `crates/wt-cli/tests/store_flow.rs` for dedup and corruption
+- Prior art: `crates/flashwt-cli/tests/store_flow.rs` for dedup and corruption
   assertions, `cli.rs` for output contracts, and the hardlink torture tests
   for permission-behavior patterns.
 
