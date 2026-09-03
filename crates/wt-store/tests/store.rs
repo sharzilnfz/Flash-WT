@@ -1220,3 +1220,117 @@ fn parallel_cold_ingest_produces_identical_blob_ids_and_manifest_bytes() {
     assert_eq!(manifest1.entries.len(), manifest2.entries.len());
     assert_eq!(manifest1.total_size, manifest2.total_size);
 }
+
+#[test]
+fn put_batch_stores_and_deduplicates_blobs() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open store");
+
+    let items: Vec<&[u8]> = vec![
+        b"alpha payload",
+        b"beta payload",
+        b"alpha payload",
+        b"gamma payload",
+    ];
+
+    let ids = store.put_batch(&items).expect("put_batch");
+    assert_eq!(ids.len(), 4);
+    assert_eq!(ids[0], ids[2]);
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(ids[1], ids[3]);
+
+    assert_eq!(store.get(&ids[0]).expect("get alpha"), b"alpha payload");
+    assert_eq!(store.get(&ids[1]).expect("get beta"), b"beta payload");
+    assert_eq!(store.get(&ids[3]).expect("get gamma"), b"gamma payload");
+
+    let empty = store.put_batch(&[]).expect("put_batch empty");
+    assert!(empty.is_empty());
+
+    let delta = store
+        .put_batch(&[b"alpha payload", b"delta payload"])
+        .expect("put_batch delta");
+    assert_eq!(delta[0], ids[0]);
+    assert_eq!(store.get(&delta[1]).expect("get delta"), b"delta payload");
+}
+
+#[test]
+fn put_files_batch_streams_and_deduplicates() {
+    let store_dir = temp_root();
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+    let src = TempDir::new().expect("tempdir");
+
+    let path_a = src.path().join("file_a.bin");
+    let path_b = src.path().join("file_b.bin");
+    let path_c = src.path().join("file_c.bin");
+
+    let data_a = b"content for file A".to_vec();
+    let data_b = b"content for file B which is different".to_vec();
+    let data_c = data_a.clone();
+
+    fs::write(&path_a, &data_a).expect("write a");
+    fs::write(&path_b, &data_b).expect("write b");
+    fs::write(&path_c, &data_c).expect("write c");
+
+    let id_a = ContentId::for_bytes(&data_a);
+    let id_b = ContentId::for_bytes(&data_b);
+    let id_c = ContentId::for_bytes(&data_c);
+
+    let batch = vec![
+        (path_a.as_path(), id_a),
+        (path_b.as_path(), id_b),
+        (path_c.as_path(), id_c),
+    ];
+
+    let ids = store.put_files_batch(&batch).expect("put_files_batch");
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids[0], id_a);
+    assert_eq!(ids[1], id_b);
+    assert_eq!(ids[2], id_a);
+
+    assert_eq!(store.get(&id_a).expect("get a"), data_a);
+    assert_eq!(store.get(&id_b).expect("get b"), data_b);
+}
+
+#[test]
+fn batch_durability_hardware_sync_enabled() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open store");
+
+    unsafe {
+        std::env::set_var("WT_TEST_FORCE_SYNC", "1");
+    }
+    let res = store.put_batch(&[b"durability item 1", b"durability item 2"]);
+    unsafe {
+        std::env::remove_var("WT_TEST_FORCE_SYNC");
+    }
+
+    let ids = res.expect("put_batch with sync");
+    assert_eq!(ids.len(), 2);
+    assert_eq!(store.get(&ids[0]).expect("get 1"), b"durability item 1");
+    assert_eq!(store.get(&ids[1]).expect("get 2"), b"durability item 2");
+}
+
+#[test]
+fn interrupted_write_debris_leaves_no_partial_truth() {
+    let dir = temp_root();
+    let mut store = DiskStore::open(dir.path()).expect("open store");
+
+    let content = b"resilient payload";
+    let id = ContentId::for_bytes(content);
+    let hex = id.to_string();
+    let shard_dir = dir.path().join("objects").join(&hex[..2]);
+    fs::create_dir_all(&shard_dir).expect("create shard dir");
+
+    let debris_path = shard_dir.join(".tmp_interrupted_write");
+    fs::write(&debris_path, b"incomplete bytes").expect("write debris");
+
+    assert!(!store.contains(&id));
+    assert!(matches!(store.get(&id), Err(Error::UnknownContent(_))));
+    let stored_ids = store.ids().expect("ids");
+    assert!(!stored_ids.contains(&id));
+
+    let final_id = store.put(content).expect("put");
+    assert_eq!(final_id, id);
+    assert!(store.contains(&id));
+    assert_eq!(store.get(&id).expect("get"), content);
+}
