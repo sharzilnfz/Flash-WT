@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, HydrateData};
 use crate::error::{Error, Result};
-use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
+use crate::hydrate::{HydrationEngine, HydrationRequest};
 use crate::hydration_filter::{self, LoadedPatterns, load_patterns};
 use crate::output::{HumanBytes, HumanCount};
 use crate::workspace::{self, WorkspaceEngine};
@@ -73,8 +73,7 @@ pub fn run(
         LoadedPatterns::Loaded { patterns, .. } => patterns,
     };
 
-    let mut store = open_store()?;
-    let mut engine = HydrationEngine::new(&mut store);
+    let mut engine = HydrationEngine::auto();
     let req = HydrationRequest {
         root: &source_root,
         dest: &dest,
