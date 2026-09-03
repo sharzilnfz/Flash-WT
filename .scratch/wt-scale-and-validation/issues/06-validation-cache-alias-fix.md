@@ -22,3 +22,4 @@ Mix inode plus ctime into the cache key. Rehash on hit when mtime is near now. C
 ## Comments
 
 - The verified ledger needs no change. Store blobs are immutable and scrub covers bit rot.
+- Sibling of the ticket 05 dir mode strictness item in `.scratch/deep-hydration-architecture`. That one covers missing modes. This one covers stale hits. Land both; neither duplicates the other.

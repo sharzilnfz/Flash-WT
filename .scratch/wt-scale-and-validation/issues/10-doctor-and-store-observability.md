@@ -22,3 +22,4 @@ Add doctor showing resolved config plus probe results. Add store du. Add sweep d
 ## Comments
 
 - Boundary discipline: validate once at startup, make the result inspectable.
+- Builds on the ticket 05 two phase sweep protocol doc in `.scratch/deep-hydration-architecture`. Doctor surfaces the policy. That doc defines the mechanism. The dry run output must match the documented phase order.

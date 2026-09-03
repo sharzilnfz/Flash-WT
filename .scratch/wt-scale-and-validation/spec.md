@@ -8,6 +8,14 @@
 
 Keep the Store as truth and the Tree as projection. Remove the fixed floor on the warm path. Fix the two correctness gaps first. Add the observability and contract work that lets agents drive `wt` without parsing human text. Prove each win with the existing verify rig before the next change.
 
+## Foundation
+
+This spec builds on committed base `258d5fa` plus ticket 05 in `.scratch/deep-hydration-architecture`, which owns the entire C1-C4 remainder. That ticket is the prerequisite layer. Nothing here duplicates it.
+
+Ticket 05 owns: moving ingest behind the Store entry point, deepening WorkspaceEngine and unifying retirement sequences, returning Manifest directly from ingest with removal of the travelling params helper, restoring parallel verify, strict dir mode handling, surfacing cleanup errors, and documenting the two phase sweep protocol. This wave starts only after that layer lands, one small commit per slice per that ticket's acceptance.
+
+This spec owns what ticket 05 does not: the warm path floor (parallel ingest hash, batch durability, tiny bypass, incremental guard, git coalescing), the validation key alias plus mirror cutover correctness items, and all human plus agent facing surface (onboarding, Linux honesty, doctor, store size signals, frozen JSON, receipts, docs promise).
+
 ## User Stories
 
 1. As a macOS developer, I want a feature worktree with hydrated dependencies in near clone time, so that I start work without reinstalling.
@@ -26,7 +34,7 @@ Keep the Store as truth and the Tree as projection. Remove the fixed floor on th
 
 ## Implementation Decisions
 
-- Seam choice: reuse the existing HydrationEngine seam for create plus hydrate plus scratch. Reuse the Store seam for ingest plus snapshot publish plus projection. Reuse the Materializer seam for per file placement. Reuse the WorkspaceEngine seam for git calls. No new top level seams.
+- Seam choice: reuse the committed seams. Hydrate through `HydrateReq` plus `HydrateOutcome` with ledger and mirror writes inside the Store. Reclaim through `PendingCleanup` with the CLI owning git and filesystem work. Place files through the batch Materializer. No new top level seams.
 - Ingest becomes parallel with streaming hash. Cache lookup stays serial. Durability batches so many blobs share one directory sync.
 - Tiny bypass is a policy above the Store seam, keyed on file count plus byte total. It never writes to the Store.
 - Incremental rebuild gets a diff size guard. Past threshold it takes the full clone path. The threshold ships as a constant with a timing test.

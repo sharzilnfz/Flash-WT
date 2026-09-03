@@ -23,3 +23,4 @@ Add a diff size guard in the projection path. Past 10 percent changed entries, o
 ## Comments
 
 - Context: snapshot projection plus snapdiff selection.
+- Builds on ticket 05 in `.scratch/deep-hydration-architecture`, which returns Manifest directly from ingest and removes the travelling params helper. Write the guard against that shape, not the current bridge.

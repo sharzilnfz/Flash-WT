@@ -24,3 +24,4 @@ Hash in streaming chunks on a small thread pool. Keep cache lookup serial. Keep 
 ## Comments
 
 - Context: crates/wt-store ingest plus disk put path.
+- Builds on ticket 05 in `.scratch/deep-hydration-architecture`, which restores parallel verify inside the batch. This ticket is the sibling pass over ingest hashing. Land that first, then this, so measurements isolate.
