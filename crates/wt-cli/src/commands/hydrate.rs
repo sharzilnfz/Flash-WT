@@ -103,8 +103,28 @@ pub fn run(
                 report.hydration_method,
                 total_ms
             );
+            if report.total_copied > 0 || report.hydration_method == "byte_copy" {
+                if let Some(refusal) = &report.refusal_reason {
+                    println!("  Copy mechanism: byte-copy (acceleration refused: {refusal})");
+                }
+            }
         }
     }
+
+    let (copy_mechanism, copy_fallback_reason) =
+        if report.total_copied > 0 || report.hydration_method == "byte_copy" {
+            (
+                Some(
+                    report
+                        .copy_backend
+                        .clone()
+                        .unwrap_or_else(|| "byte-copy".to_string()),
+                ),
+                report.refusal_reason.clone(),
+            )
+        } else {
+            (None, None)
+        };
 
     let data = HydrateData {
         destination_path: dest.display().to_string(),
@@ -120,6 +140,8 @@ pub fn run(
             .into_iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
+        copy_mechanism,
+        copy_fallback_reason,
     };
 
     Ok((data, report.diagnostics))

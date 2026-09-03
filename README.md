@@ -23,7 +23,7 @@ Standard `git worktree add` checks out tracked source files instantly, but leave
 
 ## Why wt
 
-`wt` stores each unique file once in a central content-addressed store. When you create a worktree, `wt` materializes heavy directories using APFS copy-on-write clones on macOS or hardlinks on Linux.
+`wt` stores each unique file once in a central content-addressed store. When you create a worktree, `wt` materializes heavy directories using APFS copy-on-write clones on macOS, reflink or `copy_file_range` on Linux, or optional hardlinks.
 
 Files in your worktree share storage blocks with the store until modified. They are private, fully writable, normal files. Editors, compilers, and language servers treat them like regular files on disk.
 
@@ -194,6 +194,22 @@ To opt out and force per-file hydration:
 export WT_SNAPSHOTS=0
 export WT_SNAPSHOTS_V2=0
 ```
+
+### Platform acceleration: macOS versus Linux
+
+`wt` automatically probes host filesystem capabilities at startup to select the fastest supported copy acceleration backend.
+
+| Capability | macOS (APFS) | Linux (Btrfs / XFS) | Linux (ext4) | Linux (generic / cross-device) |
+|---|---|---|---|---|
+| Primary backend | `clonefile(2)` | `ioctl(FICLONE)` reflink | `copy_file_range(2)` | Buffered byte copy |
+| Directory snapshots | Whole-tree APFS clone (~1.3s warm) | Per-file placement ladder | Per-file placement ladder | Per-file placement ladder |
+| Incremental rebuilds | Tree clone + selective relink | Per-file delta placement | Per-file delta placement | Per-file delta placement |
+| Storage deduplication | Zero-copy CoW extents | Zero-copy CoW extents | Physical disk consumption | Physical disk consumption |
+| Hardlink mode (`WT_HARDLINK=1`) | Read-only shared inodes | Read-only shared inodes | Read-only shared inodes | Refused across mounts |
+| Fallback diagnostics | Surfaces reason on non-APFS | Reports backend and refusal reason | Reports backend and refusal reason | Reports backend and refusal reason |
+
+When acceleration is unavailable or refused (such as across different mount points or on filesystems lacking reflink support), `wt` falls back safely to byte copies. Both human terminal output and JSON envelopes report the chosen copy mechanism along with the specific refusal reason.
+
 
 ## How it works
 

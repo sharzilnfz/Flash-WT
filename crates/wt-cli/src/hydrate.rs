@@ -70,6 +70,8 @@ pub struct HydrationReport {
     pub bytes_copied: u64,
     pub strategy: String,
     pub hydration_method: String,
+    pub copy_backend: Option<String>,
+    pub refusal_reason: Option<String>,
     pub cache_hit: bool,
     pub snapshot_hashes: Vec<ContentId>,
     pub dirs_hydrated: Vec<PathBuf>,
@@ -128,6 +130,8 @@ impl<'a> HydrationEngine<'a> {
                 bytes_copied: 0,
                 strategy: "none".to_string(),
                 hydration_method: "none".to_string(),
+                copy_backend: None,
+                refusal_reason: None,
                 cache_hit: false,
                 snapshot_hashes: Vec::new(),
                 dirs_hydrated: Vec::new(),
@@ -141,6 +145,8 @@ impl<'a> HydrationEngine<'a> {
         let mut bytes_shared_cow = 0u64;
         let mut bytes_copied = 0u64;
         let mut last_strategy = "byte-copy".to_string();
+        let mut last_copy_backend: Option<String> = None;
+        let mut last_refusal_reason: Option<String> = None;
         let mut snapshot_hits_count = 0usize;
         let mut dirs_hydrated = Vec::new();
         let mut report_diagnostics = Vec::new();
@@ -261,26 +267,25 @@ impl<'a> HydrationEngine<'a> {
             };
 
             let stage = Instant::now();
-            let receipt = match self
-                .store
-                .hydrate(store_req)
-                .map_err(|e| Error::Store(format!("hydration of {} failed: {e}", rel.display())))?
-            {
-                wt_store::HydrateOutcome::Hydrated(r) => r,
-                wt_store::HydrateOutcome::NeedIngest { diagnostic } => {
-                    return Err(Error::Store(format!(
-                        "hydration of {} unexpectedly deferred{}",
-                        rel.display(),
-                        diagnostic.map(|d| format!(" ({d})")).unwrap_or_default(),
-                    )));
-                }
-                wt_store::HydrateOutcome::Failed(msg) => {
-                    return Err(Error::Store(format!(
-                        "hydration of {} failed: {msg}",
-                        rel.display()
-                    )));
-                }
-            };
+            let receipt =
+                match self.store.hydrate(store_req).map_err(|e| {
+                    Error::Store(format!("hydration of {} failed: {e}", rel.display()))
+                })? {
+                    wt_store::HydrateOutcome::Hydrated(r) => r,
+                    wt_store::HydrateOutcome::NeedIngest { diagnostic } => {
+                        return Err(Error::Store(format!(
+                            "hydration of {} unexpectedly deferred{}",
+                            rel.display(),
+                            diagnostic.map(|d| format!(" ({d})")).unwrap_or_default(),
+                        )));
+                    }
+                    wt_store::HydrateOutcome::Failed(msg) => {
+                        return Err(Error::Store(format!(
+                            "hydration of {} failed: {msg}",
+                            rel.display()
+                        )));
+                    }
+                };
             let hydration_ms = stage.elapsed().as_millis();
 
             total_files += receipt.files_total;
@@ -288,6 +293,10 @@ impl<'a> HydrationEngine<'a> {
             bytes_shared_cow += receipt.bytes_shared;
             bytes_copied += receipt.bytes_copied;
             last_strategy = receipt.strategy.clone();
+            last_copy_backend = receipt.copy_backend.clone();
+            if receipt.refusal_reason.is_some() {
+                last_refusal_reason = receipt.refusal_reason.clone();
+            }
 
             if receipt.snapshot_hit {
                 snapshot_hits_count += 1;
@@ -351,13 +360,24 @@ impl<'a> HydrationEngine<'a> {
                     ("hardlink", 0) => println!(
                         "experimental hardlink mode (WT_HARDLINK): linked shared inodes for all {total_files} file(s)"
                     ),
-                    ("hardlink", n) => println!(
-                        "experimental hardlink mode (WT_HARDLINK): hardlinks refused for {n} of {total_files} file(s); wrote byte copies"
-                    ),
+                    ("hardlink", n) => {
+                        let reason_suffix = last_refusal_reason
+                            .as_deref()
+                            .map(|r| format!(" ({r})"))
+                            .unwrap_or_default();
+                        println!(
+                            "experimental hardlink mode (WT_HARDLINK): hardlinks refused{reason_suffix} for {n} of {total_files} file(s); wrote byte copies"
+                        );
+                    }
                     (_, 0) => {}
-                    (name, n) => println!(
-                        "{name} unavailable on this filesystem: wrote byte copies for {n} of {total_files} file(s)"
-                    ),
+                    (name, n) => {
+                        let reason_str = last_refusal_reason
+                            .as_deref()
+                            .unwrap_or("acceleration unavailable");
+                        println!(
+                            "{name} unavailable on this filesystem: wrote byte copies for {n} of {total_files} file(s) (copy mechanism: byte-copy; acceleration refused: {reason_str})"
+                        );
+                    }
                 }
             }
         }
@@ -378,10 +398,13 @@ impl<'a> HydrationEngine<'a> {
         diagnostics.extend(report_diagnostics);
 
         if total_copied > 0 && req.cfg.strategy_policy != StrategyPolicy::Hardlink {
+            let detail = last_refusal_reason
+                .as_deref()
+                .unwrap_or("Storage boundaries or filesystem refusal");
             diagnostics.push(Diagnostic::warning(
                 "CROSS_DEVICE_COPY_DEGRADATION",
                 format!(
-                    "Storage boundaries or filesystem refusal forced fallback byte copies for {total_copied} of {total_files} file(s)"
+                    "Copy acceleration refused: {detail}; falling back to byte copies for {total_copied} of {total_files} file(s)"
                 ),
             ));
         }
@@ -422,6 +445,8 @@ impl<'a> HydrationEngine<'a> {
             bytes_copied,
             strategy: last_strategy,
             hydration_method,
+            copy_backend: last_copy_backend,
+            refusal_reason: last_refusal_reason,
             cache_hit,
             snapshot_hashes: Vec::new(),
             dirs_hydrated,

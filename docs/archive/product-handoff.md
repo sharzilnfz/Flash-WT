@@ -120,6 +120,19 @@ the snapshot fast path. It is v0.1.0-maturity: feature-complete for
 its core promise, hardened by tests, not yet soaked on third-party
 workloads.
 
+### Linux versus macOS acceleration comparison
+
+| Capability | macOS (APFS) | Linux (Btrfs / XFS) | Linux (ext4) | Linux (generic / fallback) |
+|---|---|---|---|---|
+| Primary backend | `clonefile(2)` | `ioctl(FICLONE)` reflink | `copy_file_range(2)` | Buffered byte copy |
+| Directory snapshots | Whole-tree APFS clone (~1.3s warm) | Per-file placement ladder | Per-file placement ladder | Per-file placement ladder |
+| Incremental rebuilds | Tree clone + selective relink | Per-file delta placement | Per-file delta placement | Per-file delta placement |
+| Storage deduplication | Zero-copy CoW extents | Zero-copy CoW extents | Physical disk consumption | Physical disk consumption |
+| Hardlink mode (`WT_HARDLINK=1`) | Read-only shared inodes | Read-only shared inodes | Read-only shared inodes | Refused across mounts |
+| Fallback diagnostics | Surfaces reason on non-APFS | Reports backend and refusal reason | Reports backend and refusal reason | Reports backend and refusal reason |
+
+When acceleration is refused (e.g. cross-device mounts or missing kernel support), fallback runs explicitly report the chosen backend and the refusal reason in both terminal output and JSON envelopes.
+
 ## 6. Current state (as of this handoff)
 
 - **Code**: three crates — `wt-cli` (command surface, hydration

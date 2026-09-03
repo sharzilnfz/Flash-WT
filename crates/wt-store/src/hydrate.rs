@@ -131,6 +131,10 @@ pub struct HydrationReceipt {
     pub v2_cloned: usize,
     /// Incremental rebuild freshly linked files count.
     pub v2_linked: usize,
+    /// The concrete copy backend selected for materialization, if determined.
+    pub copy_backend: Option<String>,
+    /// Refusal reason when accelerated placement falls back to byte copy.
+    pub refusal_reason: Option<String>,
 }
 
 impl DiskStore {
@@ -211,6 +215,8 @@ impl DiskStore {
                     diagnostics: Vec::new(),
                     v2_cloned: 0,
                     v2_linked: 0,
+                    copy_backend: Some("clonefile".to_string()),
+                    refusal_reason: None,
                 }))
             }
             SnapshotOutcome::FellBack(reason) => {
@@ -288,6 +294,8 @@ impl DiskStore {
                         diagnostics,
                         v2_cloned: info.cloned_units,
                         v2_linked: info.linked_files,
+                        copy_backend: Some("clonefile".to_string()),
+                        refusal_reason: None,
                     });
                 }
                 SnapshotOutcome::FellBack(diag) => {
@@ -380,6 +388,14 @@ impl DiskStore {
             wt_copy::StrategyPolicy::ForceByteCopy => "byte-copy",
         };
 
+        let copy_backend = Some(batch.backend_name.to_string());
+        let refusal_reason = batch.refusal_reason.clone();
+        if let Some(refusal) = &refusal_reason {
+            diagnostics.push(format!(
+                "acceleration refused ({refusal}); falling back to byte copies"
+            ));
+        }
+
         Ok(HydrationReceipt {
             strategy: strategy_str.to_string(),
             files_total: ingested.files.len(),
@@ -391,6 +407,8 @@ impl DiskStore {
             diagnostics,
             v2_cloned: 0,
             v2_linked: 0,
+            copy_backend,
+            refusal_reason,
         })
     }
 }

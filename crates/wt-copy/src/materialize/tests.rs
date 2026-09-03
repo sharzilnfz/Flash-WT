@@ -244,6 +244,14 @@ fn materializer_cross_device_selection_falls_back_to_byte_copy() {
         false, // is_ext4
     );
     assert_eq!(materializer.strategy(), "copy-on-write");
+    assert_eq!(materializer.selected_backend(), "byte-copy");
+    assert!(materializer.refusal_reason().is_some());
+    assert!(
+        materializer
+            .refusal_reason()
+            .unwrap()
+            .contains("cross-device")
+    );
     assert!(materializer.backend().is_none());
 
     let outcome = materializer
@@ -251,5 +259,32 @@ fn materializer_cross_device_selection_falls_back_to_byte_copy() {
         .expect("materialize");
     assert_eq!(outcome.strategy, "copy-on-write");
     assert!(!outcome.is_shared_cow);
+    assert!(outcome.refusal_reason.is_some());
+    assert!(
+        outcome
+            .refusal_reason
+            .as_deref()
+            .unwrap()
+            .contains("cross-device")
+    );
     assert_eq!(fs::read(&dest).unwrap(), b"cross device data\n");
+}
+
+#[test]
+fn materializer_unsupported_fs_reports_refusal_reason() {
+    let materializer = Materializer::select(
+        StrategyPolicy::Default,
+        false, // not cross device
+        false, // not reflink capable
+        false, // not ext4
+    );
+    assert_eq!(materializer.strategy(), "copy-on-write");
+    assert_eq!(materializer.selected_backend(), "byte-copy");
+    assert!(materializer.refusal_reason().is_some());
+    assert!(
+        materializer
+            .refusal_reason()
+            .unwrap()
+            .contains("does not support")
+    );
 }
