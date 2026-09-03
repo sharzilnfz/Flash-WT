@@ -49,7 +49,8 @@ mod tests;
 
 pub use manifest::{EntryKind, Manifest, SnapshotEntry};
 pub use projection::{
-    SnapshotHydration, SnapshotOutcome, SnapshotProjectionEngine, SnapshotProjectionRequest,
+    INCREMENTAL_DIFF_RATIO_MAX, IncrementalDecision, IncrementalResult, SnapshotHydration,
+    SnapshotOutcome, SnapshotProjectionEngine, SnapshotProjectionRequest, try_incremental,
 };
 pub use publish::{
     BuildError, PublishOptions, PublishOutcome, PublishReceipt, SnapshotBuildTiming,

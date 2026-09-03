@@ -120,6 +120,8 @@ pub fn run(
             .into_iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
+        incremental_decision: report.incremental_decision,
+        incremental_fallback_reason: report.incremental_fallback_reason,
     };
 
     Ok((data, report.diagnostics))

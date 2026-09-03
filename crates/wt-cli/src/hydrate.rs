@@ -75,6 +75,8 @@ pub struct HydrationReport {
     pub dirs_hydrated: Vec<PathBuf>,
     pub timings: StageTimings,
     pub diagnostics: Vec<Diagnostic>,
+    pub incremental_decision: Option<String>,
+    pub incremental_fallback_reason: Option<String>,
 }
 
 /// Deep hydration engine coordinating discovery, caching, and storage delegation.
@@ -133,6 +135,8 @@ impl<'a> HydrationEngine<'a> {
                 dirs_hydrated: Vec::new(),
                 timings,
                 diagnostics,
+                incremental_decision: None,
+                incremental_fallback_reason: None,
             });
         }
 
@@ -144,6 +148,8 @@ impl<'a> HydrationEngine<'a> {
         let mut snapshot_hits_count = 0usize;
         let mut dirs_hydrated = Vec::new();
         let mut report_diagnostics = Vec::new();
+        let mut incremental_decision: Option<String> = None;
+        let mut incremental_fallback_reason: Option<String> = None;
 
         for rel in &dirs {
             dirs_hydrated.push(rel.clone());
@@ -293,6 +299,12 @@ impl<'a> HydrationEngine<'a> {
                 snapshot_hits_count += 1;
                 timings.snapshot_engaged = true;
                 timings.snapshot_ms += hydration_ms;
+                if let Some(dec) = receipt.incremental_decision {
+                    incremental_decision = Some(dec.to_string());
+                }
+                if let Some(reason) = receipt.incremental_fallback_reason {
+                    incremental_fallback_reason = Some(reason);
+                }
                 if let Some(mode) = receipt.strategy.strip_prefix("snapshot-") {
                     match mode {
                         "hit" => timings.snapshot_mode = "hit",
@@ -427,6 +439,8 @@ impl<'a> HydrationEngine<'a> {
             dirs_hydrated,
             timings,
             diagnostics,
+            incremental_decision,
+            incremental_fallback_reason,
         })
     }
 }
