@@ -566,7 +566,10 @@ fn flashwt_clean_single_worktree_removes_and_sweeps_with_receipt() {
         stdout.contains("feature-clean"),
         "receipt must contain branch name: {stdout}"
     );
-    assert!(!worktree_path.exists(), "worktree directory must be removed");
+    assert!(
+        !worktree_path.exists(),
+        "worktree directory must be removed"
+    );
 }
 
 #[test]
@@ -599,7 +602,10 @@ fn flashwt_clean_batch_removes_merged_branches_non_interactively() {
     let unmerged_flashwt = fx.repo.parent().unwrap().join("origin-unmerged-feat");
     fs::write(unmerged_flashwt.join("src.txt"), "divergent work").unwrap();
     git(&unmerged_flashwt, &["add", "."]);
-    git(&unmerged_flashwt, &["commit", "--quiet", "-m", "unmerged work"]);
+    git(
+        &unmerged_flashwt,
+        &["commit", "--quiet", "-m", "unmerged work"],
+    );
 
     let out_batch = fx.flashwt_env(&["clean", "--json"], &[]);
     assert!(out_batch.status.success());
@@ -1281,7 +1287,10 @@ fn bash_completions_define_the_flashwt_function() {
 #[test]
 fn zsh_completions_carry_the_compdef_header() {
     let text = completions_stdout("zsh");
-    assert!(text.contains("#compdef flashwt"), "missing zsh header: {text}");
+    assert!(
+        text.contains("#compdef flashwt"),
+        "missing zsh header: {text}"
+    );
     assert!(text.contains("--json"));
 }
 

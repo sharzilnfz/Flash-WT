@@ -1,3 +1,5 @@
+#![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1089,7 +1091,14 @@ fn gc_marks_through_valid_manifests_only() {
     fs::create_dir_all(&gitdir).unwrap();
     fs::write(gitdir.join("flashwt-hydrated.tsv"), "").unwrap();
     store
-        .publish_worktree_mirror(&worktree_dir, &gitdir, std::iter::empty(), [&m.hash], None, None)
+        .publish_worktree_mirror(
+            &worktree_dir,
+            &gitdir,
+            std::iter::empty(),
+            [&m.hash],
+            None,
+            None,
+        )
         .unwrap();
 
     let now = std::time::SystemTime::now();

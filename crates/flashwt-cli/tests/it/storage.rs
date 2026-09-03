@@ -572,7 +572,8 @@ fn second_worktree_adds_no_new_store_content() {
 
     for name in ["one", "two"] {
         let worktree_root = fx.repo.parent().unwrap().join(format!("origin-{name}"));
-        let pointer = fs::read_to_string(worktree_root.join(".git")).expect("worktree .git pointer");
+        let pointer =
+            fs::read_to_string(worktree_root.join(".git")).expect("worktree .git pointer");
         let git_dir = pointer
             .trim()
             .strip_prefix("gitdir: ")
@@ -784,7 +785,8 @@ fn hydrated_trees_restore_directory_permission_bits() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
     for name in ["one", "two"] {
-        let out = fx.flashwt_with_store_env(&["create", name], &store, &[("FLASHWT_SNAPSHOTS", "0")]);
+        let out =
+            fx.flashwt_with_store_env(&["create", name], &store, &[("FLASHWT_SNAPSHOTS", "0")]);
         assert!(
             out.status.success(),
             "create {name} failed: {}",

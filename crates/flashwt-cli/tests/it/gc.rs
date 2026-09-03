@@ -416,7 +416,11 @@ fn legacy_sweep_audit_reports_zero_disagreements_on_normal_fixtures() {
     let store = base.path().join("store");
 
     for name in ["one", "two"] {
-        assert!(fx.flashwt_with_store(&["create", name], &store).status.success());
+        assert!(
+            fx.flashwt_with_store(&["create", name], &store)
+                .status
+                .success()
+        );
     }
     let removed = fx.flashwt_with_store(&["remove", "one"], &store);
     assert!(removed.status.success());

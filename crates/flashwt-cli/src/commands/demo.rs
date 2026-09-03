@@ -105,8 +105,11 @@ fn generate_synthetic_fixture(repo_path: &Path) -> Result<(usize, u64)> {
     let src_dir = repo_path.join("src");
     fs::create_dir_all(&src_dir).map_err(|e| Error::io("create src dir", &src_dir, e))?;
     let index_ts = src_dir.join("index.ts");
-    fs::write(&index_ts, b"console.log(\"flashwt synthetic demo project\");\n")
-        .map_err(|e| Error::io("write index.ts", &index_ts, e))?;
+    fs::write(
+        &index_ts,
+        b"console.log(\"flashwt synthetic demo project\");\n",
+    )
+    .map_err(|e| Error::io("write index.ts", &index_ts, e))?;
 
     workspace::run(repo_path, &["add", "."])?;
     workspace::run(repo_path, &["commit", "--quiet", "-m", "Initial commit"])?;
@@ -308,7 +311,11 @@ fn print_terminal_scorecard(
         0.05
     };
     let flashwt_len = ((flashwt_fraction * bar_width as f64).round() as usize).clamp(1, bar_width);
-    let flashwt_bar = format!("{}{}", "=".repeat(flashwt_len), " ".repeat(bar_width - flashwt_len));
+    let flashwt_bar = format!(
+        "{}{}",
+        "=".repeat(flashwt_len),
+        " ".repeat(bar_width - flashwt_len)
+    );
 
     println!();
     println!("────────────────────────────────────────────────────────────────────────────────");

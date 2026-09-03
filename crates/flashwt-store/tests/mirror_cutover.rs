@@ -108,7 +108,8 @@ fn legacy_sweep_does_not_collect_active_pinned_snapshot_member_blobs() {
             "member blob must remain present in store"
         );
         assert_eq!(
-            fs::read(worktree_dir.path().join("node_modules/pkg/index.js")).expect("read hydrated file"),
+            fs::read(worktree_dir.path().join("node_modules/pkg/index.js"))
+                .expect("read hydrated file"),
             content
         );
 

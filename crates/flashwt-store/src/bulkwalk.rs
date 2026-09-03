@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 #[cfg(target_os = "macos")]
 use std::ffi::CString;
+#[cfg(target_os = "macos")]
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;

@@ -351,7 +351,9 @@ fn list_json_output_envelope_schema() {
     assert!(feat_flashwt["bytes_saved"].as_u64().unwrap() > 0);
     assert_eq!(feat_flashwt["bytes_hydrated"], feat_flashwt["bytes_saved"]);
 
-    let dirs = feat_flashwt["hydrated_dirs"].as_array().expect("hydrated dirs");
+    let dirs = feat_flashwt["hydrated_dirs"]
+        .as_array()
+        .expect("hydrated dirs");
     assert_eq!(dirs[0], "heavy");
 }
 
@@ -361,7 +363,8 @@ fn list_scratch_lease_reporting() {
     fs::write(fx.repo.join(".flashwtinclude"), "heavy/\n").unwrap();
     let store_dir = tempfile::tempdir().unwrap();
 
-    let scratch_out = fx.flashwt_with_store(&["scratch", "--ttl", "1h", "temp-box"], store_dir.path());
+    let scratch_out =
+        fx.flashwt_with_store(&["scratch", "--ttl", "1h", "temp-box"], store_dir.path());
     assert!(scratch_out.status.success());
 
     let list_json_out = fx.flashwt_with_store(&["list", "--json"], store_dir.path());
@@ -738,7 +741,8 @@ fn lease_show_machine_readable_json() {
     assert!(found["git_dir"].is_string());
 
     let lease_id = found["lease_id"].as_str().unwrap();
-    let show_one_out = fx.flashwt_with_store(&["lease", "show", lease_id, "--json"], store_dir.path());
+    let show_one_out =
+        fx.flashwt_with_store(&["lease", "show", lease_id, "--json"], store_dir.path());
     assert!(show_one_out.status.success());
 
     let one_json: serde_json::Value =

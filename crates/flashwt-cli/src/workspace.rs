@@ -898,7 +898,9 @@ bare
 
         let engine = WorkspaceEngine::with_isolated_cache(repo.clone());
         let worktree_path = temp.path().join("repo-feat");
-        engine.create_worktree("feat", &worktree_path, "main").unwrap();
+        engine
+            .create_worktree("feat", &worktree_path, "main")
+            .unwrap();
 
         let gd = engine.resolve_git_dir(&worktree_path);
         assert!(gd.exists());

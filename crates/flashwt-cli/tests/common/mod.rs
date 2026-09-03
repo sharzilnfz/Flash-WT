@@ -213,7 +213,12 @@ impl Fixture {
             .expect("run flashwt binary")
     }
 
-    pub fn flashwt_with_store_env(&self, args: &[&str], store: &Path, env: &[(&str, &str)]) -> Output {
+    pub fn flashwt_with_store_env(
+        &self,
+        args: &[&str],
+        store: &Path,
+        env: &[(&str, &str)],
+    ) -> Output {
         Command::new(env!("CARGO_BIN_EXE_flashwt"))
             .args(args)
             .env("FLASHWT_STORE", store)

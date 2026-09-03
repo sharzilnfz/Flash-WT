@@ -266,7 +266,7 @@ pub fn refusal_reason_for_errno(errno: i32) -> String {
     {
         match errno {
             libc::EXDEV => "cross-device link (EXDEV)".to_string(),
-            libc::ENOTSUP | libc::EOPNOTSUPP => {
+            code if code == libc::ENOTSUP || code == libc::EOPNOTSUPP => {
                 "filesystem does not support operation (ENOTSUP/EOPNOTSUPP)".to_string()
             }
             libc::ENOSYS => "syscall not implemented by kernel (ENOSYS)".to_string(),
