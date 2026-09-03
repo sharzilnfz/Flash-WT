@@ -7,7 +7,7 @@ use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, HydrateData};
 use crate::error::{Error, Result};
 use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
-use crate::hydration_filter::{self, LoadedPatterns, load_patterns};
+use crate::hydration_filter::{self, LoadedPatterns, ZeroSavingsReason, load_patterns};
 use crate::output::{HumanBytes, HumanCount};
 use crate::workspace::{self, WorkspaceEngine};
 
@@ -103,6 +103,13 @@ pub fn run(
                 report.hydration_method,
                 total_ms
             );
+        } else {
+            let reason = if report.dirs_hydrated.is_empty() {
+                ZeroSavingsReason::NoMatchingDirectories
+            } else {
+                ZeroSavingsReason::NoFilesHydrated
+            };
+            println!("  {}", reason.human_summary());
         }
     }
 

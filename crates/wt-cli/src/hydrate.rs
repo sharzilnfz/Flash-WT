@@ -10,7 +10,7 @@ use wt_store::{ContentId, DiskStore, IngestOptions};
 use crate::config::{RunConfig, StrategyPolicy};
 use crate::envelope::Diagnostic;
 use crate::error::{Error, Result};
-use crate::hydration_filter::{collect_matches, pattern_matches};
+use crate::hydration_filter::{ZeroSavingsReason, collect_matches, pattern_matches};
 use crate::timing::StageTimings;
 use crate::workspace;
 
@@ -109,7 +109,7 @@ impl<'a> HydrationEngine<'a> {
                 )
                 .map_err(|e| Error::Store(format!("cannot publish worktree mirror: {e}")))?;
 
-            let diagnostics =
+            let mut diagnostics =
                 crate::base::check_base_movement(self.store, req.root, req.base_branch);
             for d in &diagnostics {
                 if !req.cfg.json {
@@ -117,8 +117,14 @@ impl<'a> HydrationEngine<'a> {
                 }
             }
 
+            let reason = ZeroSavingsReason::NoMatchingDirectories;
+            diagnostics.push(Diagnostic::warning(
+                ZeroSavingsReason::DIAGNOSTIC_CODE,
+                format!("hydration saved 0 bytes; {}", reason.explanation()),
+            ));
+
             if !req.cfg.json {
-                println!("nothing to hydrate");
+                println!("{}", reason.human_notice());
             }
 
             return Ok(HydrationReport {
@@ -377,6 +383,14 @@ impl<'a> HydrationEngine<'a> {
             crate::base::check_base_movement(self.store, req.root, req.base_branch);
         diagnostics.extend(report_diagnostics);
 
+        if total_files == 0 {
+            let reason = ZeroSavingsReason::NoFilesHydrated;
+            diagnostics.push(Diagnostic::warning(
+                ZeroSavingsReason::DIAGNOSTIC_CODE,
+                format!("hydration saved 0 bytes; {}", reason.explanation()),
+            ));
+        }
+
         if total_copied > 0 && req.cfg.strategy_policy != StrategyPolicy::Hardlink {
             diagnostics.push(Diagnostic::warning(
                 "CROSS_DEVICE_COPY_DEGRADATION",
@@ -386,7 +400,7 @@ impl<'a> HydrationEngine<'a> {
             ));
         }
         for d in &diagnostics {
-            if !req.cfg.json {
+            if !req.cfg.json && d.code != ZeroSavingsReason::DIAGNOSTIC_CODE {
                 eprintln!("wt: warning: {}", d.message);
             }
         }

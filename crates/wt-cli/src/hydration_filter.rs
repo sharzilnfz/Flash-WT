@@ -103,6 +103,55 @@ pub enum LoadedPatterns {
     },
 }
 
+impl LoadedPatterns {
+    pub fn is_defaults(&self) -> bool {
+        matches!(self, LoadedPatterns::Defaults { .. })
+    }
+
+    pub fn patterns(&self) -> &[String] {
+        match self {
+            LoadedPatterns::Loaded { patterns, .. } => patterns,
+            LoadedPatterns::Defaults { patterns } => patterns,
+        }
+    }
+}
+
+/// Explanation for why hydration yielded zero savings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZeroSavingsReason {
+    /// No configured or default heavy directory patterns matched in the source repo.
+    NoMatchingDirectories,
+    /// Matching directories were found, but they contained no files to hydrate.
+    NoFilesHydrated,
+}
+
+impl ZeroSavingsReason {
+    /// Machine-readable diagnostic code for envelopes.
+    pub const DIAGNOSTIC_CODE: &'static str = "ZERO_SAVINGS";
+
+    /// Human-friendly plain-language explanation.
+    pub fn explanation(self) -> &'static str {
+        match self {
+            Self::NoMatchingDirectories => {
+                "no matching heavy directories found and the worktree relies strictly on git tracking"
+            }
+            Self::NoFilesHydrated => {
+                "no files hydrated from matching directories and the worktree relies strictly on git tracking"
+            }
+        }
+    }
+
+    /// Notice printed when hydration detects nothing to hydrate.
+    pub fn human_notice(self) -> String {
+        format!("nothing to hydrate ({})", self.explanation())
+    }
+
+    /// Summary line printed during create or hydrate completion.
+    pub fn human_summary(self) -> String {
+        format!("0 bytes saved ({})", self.explanation())
+    }
+}
+
 /// Parse manifest text into patterns, skipping blank lines and
 /// `#` comments. Preserves negation (`!`) patterns for exclusions.
 pub fn parse_patterns(text: &str) -> Vec<String> {
@@ -415,4 +464,50 @@ mod tests {
         assert!(!is_volatile_cache(".next/server/pages/index.js"));
         assert!(!is_volatile_cache(".venv/bin/python"));
     }
+
+    #[test]
+    fn test_zero_savings_reason_formatting() {
+        let no_dirs = ZeroSavingsReason::NoMatchingDirectories;
+        assert_eq!(
+            no_dirs.explanation(),
+            "no matching heavy directories found and the worktree relies strictly on git tracking"
+        );
+        assert_eq!(
+            no_dirs.human_notice(),
+            "nothing to hydrate (no matching heavy directories found and the worktree relies strictly on git tracking)"
+        );
+        assert_eq!(
+            no_dirs.human_summary(),
+            "0 bytes saved (no matching heavy directories found and the worktree relies strictly on git tracking)"
+        );
+        assert_eq!(ZeroSavingsReason::DIAGNOSTIC_CODE, "ZERO_SAVINGS");
+
+        let no_files = ZeroSavingsReason::NoFilesHydrated;
+        assert_eq!(
+            no_files.explanation(),
+            "no files hydrated from matching directories and the worktree relies strictly on git tracking"
+        );
+        assert_eq!(
+            no_files.human_notice(),
+            "nothing to hydrate (no files hydrated from matching directories and the worktree relies strictly on git tracking)"
+        );
+        assert_eq!(
+            no_files.human_summary(),
+            "0 bytes saved (no files hydrated from matching directories and the worktree relies strictly on git tracking)"
+        );
+
+        let defaults = LoadedPatterns::Defaults {
+            patterns: vec!["a/".into()],
+        };
+        assert!(defaults.is_defaults());
+        assert_eq!(defaults.patterns(), &["a/".to_string()]);
+
+        let loaded = LoadedPatterns::Loaded {
+            path: PathBuf::from("p"),
+            patterns: vec!["b/".into()],
+        };
+        assert!(!loaded.is_defaults());
+        assert_eq!(loaded.patterns(), &["b/".to_string()]);
+    }
 }
+

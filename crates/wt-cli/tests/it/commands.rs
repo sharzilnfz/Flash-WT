@@ -153,6 +153,96 @@ fn create_reports_when_nothing_matches() {
 }
 
 #[test]
+fn onboarding_fresh_repo_without_manifest_creates_worktree_and_explains_zero_savings() {
+    let fx = Fixture::init();
+    assert!(!fx.repo.join(".wtinclude").exists());
+
+    let out = fx.wt(&["create", "feature"]);
+    assert!(
+        out.status.success(),
+        "wt create failed on fresh repo: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let dest = fx.repo.parent().unwrap().join("origin-feature");
+    assert!(dest.is_dir(), "worktree dir missing at {}", dest.display());
+    assert!(dest.join(".git").is_file(), "worktree .git missing");
+    assert_eq!(
+        fs::read_to_string(dest.join("src.txt")).unwrap(),
+        "tracked source\n"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("using defaults"), "stdout:\n{stdout}");
+    assert!(stdout.contains("nothing to hydrate"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("no matching heavy directories found and the worktree relies strictly on git tracking"),
+        "stdout must explain zero savings:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("0 bytes saved (no matching heavy directories found and the worktree relies strictly on git tracking)"),
+        "stdout must state 0 bytes saved:\n{stdout}"
+    );
+
+    let out_new = fx.wt(&["new", "feature-new"]);
+    assert!(
+        out_new.status.success(),
+        "wt new failed: {}",
+        String::from_utf8_lossy(&out_new.stderr)
+    );
+    let dest_new = fx.repo.parent().unwrap().join("origin-feature-new");
+    assert!(dest_new.is_dir());
+
+    let out_json = fx.wt(&["create", "feature-json", "--json"]);
+    assert!(out_json.status.success());
+    let stdout_json = String::from_utf8_lossy(&out_json.stdout);
+    let lines: Vec<&str> = stdout_json.trim().lines().collect();
+    assert_eq!(lines.len(), 1);
+    let envelope: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(envelope["status"], "ok");
+    assert_eq!(envelope["command"], "create");
+    assert_eq!(envelope["data"]["files_hydrated"], 0);
+    assert_eq!(envelope["data"]["bytes_shared_cow"], 0);
+
+    let diags = envelope["diagnostics"].as_array().expect("diagnostics array");
+    let zero_savings = diags
+        .iter()
+        .find(|d| d["code"] == "ZERO_SAVINGS")
+        .expect("ZERO_SAVINGS diagnostic must be present");
+    assert_eq!(zero_savings["level"], "warning");
+    assert!(
+        zero_savings["message"]
+            .as_str()
+            .unwrap()
+            .contains("no matching heavy directories found"),
+        "diagnostic message must explain zero savings: {:?}",
+        zero_savings
+    );
+}
+
+#[test]
+fn onboarding_empty_repo_with_no_commits_creates_functional_worktree() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let repo = base.path().join("empty-origin");
+    fs::create_dir_all(&repo).expect("mkdir");
+    git(&repo, &["init", "--quiet"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    git(&repo, &["config", "user.name", "Test"]);
+
+    let fx = Fixture { repo, _base: base };
+    let out = fx.wt(&["create", "initial"]);
+    assert!(
+        out.status.success(),
+        "wt create failed on uncommitted repo: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let dest = fx.repo.parent().unwrap().join("empty-origin-initial");
+    assert!(dest.is_dir());
+    assert!(dest.join(".git").is_file());
+}
+
+#[test]
 fn explicit_manifest_that_is_missing_is_an_error() {
     let fx = Fixture::heavy_repo(5);
     let out = fx.wt(&["create", "demo", "--manifest", "nope.wtinclude"]);
