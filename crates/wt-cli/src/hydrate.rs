@@ -278,6 +278,8 @@ impl<'a> HydrationEngine<'a> {
             dirs_hydrated,
             timings,
             diagnostics: Vec::new(),
+            incremental_decision: None,
+            incremental_fallback_reason: None,
         })
     }
 
