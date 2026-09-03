@@ -131,6 +131,10 @@ pub struct HydrationReceipt {
     pub v2_cloned: usize,
     /// Incremental rebuild freshly linked files count.
     pub v2_linked: usize,
+    /// Incremental decision if evaluated.
+    pub incremental_decision: Option<crate::snapshot::IncrementalDecision>,
+    /// Diagnostic reason if incremental rebuild fell back.
+    pub incremental_fallback_reason: Option<String>,
 }
 
 impl DiskStore {
@@ -201,7 +205,7 @@ impl DiskStore {
                     dest.base_commit,
                 )?;
                 Ok(HydrateOutcome::Hydrated(HydrationReceipt {
-                    strategy: format!("snapshot-{}", info.mode),
+                    strategy: "snapshot-hit".to_string(),
                     files_total: info.files,
                     files_copied: 0,
                     bytes_shared: 0,
@@ -211,6 +215,8 @@ impl DiskStore {
                     diagnostics: Vec::new(),
                     v2_cloned: 0,
                     v2_linked: 0,
+                    incremental_decision: None,
+                    incremental_fallback_reason: None,
                 }))
             }
             SnapshotOutcome::FellBack(reason) => {
@@ -288,6 +294,8 @@ impl DiskStore {
                         diagnostics,
                         v2_cloned: info.cloned_units,
                         v2_linked: info.linked_files,
+                        incremental_decision: info.incremental_decision,
+                        incremental_fallback_reason: info.incremental_fallback_reason,
                     });
                 }
                 SnapshotOutcome::FellBack(diag) => {
@@ -391,6 +399,8 @@ impl DiskStore {
             diagnostics,
             v2_cloned: 0,
             v2_linked: 0,
+            incremental_decision: None,
+            incremental_fallback_reason: None,
         })
     }
 }

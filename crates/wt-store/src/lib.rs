@@ -51,10 +51,10 @@ pub use snapindex::{
     record_publish as record_snapshot_publish, record_snapshot_lru_touch, select_old_snapshot,
 };
 pub use snapshot::{
-    BuildError, EntryKind, Manifest, PublishOptions, PublishOutcome, PublishReceipt,
-    SnapshotBuildTiming, SnapshotEntry, SnapshotHydration, SnapshotOutcome,
-    SnapshotProjectionEngine, SnapshotProjectionRequest, read_published as read_published_snapshot,
-    snapshot_path, snapshot_tree_path,
+    BuildError, EntryKind, INCREMENTAL_DIFF_RATIO_MAX, IncrementalDecision, IncrementalResult,
+    Manifest, PublishOptions, PublishOutcome, PublishReceipt, SnapshotBuildTiming, SnapshotEntry,
+    SnapshotHydration, SnapshotOutcome, SnapshotProjectionEngine, SnapshotProjectionRequest,
+    read_published as read_published_snapshot, snapshot_path, snapshot_tree_path, try_incremental,
 };
 pub use validation::{Entry, ValidationCache};
 pub use verified::{Fingerprint, VerifiedLedger};
