@@ -61,6 +61,84 @@ pub struct HydrationRequest<'a> {
     pub cfg: &'a RunConfig,
 }
 
+/// Threshold constants for the tiny repo bypass policy (Ticket 03).
+pub const TINY_REPO_MAX_FILES: u64 = 500;
+pub const TINY_REPO_MAX_BYTES: u64 = 8 * 1024 * 1024; // 8 MB
+
+/// Count regular files and total bytes under `dir`, stopping early once limits are reached.
+pub fn scan_dir_size_capped(
+    dir: &Path,
+    current_files: &mut u64,
+    current_bytes: &mut u64,
+    max_files: u64,
+    max_bytes: u64,
+) -> std::io::Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        if *current_files >= max_files || *current_bytes >= max_bytes {
+            break;
+        }
+        for entry in std::fs::read_dir(&path)? {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                *current_files += 1;
+                *current_bytes += entry.metadata()?.len();
+                if *current_files >= max_files || *current_bytes >= max_bytes {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns true if target directories total under 500 files and under 8 MB.
+pub fn is_tiny_repo(root: &Path, dirs: &[PathBuf]) -> bool {
+    if dirs.is_empty() {
+        return false;
+    }
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    for rel in dirs {
+        let src = root.join(rel);
+        if scan_dir_size_capped(
+            &src,
+            &mut files,
+            &mut bytes,
+            TINY_REPO_MAX_FILES,
+            TINY_REPO_MAX_BYTES,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        if files >= TINY_REPO_MAX_FILES || bytes >= TINY_REPO_MAX_BYTES {
+            return false;
+        }
+    }
+    files < TINY_REPO_MAX_FILES && bytes < TINY_REPO_MAX_BYTES
+}
+
+/// Determines if the given request should bypass the store entirely.
+pub fn should_bypass_tiny_repo(root: &Path, dirs: &[PathBuf], cfg: &RunConfig) -> bool {
+    if !cfg.tiny_bypass {
+        return false;
+    }
+    if cfg.strategy_policy == StrategyPolicy::Hardlink {
+        return false;
+    }
+    if cfg.verify {
+        return false;
+    }
+    is_tiny_repo(root, dirs)
+}
+
 /// Consolidated report of worktree hydration operations and metrics.
 #[allow(dead_code)]
 pub struct HydrationReport {
@@ -81,13 +159,126 @@ pub struct HydrationReport {
 
 /// Deep hydration engine coordinating discovery, caching, and storage delegation.
 pub struct HydrationEngine<'a> {
-    store: &'a mut DiskStore,
+    store: Option<&'a mut DiskStore>,
+    owned_store: Option<DiskStore>,
 }
 
 impl<'a> HydrationEngine<'a> {
     /// Create a new `HydrationEngine` backed by the given disk store.
     pub fn new(store: &'a mut DiskStore) -> Self {
-        Self { store }
+        Self {
+            store: Some(store),
+            owned_store: None,
+        }
+    }
+
+    /// Create a new `HydrationEngine` that will open the store lazily only if needed.
+    pub fn auto() -> Self {
+        Self {
+            store: None,
+            owned_store: None,
+        }
+    }
+
+    fn store_mut(&mut self) -> Result<&mut DiskStore> {
+        if let Some(ref mut store) = self.store {
+            return Ok(store);
+        }
+        if self.owned_store.is_none() {
+            self.owned_store = Some(open_store()?);
+        }
+        self.owned_store
+            .as_mut()
+            .ok_or_else(|| Error::Store("store not initialized".into()))
+    }
+
+    fn hydrate_tiny_bypass(
+        &mut self,
+        req: HydrationRequest<'_>,
+        dirs: &[PathBuf],
+        mut timings: StageTimings,
+    ) -> Result<HydrationReport> {
+        let copy_policy = match req.cfg.strategy_policy {
+            StrategyPolicy::Default => wt_copy::StrategyPolicy::Default,
+            StrategyPolicy::Hardlink => wt_copy::StrategyPolicy::Hardlink,
+            StrategyPolicy::ForceByteCopy => wt_copy::StrategyPolicy::ForceByteCopy,
+        };
+        let copy_engine = wt_copy::CopyEngine::new(copy_policy);
+
+        let stage = Instant::now();
+        let mut total_files = 0usize;
+        let mut total_copied = 0usize;
+        let mut bytes_shared_cow = 0u64;
+        let mut bytes_copied = 0u64;
+        let mut last_strategy = "clonefile".to_string();
+        let mut dirs_hydrated = Vec::new();
+
+        for rel in dirs {
+            dirs_hydrated.push(rel.clone());
+            let src = req.root.join(rel);
+            let dest_dir = req.dest.join(rel);
+
+            if let Some(parent) = dest_dir.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| Error::io("create directory", parent, e))?;
+            }
+
+            let receipt = copy_engine
+                .copy_dir(&src, &dest_dir, wt_copy::SourcePolicy::Any)
+                .map_err(|e| {
+                    Error::io_unanchored("bypass copy", &src, std::io::Error::other(e.to_string()))
+                })?;
+
+            last_strategy = receipt.strategy.to_string();
+            let is_cow = receipt.strategy == "clonefile"
+                || receipt.strategy == "reflink"
+                || receipt.strategy == "copy-on-write";
+            if is_cow {
+                bytes_shared_cow += receipt.bytes_copied;
+            } else {
+                bytes_copied += receipt.bytes_copied;
+                total_copied += receipt.files_copied as usize;
+            }
+            total_files += receipt.files_copied as usize;
+
+            if !req.cfg.json {
+                println!(
+                    "hydrated {} from {} via clone ({} file{})",
+                    rel.display(),
+                    src.display(),
+                    receipt.files_copied,
+                    if receipt.files_copied == 1 { "" } else { "s" }
+                );
+            }
+        }
+
+        crate::toolchain::relocate_toolchains(req.root, req.dest, dirs)?;
+        timings.materialize_ms = stage.elapsed().as_millis();
+
+        let hydration_method = if total_files == 0 {
+            "none"
+        } else if total_copied == 0 {
+            "clone"
+        } else if total_copied == total_files {
+            "byte_copy"
+        } else {
+            "clone"
+        }
+        .to_string();
+
+        Ok(HydrationReport {
+            total_files,
+            total_copied,
+            bytes_shared_cow,
+            bytes_copied,
+            strategy: last_strategy,
+            hydration_method,
+            cache_hit: false,
+            snapshot_hashes: Vec::new(),
+            dirs_hydrated,
+            timings,
+            diagnostics: Vec::new(),
+        })
     }
 
     /// Execute the complete hydration pipeline for the given request.
@@ -100,7 +291,8 @@ impl<'a> HydrationEngine<'a> {
         }
 
         if dirs.is_empty() {
-            self.store
+            let store = self.store_mut()?;
+            store
                 .publish_worktree_mirror(
                     req.dest,
                     &git_dir,
@@ -112,7 +304,7 @@ impl<'a> HydrationEngine<'a> {
                 .map_err(|e| Error::Store(format!("cannot publish worktree mirror: {e}")))?;
 
             let diagnostics =
-                crate::base::check_base_movement(self.store, req.root, req.base_branch);
+                crate::base::check_base_movement(store, req.root, req.base_branch);
             for d in &diagnostics {
                 if !req.cfg.json {
                     eprintln!("wt: warning: {}", d.message);
@@ -139,6 +331,12 @@ impl<'a> HydrationEngine<'a> {
                 incremental_fallback_reason: None,
             });
         }
+
+        if should_bypass_tiny_repo(req.root, &dirs, req.cfg) {
+            return self.hydrate_tiny_bypass(req, &dirs, timings);
+        }
+
+        let store = self.store_mut()?;
 
         let mut total_files = 0usize;
         let mut total_copied = 0usize;
@@ -194,8 +392,7 @@ impl<'a> HydrationEngine<'a> {
                         },
                         policy: store_policy(req.cfg),
                     };
-                    match self
-                        .store
+                    match store
                         .hydrate(pin_req)
                         .map_err(|e| Error::Store(format!("hydration of {heavy} failed: {e}")))?
                     {
@@ -235,8 +432,7 @@ impl<'a> HydrationEngine<'a> {
                 }
             }
             let stage = Instant::now();
-            let ingested = self
-                .store
+            let ingested = store
                 .ingest_tree(
                     req.root,
                     &src,
@@ -267,8 +463,7 @@ impl<'a> HydrationEngine<'a> {
             };
 
             let stage = Instant::now();
-            let receipt = match self
-                .store
+            let receipt = match store
                 .hydrate(store_req)
                 .map_err(|e| Error::Store(format!("hydration of {} failed: {e}", rel.display())))?
             {
@@ -374,8 +569,8 @@ impl<'a> HydrationEngine<'a> {
             }
         }
 
-        self.store.flush().map_err(|e| {
-            Error::io_unanchored("update verified-blob ledger", self.store.root(), e)
+        store.flush().map_err(|e| {
+            Error::io_unanchored("update verified-blob ledger", store.root(), e)
         })?;
 
         if !req.cfg.json {
@@ -386,7 +581,7 @@ impl<'a> HydrationEngine<'a> {
         }
 
         let mut diagnostics =
-            crate::base::check_base_movement(self.store, req.root, req.base_branch);
+            crate::base::check_base_movement(store, req.root, req.base_branch);
         diagnostics.extend(report_diagnostics);
 
         if total_copied > 0 && req.cfg.strategy_policy != StrategyPolicy::Hardlink {
@@ -442,5 +637,108 @@ impl<'a> HydrationEngine<'a> {
             incremental_decision,
             incremental_fallback_reason,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::fs::{self, File};
+
+    fn test_config() -> RunConfig {
+        RunConfig {
+            strategy_policy: StrategyPolicy::Default,
+            verify: false,
+            snapshots: false,
+            v2: false,
+            timing: false,
+            json: false,
+            tiny_bypass: true,
+        }
+    }
+
+    #[test]
+    fn is_tiny_repo_empty_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(!is_tiny_repo(temp.path(), &[]));
+    }
+
+    #[test]
+    fn is_tiny_repo_below_limits() {
+        let temp = tempfile::tempdir().unwrap();
+        let heavy = temp.path().join("heavy");
+        fs::create_dir_all(&heavy).unwrap();
+
+        for i in 0..10 {
+            fs::write(heavy.join(format!("file_{i}.txt")), b"test payload").unwrap();
+        }
+
+        let dirs = vec![PathBuf::from("heavy")];
+        assert!(is_tiny_repo(temp.path(), &dirs));
+    }
+
+    #[test]
+    fn is_tiny_repo_exceeds_file_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let heavy = temp.path().join("heavy");
+        fs::create_dir_all(&heavy).unwrap();
+
+        for i in 0..TINY_REPO_MAX_FILES {
+            fs::write(heavy.join(format!("file_{i}.txt")), b"").unwrap();
+        }
+
+        let dirs = vec![PathBuf::from("heavy")];
+        assert!(!is_tiny_repo(temp.path(), &dirs));
+    }
+
+    #[test]
+    fn is_tiny_repo_exceeds_byte_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let heavy = temp.path().join("heavy");
+        fs::create_dir_all(&heavy).unwrap();
+
+        let file = File::create(heavy.join("large.bin")).unwrap();
+        file.set_len(TINY_REPO_MAX_BYTES).unwrap();
+
+        let dirs = vec![PathBuf::from("heavy")];
+        assert!(!is_tiny_repo(temp.path(), &dirs));
+    }
+
+    #[test]
+    fn should_bypass_tiny_repo_honors_configuration() {
+        let temp = tempfile::tempdir().unwrap();
+        let heavy = temp.path().join("heavy");
+        fs::create_dir_all(&heavy).unwrap();
+        fs::write(heavy.join("file.txt"), b"tiny").unwrap();
+        let dirs = vec![PathBuf::from("heavy")];
+
+        let mut cfg = test_config();
+        assert!(should_bypass_tiny_repo(temp.path(), &dirs, &cfg));
+
+        cfg.tiny_bypass = false;
+        assert!(!should_bypass_tiny_repo(temp.path(), &dirs, &cfg));
+    }
+
+    #[test]
+    fn should_bypass_tiny_repo_ignores_hardlink_and_verify() {
+        let temp = tempfile::tempdir().unwrap();
+        let heavy = temp.path().join("heavy");
+        fs::create_dir_all(&heavy).unwrap();
+        fs::write(heavy.join("file.txt"), b"tiny").unwrap();
+        let dirs = vec![PathBuf::from("heavy")];
+
+        let mut cfg = test_config();
+        cfg.strategy_policy = StrategyPolicy::Hardlink;
+        assert!(!should_bypass_tiny_repo(temp.path(), &dirs, &cfg));
+
+        cfg = test_config();
+        cfg.verify = true;
+        assert!(!should_bypass_tiny_repo(temp.path(), &dirs, &cfg));
+
+        cfg = test_config();
+        cfg.strategy_policy = StrategyPolicy::Hardlink;
+        cfg.verify = true;
+        assert!(!should_bypass_tiny_repo(temp.path(), &dirs, &cfg));
     }
 }

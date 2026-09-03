@@ -792,6 +792,7 @@ fn wt_scrub_cmd(fx: &Fixture, args: &[&str], store: &Path) -> std::process::Outp
         .args(args)
         .env("WT_STORE", store)
         .env("WT_SNAPSHOTS", "1")
+        .env("WT_NO_TINY_BYPASS", "1")
         .env_remove("WT_HARDLINK")
         .env_remove("WT_NO_HARDLINK")
         .env_remove("WT_VERIFY")
