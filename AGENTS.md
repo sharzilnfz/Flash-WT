@@ -2,7 +2,7 @@
 
 Never write comments in the codebase. All code must be completely comment-free.
 
-Always use codebase-memory MCP for all searching and querying
+Always use codebase-memory MCP for all searching, querying, and reading code; never use grep or other read tools.
 
 ## Agent skills
 
