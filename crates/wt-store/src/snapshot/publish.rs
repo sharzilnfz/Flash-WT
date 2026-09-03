@@ -233,6 +233,24 @@ impl DiskStore {
         }
     }
 
+    /// Publish a pre-built manifest (e.g., from `Ingested`).
+    ///
+    /// Minimal bridge over [`Self::publish_snapshot`]: total size is
+    /// still recomputed via blob stat inside `stage_and_publish`, so
+    /// `manifest.total_size` is observation only and semantics stay
+    /// identical. `options.lockfile_hash` should match
+    /// `manifest.lockfile_hash`; when unset, the manifest's hash is used.
+    pub fn publish_manifest(
+        &self,
+        manifest: &Manifest,
+        mut options: PublishOptions,
+    ) -> Result<PublishReceipt, BuildError> {
+        if options.lockfile_hash.is_none() {
+            options.lockfile_hash = manifest.lockfile_hash;
+        }
+        self.publish_snapshot(manifest.entries.clone(), options)
+    }
+
     /// The v2 delta application, run against an already-cloned or
     /// fresh `tree_dir`. Split out of the closure so it can be a
     /// readable method; see

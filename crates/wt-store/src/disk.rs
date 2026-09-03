@@ -448,18 +448,22 @@ impl DiskStore {
             fs::create_dir_all(&shard_dir)?;
             let mut tmp = tempfile::NamedTempFile::new_in(&shard_dir)?;
             tmp.write_all(content)?;
-            // Durability: fsync the blob's bytes BEFORE the rename.
+            // Durability: fsync the blob's bytes BEFORE the rename unless disabled.
             // A crash after the rename without this could leave the
             // final address naming empty/truncated content — and a
             // content-addressed store cannot tell that from a valid
             // empty file. The parent-dir fsync after persist makes
             // the new directory entry itself durable too.
-            tmp.as_file().sync_all()?;
+            if !crate::fsutil::is_sync_disabled() {
+                tmp.as_file().sync_all()?;
+            }
             // Rename is atomic; a second handle putting the same
             // content races harmlessly because both write identical
             // bytes to the same final name.
             tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
-            crate::fsutil::sync_parent_dir(&path)?;
+            if !crate::fsutil::is_sync_disabled() {
+                crate::fsutil::sync_parent_dir(&path)?;
+            }
             // Temp files carry restrictive modes; normalize the blob
             // to plain 0644 (ticket 05). CoW clones then inherit
             // normal writable permissions, so the placement path needs

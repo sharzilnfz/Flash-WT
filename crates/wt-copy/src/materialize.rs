@@ -18,7 +18,9 @@
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// A strategy for placing stored content at one destination path.
 ///
@@ -225,6 +227,36 @@ pub struct Materializer {
     strategy: &'static str,
 }
 
+/// One file-shaped placement inside a batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchItem {
+    /// Existing store blob to place from.
+    pub src: PathBuf,
+    /// Not-yet-existing destination path.
+    pub dest: PathBuf,
+    /// Optional target permission mode applied after placement.
+    pub mode: Option<u32>,
+    /// File size in bytes used for receipt accounting.
+    pub size: u64,
+}
+
+/// Counters for one [`Materializer::materialize_batch`] run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BatchReceipt {
+    /// Items submitted.
+    pub total: usize,
+    /// Items placed without error.
+    pub placed: usize,
+    /// Placements still sharing storage (CoW clone or shared hardlink inode).
+    pub shared_cow: usize,
+    /// Placements that replaced a shared inode with a private copy for mode repair.
+    pub repaired: usize,
+    /// Bytes still shared via CoW or links.
+    pub bytes_shared: u64,
+    /// Bytes physically copied.
+    pub bytes_copied: u64,
+}
+
 impl Materializer {
     /// Create a materializer for the given source and destination paths, automatically
     /// inspecting device IDs and filesystem capabilities.
@@ -324,6 +356,100 @@ impl Materializer {
             strategy: self.strategy,
             is_shared_cow,
             is_mode_repaired,
+        })
+    }
+
+    /// Place every `items` entry in parallel and sum per-file sizes into one receipt.
+    ///
+    /// Owns the thread pool so callers never manage threads: worker count is
+    /// `available_parallelism` clamped to 4..=8 (at least one worker, none for
+    /// empty input), dispatch is an [`AtomicUsize`] index, and the first
+    /// error wins via a locked slot that stops further dispatch. Each item
+    /// keeps [`Self::materialize_file`] semantics exactly.
+    pub fn materialize_batch(&self, items: &[BatchItem]) -> io::Result<BatchReceipt> {
+        if items.is_empty() {
+            return Ok(BatchReceipt::default());
+        }
+        let num_cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let num_workers = num_cpus.clamp(4, 8).min(items.len()).max(1);
+
+        let next_idx = AtomicUsize::new(0);
+        let placed = AtomicUsize::new(0);
+        let shared = AtomicUsize::new(0);
+        let repaired = AtomicUsize::new(0);
+        let bytes_shared = AtomicU64::new(0);
+        let bytes_copied = AtomicU64::new(0);
+        let err_slot: Mutex<Option<io::Error>> = Mutex::new(None);
+
+        std::thread::scope(|s| {
+            for _ in 0..num_workers {
+                s.spawn(|| {
+                    let mut local_placed = 0usize;
+                    let mut local_shared = 0usize;
+                    let mut local_repaired = 0usize;
+                    let mut local_bytes_shared = 0u64;
+                    let mut local_bytes_copied = 0u64;
+                    loop {
+                        if err_slot
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .is_some()
+                        {
+                            break;
+                        }
+                        let idx =
+                            next_idx.fetch_add(1, Ordering::Relaxed);
+                        if idx >= items.len() {
+                            break;
+                        }
+                        let item = &items[idx];
+                        let outcome = match self
+                            .materialize_file(&item.src, &item.dest, item.mode)
+                        {
+                            Ok(outcome) => outcome,
+                            Err(e) => {
+                                let mut slot = err_slot
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner());
+                                if slot.is_none() {
+                                    *slot = Some(e);
+                                }
+                                break;
+                            }
+                        };
+                        local_placed += 1;
+                        if outcome.is_shared_cow {
+                            local_shared += 1;
+                            local_bytes_shared += item.size;
+                        } else {
+                            local_bytes_copied += item.size;
+                        }
+                        if outcome.is_mode_repaired {
+                            local_repaired += 1;
+                        }
+                    }
+                    placed.fetch_add(local_placed, Ordering::Relaxed);
+                    shared.fetch_add(local_shared, Ordering::Relaxed);
+                    repaired.fetch_add(local_repaired, Ordering::Relaxed);
+                    bytes_shared.fetch_add(local_bytes_shared, Ordering::Relaxed);
+                    bytes_copied.fetch_add(local_bytes_copied, Ordering::Relaxed);
+                });
+            }
+        });
+
+        if let Some(err) = err_slot.into_inner().unwrap_or_default() {
+            return Err(err);
+        }
+
+        Ok(BatchReceipt {
+            total: items.len(),
+            placed: placed.into_inner(),
+            shared_cow: shared.into_inner(),
+            repaired: repaired.into_inner(),
+            bytes_shared: bytes_shared.into_inner(),
+            bytes_copied: bytes_copied.into_inner(),
         })
     }
 

@@ -11,9 +11,9 @@
 
 use std::path::Path;
 
+use crate::CopyBackend;
 use crate::deep_copy::DeepCopyBackend;
 use crate::hardlink::HardlinkBackend;
-use crate::CopyBackend;
 
 #[cfg(target_os = "macos")]
 use crate::clonefile::ClonefileBackend;

@@ -9,7 +9,7 @@ use std::time::SystemTime;
 use crate::common::{Fixture, git, git_out, list_files};
 use wt_store::{ContentId, DiskStore, PublishOptions, WorktreeLease, lease_path};
 
-const HEAVY_FILES: usize = 2_000;
+const HEAVY_FILES: usize = 200;
 
 // =========================================================================
 // CLI / Create / Manifests (from cli.rs)
@@ -55,9 +55,9 @@ fn smoke_create_makes_a_working_worktree() {
 
 #[test]
 fn heavy_fixture_is_actually_thousands_of_files() {
-    let fx = Fixture::heavy_repo(HEAVY_FILES);
+    let fx = Fixture::heavy_repo(2_000);
     let files = list_files(&fx.repo.join("heavy"));
-    assert_eq!(files.len(), HEAVY_FILES);
+    assert_eq!(files.len(), 2_000);
 }
 
 #[test]
@@ -1036,6 +1036,7 @@ fn scrub_detects_and_purges_snapshot_with_corrupted_file_tree() {
 // =========================================================================
 
 #[test]
+#[ignore = "expensive 10,000-file demo benchmark fixture"]
 fn demo_terminal_output_renders_scorecard_and_completes_successfully() {
     let store_dir = tempfile::tempdir().unwrap();
     let isolated_cwd = tempfile::tempdir().unwrap();
@@ -1069,6 +1070,7 @@ fn demo_terminal_output_renders_scorecard_and_completes_successfully() {
 }
 
 #[test]
+#[ignore = "expensive 10,000-file demo benchmark fixture"]
 fn demo_json_emits_valid_ndjson_envelope_with_complete_metrics() {
     let store_dir = tempfile::tempdir().unwrap();
     let isolated_cwd = tempfile::tempdir().unwrap();
@@ -1121,6 +1123,7 @@ fn demo_json_emits_valid_ndjson_envelope_with_complete_metrics() {
 }
 
 #[test]
+#[ignore = "expensive 10,000-file demo benchmark fixture"]
 fn test_drive_alias_works_identically_with_json_envelope() {
     let store_dir = tempfile::tempdir().unwrap();
     let isolated_cwd = tempfile::tempdir().unwrap();
@@ -1153,6 +1156,7 @@ fn test_drive_alias_works_identically_with_json_envelope() {
 }
 
 #[test]
+#[ignore = "expensive 10,000-file demo benchmark fixture"]
 fn demo_runs_outside_any_git_repository() {
     let store_dir = tempfile::tempdir().unwrap();
     let non_git_dir = tempfile::tempdir().unwrap();

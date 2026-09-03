@@ -32,10 +32,12 @@ use std::time::{Duration, UNIX_EPOCH};
 
 #[cfg(target_os = "macos")]
 use crate::bulkwalk;
+use crate::snapshot::{EntryKind, Manifest, SnapshotEntry};
 use crate::validation::{Entry, ValidationCache};
 use crate::{ContentId, DiskStore, Error, Result};
 
 /// Everything one ingested tree contributed to the store.
+#[derive(Debug)]
 pub struct Ingested {
     /// Source-relative directory paths to recreate even when empty.
     pub dirs: Vec<String>,
@@ -57,6 +59,102 @@ pub struct Ingested {
     /// Recorded on every ingest; consumers restore it after placement,
     /// snapshot manifests consume it too.
     pub modes: BTreeMap<String, u32>,
+}
+
+impl Ingested {
+    /// Canonical snapshot view of this ingest, relative to `heavy_rel`.
+    ///
+    /// Single source of truth for `Ingested` -> `Manifest`: directory
+    /// modes come from `dir_modes` (not a fixed `0o755`), file modes
+    /// must be present (no silent `0o644` fallback), sizes must be
+    /// present, and `heavy_rel` itself is skipped as the implicit
+    /// snapshot root. Total size sums unique blob sizes from
+    /// `file_sizes`, matching the historical projection computation;
+    /// the publish path still recomputes via blob stat.
+    pub fn to_snapshot_manifest(
+        &self,
+        heavy_rel: &str,
+        lockfile_hash: Option<ContentId>,
+    ) -> std::result::Result<Manifest, String> {
+        manifest_from_parts(
+            &self.dirs,
+            &self.dir_modes,
+            &self.files,
+            &self.file_sizes,
+            &self.symlinks,
+            &self.modes,
+            heavy_rel,
+            lockfile_hash,
+        )
+    }
+
+    /// Owned form of [`Self::to_snapshot_manifest`].
+    pub fn into_snapshot_manifest(
+        self,
+        heavy_rel: &str,
+        lockfile_hash: Option<ContentId>,
+    ) -> std::result::Result<Manifest, String> {
+        self.to_snapshot_manifest(heavy_rel, lockfile_hash)
+    }
+}
+
+/// Build a snapshot manifest from borrowed ingest parts without
+/// cloning the maps. Used by `Ingested::to_snapshot_manifest` and by
+/// the snapshot projection bridge so the conversion lives in exactly
+/// one place.
+#[allow(clippy::too_many_arguments)]
+pub fn manifest_from_parts(
+    dirs: &[String],
+    dir_modes: &BTreeMap<String, u32>,
+    files: &BTreeMap<String, ContentId>,
+    file_sizes: &BTreeMap<String, u64>,
+    symlinks: &BTreeMap<String, String>,
+    modes: &BTreeMap<String, u32>,
+    heavy_rel: &str,
+    lockfile_hash: Option<ContentId>,
+) -> std::result::Result<Manifest, String> {
+    let prefix = format!("{heavy_rel}/");
+    let strip = |path: &str| -> std::result::Result<String, String> {
+        path.strip_prefix(&prefix)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("ingested path {path:?} lies outside {heavy_rel:?}"))
+    };
+    let mut entries = Vec::new();
+    for dir in dirs {
+        if dir == heavy_rel {
+            continue;
+        }
+        let rel = strip(dir)?;
+        let raw = dir_modes.get(dir).copied().unwrap_or(0o755) & 0o7777;
+        entries.push(SnapshotEntry {
+            rel,
+            kind: EntryKind::Dir,
+            mode: raw,
+            blob: None,
+            target: None,
+        });
+    }
+    for (path, id) in files {
+        let rel = strip(path)?;
+        let mode = modes.get(path).copied().ok_or_else(|| {
+            format!("ingested file {path:?} lacks a recorded mode (files/modes invariant)")
+        })?;
+        file_sizes.get(path).ok_or_else(|| {
+            format!("ingested file {path:?} lacks a recorded size (files/file_sizes invariant)")
+        })?;
+        entries.push(SnapshotEntry::file(rel, *id, mode));
+    }
+    for (path, target) in symlinks {
+        entries.push(SnapshotEntry::symlink(strip(path)?, target));
+    }
+    let mut unique_blobs = BTreeMap::new();
+    for (rel, id) in files {
+        if let Some(&size) = file_sizes.get(rel) {
+            unique_blobs.entry(*id).or_insert(size);
+        }
+    }
+    let total_size: u64 = unique_blobs.values().sum();
+    Manifest::new_with_lockfile_and_size(entries, lockfile_hash, total_size)
 }
 
 /// Options for [`DiskStore::ingest_tree`].

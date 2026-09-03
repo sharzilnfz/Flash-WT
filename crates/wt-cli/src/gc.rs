@@ -15,20 +15,20 @@
 //!   and in `-no-refs` mode create/remove no longer touch them at
 //!   all. See ADR-0004 for why the cutover is explicit.
 //!
-//! Removal reads the hydration ledger (`wt-hydrated.tsv`, written by
-//! ticket 05 into the worktree's git dir) to learn which blobs the
-//! worktree referenced, releases one reference per distinct blob,
-//! then hands the directory to `git worktree remove`. Releasing
-//! happens before removal because `git worktree remove` deletes the
-//! git dir — the ledger along with it. A release that hits zero is
-//! tolerated as "already released" so an interrupted remove can
+//! Removal parses the hydration ledger (`wt-hydrated.tsv`, written by
+//! ticket 05 into the worktree's git dir) while the git dir still exists,
+//! holds blob ids in memory, releases one reference per distinct blob and
+//! removes the store mirror and ledger, then hands the directory to
+//! `git worktree remove`. Parsing before removal matters because git removal
+//! deletes the git dir with the ledger along with it. A release that hits
+//! zero is tolerated as "already released" so an interrupted remove can
 //! simply be rerun.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
-use wt_store::{GcMode, StoreReclaimer, SweepPolicy, WorkspaceCleaner};
+use wt_store::{GcMode, PendingCleanup, StoreReclaimer, SweepPolicy};
 
 use crate::config::RunConfig;
 use crate::envelope::{Diagnostic, MigrateData, RemoveData, SweepData};
@@ -156,9 +156,10 @@ pub fn remove(
         diagnostics.push(diag);
     }
 
-    let cleaner = GitWorkspaceCleaner;
-    let mut reclaimer = StoreReclaimer::new(&mut store, &cleaner);
+    let mut reclaimer = StoreReclaimer::new(&mut store);
     let receipt = reclaimer.retire_worktree(&dest, &git_dir)?;
+
+    remove_worktree_files(&engine, &dest)?;
 
     if !cfg.json {
         println!(
@@ -199,113 +200,53 @@ fn dir_size(path: &Path) -> u64 {
     total
 }
 
-/// Git-based workspace cleaner adapter for `wt-store::StoreReclaimer`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct GitWorkspaceCleaner;
-
-impl WorkspaceCleaner for GitWorkspaceCleaner {
-    fn worktree_size(&self, path: &Path) -> u64 {
-        dir_size(path)
+/// CLI-owned git removal for `remove`: `git worktree remove --force`,
+/// then `rm -rf` fallback. Git errors are ignored when the directory is
+/// gone; a surviving directory is an error.
+fn remove_worktree_files(engine: &WorkspaceEngine, worktree: &Path) -> Result<()> {
+    let _ = engine.remove_worktree_force(worktree);
+    if worktree.exists() {
+        fs::remove_dir_all(worktree).map_err(|e| Error::Store(e.to_string()))?;
     }
-
-    fn clean_workspace(
-        &self,
-        worktree: &Path,
-        gitdir: &Path,
-        branch_name: &str,
-    ) -> std::io::Result<()> {
-        let repo_root = repo_root_from_gitdir(gitdir);
-        if let Some(ref r_root) = repo_root {
-            let engine = WorkspaceEngine::from_root(r_root.clone());
-            if worktree.exists() {
-                if let Err(e) =
-                    engine.git(&["worktree", "remove", "--force", &worktree.to_string_lossy()])
-                {
-                    if worktree.exists() {
-                        return Err(std::io::Error::other(e.to_string()));
-                    }
-                }
-            }
-            let _ = engine.git(&["worktree", "prune"]);
-            let _ = engine.delete_branch(branch_name);
-        }
-
-        if worktree.exists() {
-            fs::remove_dir_all(worktree)?;
-        }
-
-        if gitdir.exists() {
-            fs::remove_dir_all(gitdir)?;
-        }
-
-        if worktree.exists() || gitdir.exists() {
-            return Err(std::io::Error::other(format!(
-                "worktree {} still exists after cleanup",
-                worktree.display()
-            )));
-        }
-
-        Ok(())
+    if worktree.exists() {
+        return Err(Error::Store(format!(
+            "worktree {} still exists after removal",
+            worktree.display()
+        )));
     }
+    let _ = engine.git(&["worktree", "prune"]);
+    Ok(())
+}
 
-    fn remove_worktree(&self, worktree: &Path) -> std::io::Result<()> {
-        let dot_git = worktree.join(".git");
-        let gitdir = if dot_git.is_file() {
-            if let Ok(content) = fs::read_to_string(&dot_git) {
-                content
-                    .strip_prefix("gitdir: ")
-                    .map(|s| PathBuf::from(s.trim()))
-            } else {
-                None
-            }
-        } else if dot_git.is_dir() {
-            Some(dot_git)
-        } else {
-            None
-        };
-
-        let mut git_err: Option<std::io::Error> = None;
-        if let Some(gitdir) = gitdir {
-            if let Some(root) = repo_root_from_gitdir(&gitdir) {
-                let engine = WorkspaceEngine::from_root(root);
-                if let Err(e) = engine.remove_worktree_force(worktree) {
-                    git_err = Some(std::io::Error::other(e.to_string()));
-                }
-            }
-        } else if let Some(parent) = worktree.parent() {
-            let engine = WorkspaceEngine::from_root(parent.to_path_buf());
-            if let Err(e) = engine.remove_worktree_force(worktree) {
-                git_err = Some(std::io::Error::other(e.to_string()));
-            }
+/// CLI-owned cleanup for one reaped lease. Best-effort: sweep already
+/// unclaimed the store metadata, so git and filesystem failures are
+/// swallowed and the next sweep retries nothing.
+fn cleanup_pending(pending: &PendingCleanup) {
+    if let Some(root) = repo_root_from_gitdir(&pending.gitdir) {
+        let engine = WorkspaceEngine::from_root(root);
+        if pending.worktree.exists() {
+            let _ = engine.git(&[
+                "worktree",
+                "remove",
+                "--force",
+                &pending.worktree.to_string_lossy(),
+            ]);
         }
-        if worktree.exists() {
-            fs::remove_dir_all(worktree)?;
-        }
-        if worktree.exists() {
-            if let Some(e) = git_err {
-                return Err(e);
-            }
-            return Err(std::io::Error::other(format!(
-                "worktree {} still exists after removal",
-                worktree.display()
-            )));
-        }
-        if let Some(e) = git_err {
-            // Git reported error but filesystem is gone — treat as success for GC path,
-            // but surface as error if caller cares about git tracking.
-            // For retire verification, existence check already passed, so return Ok.
-            // Keep err for future diagnostics; currently ignore to avoid spurious failure.
-            let _ = e;
-        }
-        Ok(())
+        let _ = engine.git(&["worktree", "prune"]);
+        let _ = engine.delete_branch(&pending.branch);
+    }
+    if pending.worktree.exists() {
+        let _ = fs::remove_dir_all(&pending.worktree);
+    }
+    if pending.gitdir.exists() {
+        let _ = fs::remove_dir_all(&pending.gitdir);
     }
 }
 
 pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<Diagnostic>)> {
     let mut store = open_store()?;
     let mode = store.gc_mode();
-    let cleaner = GitWorkspaceCleaner;
-    let mut reclaimer = StoreReclaimer::new(&mut store, &cleaner);
+    let mut reclaimer = StoreReclaimer::new(&mut store);
 
     let policy = match mode {
         GcMode::Legacy => {
@@ -331,7 +272,21 @@ pub fn sweep(age: Option<Duration>, cfg: &RunConfig) -> Result<(SweepData, Vec<D
         }
     };
 
-    let summary = reclaimer.sweep(&policy)?;
+    let (leases_examined, leases_reclaimed, pending) = reclaimer.sweep_leases(&policy)?;
+
+    let mut lease_bytes_reclaimed = 0u64;
+    for item in &pending {
+        if item.worktree.exists() {
+            lease_bytes_reclaimed += dir_size(&item.worktree);
+        }
+    }
+    for item in &pending {
+        cleanup_pending(item);
+    }
+    let mut summary = reclaimer.sweep_objects(&policy)?;
+    summary.leases_examined = leases_examined;
+    summary.leases_reclaimed = leases_reclaimed;
+    summary.lease_bytes_reclaimed = lease_bytes_reclaimed;
 
     match summary.mode {
         GcMode::Legacy => {

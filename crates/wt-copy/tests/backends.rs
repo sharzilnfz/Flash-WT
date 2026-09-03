@@ -16,8 +16,7 @@ use std::time::{Duration, Instant};
 
 use common::{TreeFixture, assert_trees_identical, list_files, unix_symlink};
 use wt_copy::{
-    BackendKind, CopyBackend, DeepCopyBackend, Error, SourcePolicy, candidates,
-    select_backend,
+    BackendKind, CopyBackend, DeepCopyBackend, Error, SourcePolicy, candidates, select_backend,
 };
 
 /// Backends that can actually operate on `dir` right now.

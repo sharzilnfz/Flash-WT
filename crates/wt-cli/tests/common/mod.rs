@@ -198,6 +198,7 @@ impl Fixture {
         Command::new(env!("CARGO_BIN_EXE_flashwt"))
             .args(args)
             .env("WT_STORE", self.store_path())
+            .env("WT_TEST_NO_SYNC", "1")
             .current_dir(&self.repo)
             .output()
             .expect("run wt binary")
@@ -208,6 +209,7 @@ impl Fixture {
         Command::new(env!("CARGO_BIN_EXE_flashwt"))
             .args(args)
             .env("WT_STORE", self.store_path())
+            .env("WT_TEST_NO_SYNC", "1")
             .current_dir(&self.repo)
             .output()
             .expect("run flashwt binary")
@@ -224,21 +226,18 @@ impl Fixture {
         Command::new(env!("CARGO_BIN_EXE_flashwt"))
             .args(args)
             .env("WT_STORE", store)
+            .env("WT_TEST_NO_SYNC", "1")
             .current_dir(&self.repo)
             .output()
             .expect("run wt binary")
     }
 
     /// [`Self::wt_with_store`] plus extra environment pairs.
-    pub fn wt_with_store_env(
-        &self,
-        args: &[&str],
-        store: &Path,
-        env: &[(&str, &str)],
-    ) -> Output {
+    pub fn wt_with_store_env(&self, args: &[&str], store: &Path, env: &[(&str, &str)]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_flashwt"))
             .args(args)
             .env("WT_STORE", store)
+            .env("WT_TEST_NO_SYNC", "1")
             .envs(env.iter().copied())
             .current_dir(&self.repo)
             .output()
@@ -250,6 +249,7 @@ impl Fixture {
         Command::new(env!("CARGO_BIN_EXE_flashwt"))
             .args(args)
             .env("WT_STORE", self.store_path())
+            .env("WT_TEST_NO_SYNC", "1")
             .envs(env.iter().copied())
             .current_dir(&self.repo)
             .output()
@@ -299,7 +299,8 @@ pub fn assert_hydrated_files(worktree: &Path, expected: usize) {
         .filter(|p| !p.components().any(|c| c.as_os_str() == ".git"))
         .count();
     assert_eq!(
-        count, expected,
+        count,
+        expected,
         "hydrated file count mismatch in {}",
         worktree.display()
     );

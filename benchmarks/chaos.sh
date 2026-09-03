@@ -15,7 +15,11 @@ REPO_ROOT="$(cd "$BENCH_DIR/.." && pwd)"
 . "$BENCH_DIR/eval_metrics.sh"
 
 run_chaos_test() {
-    local raw_bin=${1:-"$REPO_ROOT/target/release/wt"}
+    local default_bin="$REPO_ROOT/target/release/flashwt"
+    if [ ! -x "$default_bin" ] && [ -x "$REPO_ROOT/target/release/wt" ]; then
+        default_bin="$REPO_ROOT/target/release/wt"
+    fi
+    local raw_bin=${1:-"$default_bin"}
     local kills=${2:-3}
 
     [ -x "$raw_bin" ] || {

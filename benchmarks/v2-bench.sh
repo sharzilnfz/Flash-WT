@@ -78,12 +78,23 @@ if [ "$(uname -s)" != Darwin ]; then
     die "this harness measures macOS/APFS-only features; run it on a Mac"
 fi
 
-BIN=${WT_BIN:-$REPO_ROOT/target/release/wt}
+BIN=${WT_BIN:-}
+if [ -z "$BIN" ]; then
+    if [ -x "$REPO_ROOT/target/release/flashwt" ]; then
+        BIN="$REPO_ROOT/target/release/flashwt"
+    else
+        BIN="$REPO_ROOT/target/release/wt"
+    fi
+fi
 if [ ! -x "$BIN" ]; then
     echo "building release binary..."
     cargo build --release --quiet \
         --manifest-path "$REPO_ROOT/Cargo.toml" -p wt-cli
-    BIN="$REPO_ROOT/target/release/wt"
+    if [ -x "$REPO_ROOT/target/release/flashwt" ]; then
+        BIN="$REPO_ROOT/target/release/flashwt"
+    else
+        BIN="$REPO_ROOT/target/release/wt"
+    fi
 fi
 [ -x "$BIN" ] || die "binary not runnable at $BIN"
 

@@ -1,0 +1,24 @@
+# 06 - Validation cache alias fix
+
+Status: ready-for-agent
+
+## Problem
+
+The ingest validation cache trusts size plus mtime. A same size rewrite within one mtime tick reuses the old blob id and hydrates stale content.
+
+## Solution
+
+Mix inode plus ctime into the cache key. Rehash on hit when mtime is near now. Correctness before speed.
+
+## Acceptance
+
+- Fast rewrite fixture with identical size and mtime hydrates fresh content.
+- Normal warm path still skips hashing.
+
+## Verification
+
+- New regression test with forced mtime collision plus `cargo test -p wt-store --lib`.
+
+## Comments
+
+- The verified ledger needs no change. Store blobs are immutable and scrub covers bit rot.

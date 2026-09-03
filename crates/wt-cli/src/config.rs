@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn flag_parsing_recognizes_false_variants_and_empty() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // false variants
         for v in [
             "0", "false", "FALSE", "False", "no", "NO", "off", "OFF", "Off",
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn snapshots_false_disables() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set("WT_SNAPSHOTS", Some("false"));
         set("WT_SNAPSHOTS_V2", None);
         let cfg = RunConfig::from_env();

@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Architecture Review for wt (Instant Worktrees)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      .seam { stroke-dasharray: 4 4; }
+      .leak { stroke: #dc2626; }
+      .deep-card { background: linear-gradient(135deg, #0f172a, #1e293b); }
+      pre.mermaid {
+        background: transparent !important;
+        display: flex;
+        justify-content: center;
+      }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans antialiased selection:bg-stone-200">
+    <main class="max-w-5xl mx-auto px-6 py-12 space-y-12">
+      <!-- Header -->
+      <header class="border-b border-stone-200 pb-8">
+        <div class="flex flex-col sm:flex-row sm:items-baseline justify-between gap-4">
+          <div>
+            <div class="text-xs font-mono uppercase tracking-wider text-stone-500 mb-1">Architecture Review &middot; Deepening Opportunities</div>
+            <h1 class="text-3xl font-bold tracking-tight text-slate-900 font-serif">wt (Instant Worktrees)</h1>
+          </div>
+          <div class="text-xs font-mono text-stone-500">2026-09-03</div>
+        </div>
+        <div class="mt-6 flex flex-wrap items-center gap-6 text-xs text-stone-600 border-t border-stone-200/60 pt-4">
+          <div class="flex items-center gap-2">
+            <span class="inline-block w-3.5 h-3.5 border border-slate-700 bg-white rounded-sm"></span>
+            <span>Module</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="inline-block w-4 border-t-2 border-dashed border-slate-500"></span>
+            <span>Seam</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="inline-block w-4 border-t-2 border-red-600"></span>
+            <span class="text-red-700 font-medium">Leakage</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="inline-block w-3.5 h-3.5 bg-slate-900 rounded-sm"></span>
+            <span>Deep Module</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- Candidates -->
+      <section id="candidates" class="space-y-12">
+
+        <!-- Candidate 1 -->
+        <article id="candidate-1" class="rounded-xl border border-stone-200 bg-white p-6 sm:p-8 shadow-sm space-y-6">
+          <div class="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 pb-4">
+            <div class="space-y-1">
+              <span class="text-xs font-mono uppercase tracking-wider text-emerald-700 font-semibold">Candidate 01</span>
+              <h2 class="text-xl font-bold tracking-tight text-slate-900">Collapse the Cross-Crate Hydration Pipeline</h2>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 border border-emerald-200">Strong</span>
+              <span class="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-mono text-stone-600 border border-stone-200">in-process</span>
+            </div>
+          </div>
+
+          <div class="text-xs font-mono text-stone-600 bg-stone-50 p-3 rounded-md border border-stone-200/80 space-y-1">
+            <div>crates/wt-cli/src/hydrate.rs</div>
+            <div>crates/wt-store/src/hydrate.rs</div>
+            <div>crates/wt-store/src/ingest.rs</div>
+            <div>crates/wt-store/src/snapshot/projection.rs</div>
+          </div>
+
+          <!-- Side-by-Side Diagram -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-red-100 bg-red-50/20 p-4 flex flex-col justify-between">
+              <div class="text-xs font-mono uppercase tracking-wider text-red-700 font-bold mb-3">Before: Shallow CLI Choreographer</div>
+              <pre class="mermaid">
+                flowchart TD
+                  subgraph CLI[wt-cli]
+                    HE[HydrationEngine]
+                  end
+                  subgraph Store[wt-store]
+                    FL[find_lockfile]
+                    TL[try_lockfile_hit]
+                    IT[ingest_tree]
+                    HY[DiskStore::hydrate]
+                    SH[wt-hydrated.tsv]
+                    MR[publish_mirror]
+                  end
+                  HE -->|inspects| FL
+                  HE -.->|drives| TL
+                  HE -.->|writes| SH
+                  HE -.->|publishes| MR
+                  HE -->|extracts 8 maps| IT
+                  HE -->|passes 19 args| HY
+                  classDef leak stroke:#dc2626,stroke-width:2px;
+                  class TL,SH,MR leak;
+                  linkStyle 1,2,3 stroke:#dc2626,stroke-width:2px;
+              </pre>
+              <div class="mt-3 text-[11px] font-mono text-red-700 text-center">Interface is nearly as complex as implementation</div>
+            </div>
+
+            <div class="rounded-lg border border-emerald-200 bg-emerald-50/20 p-4 flex flex-col justify-between">
+              <div class="text-xs font-mono uppercase tracking-wider text-emerald-800 font-bold mb-3">After: Deep Storage Hydration Module</div>
+              <pre class="mermaid">
+                flowchart TD
+                  subgraph CLI[wt-cli]
+                    HE[HydrationEngine]
+                  end
+                  subgraph Store[wt-store: Deep Module]
+                    DH[DiskStore::hydrate]
+                    subgraph HiddenInternals[Encapsulated Implementation]
+                      LP[Lockfile & Hit]
+                      IG[Tree Ingestion]
+                      PR[Snapshot Projection]
+                      SC[Ledger Sidecar & Mirror]
+                    end
+                  end
+                  HE -->|1 compact request| DH
+                  DH --> LP
+                  DH --> IG
+                  DH --> PR
+                  DH --> SC
+                  classDef deep stroke:#047857,stroke-width:2px;
+                  class DH deep;
+              </pre>
+              <div class="mt-3 text-[11px] font-mono text-emerald-800 text-center">Small interface hides projection, ingest, and ledger</div>
+            </div>
+          </div>
+
+          <div class="space-y-3 pt-2">
+            <div>
+              <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Problem</div>
+              <p class="text-sm text-slate-700 mt-0.5">The hydration seam between <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">wt-cli</code> and <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">wt-store</code> is shallow, leaking lockfile heuristics, sidecar ledger writing, mirror publishing, and 19 unpacked parameters across crate borders.</p>
+            </div>
+            <div>
+              <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Solution</div>
+              <p class="text-sm text-slate-700 mt-0.5">Deepen <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">DiskStore::hydrate</code> to encapsulate the entire projection lifecycle behind one small interface accepting source path, destination path, and hydration options.</p>
+            </div>
+            <div>
+              <div class="text-xs font-mono uppercase tracking-wider text-stone-500 mb-1">Wins</div>
+              <ul class="grid grid-cols-1 sm:grid-cols-2 gap-1 text-xs text-slate-700">
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> leverage: interface shrinks by 15 parameters</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> locality: storage ledger stays in store</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> locality: mirror publishing stays in store</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> tests hit one complete seam</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> implementation absorbs 180 lines in cli</li>
+              </ul>
+            </div>
+          </div>
+        </article>
+
+        <!-- Candidate 2 -->
+        <article id="candidate-2" class="rounded-xl border border-stone-200 bg-white p-6 sm:p-8 shadow-sm space-y-6">
+          <div class="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 pb-4">
+            <div class="space-y-1">
+              <span class="text-xs font-mono uppercase tracking-wider text-emerald-700 font-semibold">Candidate 02</span>
+              <h2 class="text-xl font-bold tracking-tight text-slate-900">Consolidate Worktree Retirement and Invert the Cleaner Seam</h2>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 border border-emerald-200">Strong</span>
+              <span class="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-mono text-stone-600 border border-stone-200">in-process</span>
+            </div>
+          </div>
+
+          <div class="text-xs font-mono text-stone-600 bg-stone-50 p-3 rounded-md border border-stone-200/80 space-y-1">
+            <div>crates/wt-cli/src/workspace.rs</div>
+            <div>crates/wt-cli/src/gc.rs</div>
+            <div>crates/wt-store/src/gc.rs</div>
+            <div>crates/wt-cli/src/commands/clean.rs</div>
+            <div>crates/wt-cli/src/commands/scratch.rs</div>
+          </div>
+
+          <!-- Side-by-Side Diagram -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-red-100 bg-red-50/20 p-4 flex flex-col justify-between">
+              <div class="text-xs font-mono uppercase tracking-wider text-red-700 font-bold mb-3">Before: Circular Callback & Split Cleanup</div>
+              <pre class="mermaid">
+                flowchart TD
+                  subgraph CLI[wt-cli]
+                    CMD[clean / scratch / remove]
+                    GWC[GitWorkspaceCleaner adapter]
+                    WE[WorkspaceEngine]
+                  end
+                  subgraph Store[wt-store]
+                    SR[StoreReclaimer]
+                    WC[[trait WorkspaceCleaner]]
+                  end
+                  CMD -->|calls| SR
+                  SR -.->|calls back across seam| WC
+                  WC --> GWC
+                  GWC --> WE
+                  CMD -.->|diverges| WE
+                  classDef leak stroke:#dc2626,stroke-width:2px;
+                  class WC,GWC leak;
+                  linkStyle 1 stroke:#dc2626,stroke-width:2px;
+              </pre>
+              <div class="mt-3 text-[11px] font-mono text-red-700 text-center">Hypothetical trait with 1 real adapter creates circular dependency</div>
+            </div>
+
+            <div class="rounded-lg border border-emerald-200 bg-emerald-50/20 p-4 flex flex-col justify-between">
+              <div class="text-xs font-mono uppercase tracking-wider text-emerald-800 font-bold mb-3">After: Unidirectional Retirement Seam</div>
+              <pre class="mermaid">
+                flowchart TD
+                  subgraph CLI[wt-cli]
+                    CMD[clean / scratch / remove]
+                    WE[WorkspaceEngine: Deep Module]
+                  end
+                  subgraph Store[wt-store]
+                    DS[DiskStore::retire_worktree_refs]
+                  end
+                  CMD -->|retires worktree| WE
+                  WE -->|unclaims refs & mirror| DS
+                  WE -->|git worktree remove & prune| WE
+                  WE -->|branch deletion & fs sweep| WE
+                  classDef deep stroke:#047857,stroke-width:2px;
+                  class WE deep;
+              </pre>
+              <div class="mt-3 text-[11px] font-mono text-emerald-800 text-center">WorkspaceEngine owns git lifecycle; store owns metadata</div>
+            </div>
+          </div>
+
+          <div class="space-y-3 pt-2">
+            <div>
+              <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Problem</div>
+              <p class="text-sm text-slate-700 mt-0.5">The worktree retirement seam is inverted: <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">StoreReclaimer</code> deletes git worktrees via a hypothetical one-adapter trait (<code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">WorkspaceCleaner</code>) calling back into <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">wt-cli</code>, while four commands hand-roll divergent removal sequences.</p>
+            </div>
+            <div>
+              <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Solution</div>
+              <p class="text-sm text-slate-700 mt-0.5">Deepen <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">WorkspaceEngine</code> to own the full worktree retirement and rollback lifecycle, calling the store across a clean seam only to unclaim references and mirrors.</p>
+            </div>
+            <div>
+              <div class="text-xs font-mono uppercase tracking-wider text-stone-500 mb-1">Wins</div>
+              <ul class="grid grid-cols-1 sm:grid-cols-2 gap-1 text-xs text-slate-700">
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> delete hypothetical trait with one adapter</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> locality: git mechanics concentrate in workspace</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> leverage: one retirement interface for all</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> eliminates circular cross-crate call cycle</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> rollback and cleanup share implementation</li>
+              </ul>
+            </div>
+          </div>
+        </article>
+
+        <!-- Candidate 3 -->
+        <article id="candidate-3" class="rounded-xl border border-stone-200 bg-white p-6 sm:p-8 shadow-sm space-y-6">
+          <div class="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 pb-4">
+            <div class="space-y-1">
+              <span class="text-xs font-mono uppercase tracking-wider text-amber-700 font-semibold">Candidate 03</span>
+              <h2 class="text-xl font-bold tracking-tight text-slate-900">Encapsulate Batch Materialization in the Copy Module</h2>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 border border-amber-200">Worth exploring</span>
+              <span class="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-mono text-stone-600 border border-stone-200">in-process</span>
+            </div>
+          </div>
+
+          <div class="text-xs font-mono text-stone-600 bg-stone-50 p-3 rounded-md border border-stone-200/80 space-y-1">
+            <div>crates/wt-copy/src/materialize.rs</div>
+            <div>crates/wt-copy/src/engine.rs</div>
+            <div>crates/wt-store/src/hydrate.rs</div>
+          </div>
+
+          <!-- Side-by-Side Diagram (Cross-Section Pattern) -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-red-100 bg-red-50/20 p-4 flex flex-col justify-between">
+              <div class="text-xs font-mono uppercase tracking-wider text-red-700 font-bold mb-3">Before: Threading Leaks into Store</div>
+              <div class="space-y-2 py-2">
+                <div class="border-l-4 border-slate-700 bg-white p-2.5 rounded shadow-sm text-xs">
+                  <div class="font-bold text-slate-800">wt-store::hydrate</div>
+                  <div class="text-stone-500 text-[11px] mt-0.5">Spawns 4&ndash;8 worker threads via thread::scope</div>
+                </div>
+                <div class="border-l-4 border-red-500 bg-white p-2.5 rounded shadow-sm text-xs">
+                  <div class="font-bold text-red-700">Atomic Coordination Leaks</div>
+                  <div class="text-stone-500 text-[11px] mt-0.5">AtomicUsize index, Mutex&lt;Error&gt;, atomic byte counters</div>
+                </div>
+                <div class="border-l-4 border-slate-400 bg-white p-2.5 rounded shadow-sm text-xs">
+                  <div class="font-bold text-slate-700">wt-copy::Materializer</div>
+                  <div class="text-stone-500 text-[11px] mt-0.5">Shallow interface: materialize_file placed one by one</div>
+                </div>
+              </div>
+              <div class="mt-3 text-[11px] font-mono text-red-700 text-center">Store manages placement thread pooling</div>
+            </div>
+
+            <div class="rounded-lg border border-emerald-200 bg-emerald-50/20 p-4 flex flex-col justify-between">
+              <div class="text-xs font-mono uppercase tracking-wider text-emerald-800 font-bold mb-3">After: Deep Batch Materializer</div>
+              <div class="space-y-2 py-2">
+                <div class="border-l-4 border-slate-700 bg-white p-2.5 rounded shadow-sm text-xs">
+                  <div class="font-bold text-slate-800">wt-store::hydrate</div>
+                  <div class="text-stone-500 text-[11px] mt-0.5">Passes file batch slice across the seam</div>
+                </div>
+                <div class="border-l-4 border-emerald-600 bg-slate-900 text-white p-4 rounded shadow-sm text-xs">
+                  <div class="font-bold text-emerald-400 uppercase tracking-wider text-[11px]">wt-copy::Materializer (Deep Module)</div>
+                  <div class="text-slate-300 text-[11px] mt-1">Encapsulates thread pool, worker loops, atomic task distribution, mode normalization, and outcome aggregation behind one method</div>
+                </div>
+              </div>
+              <div class="mt-3 text-[11px] font-mono text-emerald-800 text-center">Concurrency and copy fallbacks concentrate in wt-copy</div>
+            </div>
+          </div>
+
+          <div class="space-y-3 pt-2">
+            <div>
+              <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Problem</div>
+              <p class="text-sm text-slate-700 mt-0.5"><code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">wt-copy::Materializer</code> provides only a single-file interface, forcing <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">wt-store</code> to hand-roll 70 lines of thread pool orchestration, worker scoping, atomic counters, and error slots.</p>
+            </div>
+            <div>
+              <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Solution</div>
+              <p class="text-sm text-slate-700 mt-0.5">Deepen <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">wt-copy::Materializer</code> with a batch materialization interface that encapsulates thread worker scaling, task distribution, and error aggregation.</p>
+            </div>
+            <div>
+              <div class="text-xs font-mono uppercase tracking-wider text-stone-500 mb-1">Wins</div>
+              <ul class="grid grid-cols-1 sm:grid-cols-2 gap-1 text-xs text-slate-700">
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> locality: thread pooling moves to copy</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> leverage: batch placement reusable across store</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> interface hides 70 lines of concurrency</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> concurrent placement testable in isolation</li>
+              </ul>
+            </div>
+          </div>
+        </article>
+
+        <!-- Candidate 4 -->
+        <article id="candidate-4" class="rounded-xl border border-stone-200 bg-white p-6 sm:p-8 shadow-sm space-y-6">
+          <div class="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 pb-4">
+            <div class="space-y-1">
+              <span class="text-xs font-mono uppercase tracking-wider text-amber-700 font-semibold">Candidate 04</span>
+              <h2 class="text-xl font-bold tracking-tight text-slate-900">Unify Tree Ingestion Output into Canonical Manifest</h2>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 border border-amber-200">Worth exploring</span>
+              <span class="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-mono text-stone-600 border border-stone-200">in-process</span>
+            </div>
+          </div>
+
+          <div class="text-xs font-mono text-stone-600 bg-stone-50 p-3 rounded-md border border-stone-200/80 space-y-1">
+            <div>crates/wt-store/src/ingest.rs</div>
+            <div>crates/wt-store/src/snapshot/manifest.rs</div>
+            <div>crates/wt-store/src/snapshot/publish.rs</div>
+          </div>
+
+          <!-- Side-by-Side Diagram (Mass Diagram Pattern) -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-red-100 bg-red-50/20 p-4 flex flex-col justify-between">
+              <div class="text-xs font-mono uppercase tracking-wider text-red-700 font-bold mb-3">Before: 6 Disjoint Parallel Collections</div>
+              <div class="grid grid-cols-2 gap-2 my-auto py-2">
+                <div class="p-2 border border-slate-300 rounded bg-white text-center font-mono text-[11px] text-slate-700">dirs: Vec&lt;String&gt;</div>
+                <div class="p-2 border border-slate-300 rounded bg-white text-center font-mono text-[11px] text-slate-700">dir_modes: BTreeMap</div>
+                <div class="p-2 border border-slate-300 rounded bg-white text-center font-mono text-[11px] text-slate-700">files: BTreeMap</div>
+                <div class="p-2 border border-slate-300 rounded bg-white text-center font-mono text-[11px] text-slate-700">file_sizes: BTreeMap</div>
+                <div class="p-2 border border-slate-300 rounded bg-white text-center font-mono text-[11px] text-slate-700">symlinks: BTreeMap</div>
+                <div class="p-2 border border-slate-300 rounded bg-white text-center font-mono text-[11px] text-slate-700">modes: BTreeMap</div>
+              </div>
+              <div class="mt-3 text-[11px] font-mono text-red-700 text-center">Primitive obsession: callers coordinate 6 parallel lookups</div>
+            </div>
+
+            <div class="rounded-lg border border-emerald-200 bg-emerald-50/20 p-4 flex flex-col justify-between">
+              <div class="text-xs font-mono uppercase tracking-wider text-emerald-800 font-bold mb-3">After: Single Structured Domain Manifest</div>
+              <div class="p-4 border-2 border-emerald-600 rounded bg-slate-900 text-white my-auto space-y-2">
+                <div class="font-mono text-xs text-emerald-400 font-bold">Manifest (Canonical Domain Model)</div>
+                <div class="text-[11px] text-slate-300 font-mono">entries: Vec&lt;SnapshotEntry&gt;</div>
+                <div class="text-[11px] text-stone-400 border-t border-slate-800 pt-1.5 flex items-center justify-between">
+                  <span>&bull; SnapshotEntry::File(blob, mode, size)</span>
+                  <span>&bull; Symlink(target)</span>
+                  <span>&bull; Dir(mode)</span>
+                </div>
+              </div>
+              <div class="mt-3 text-[11px] font-mono text-emerald-800 text-center">Illegal states unrepresentable; zero reconstruction cost</div>
+            </div>
+          </div>
+
+          <div class="space-y-3 pt-2">
+            <div>
+              <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Problem</div>
+              <p class="text-sm text-slate-700 mt-0.5">Tree ingestion decomposes directory metadata into six parallel disjoint maps and vectors in <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">Ingested</code>, forcing downstream modules to coordinate parallel lookups and reconstruct <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">SnapshotEntry</code> instances.</p>
+            </div>
+            <div>
+              <div class="text-xs font-mono uppercase tracking-wider text-stone-500">Solution</div>
+              <p class="text-sm text-slate-700 mt-0.5">Deepen the tree ingestion module to construct and return a canonical <code class="font-mono text-xs bg-stone-100 px-1 py-0.5 rounded">Manifest</code> directly, embedding normalized modes and content addresses in a single indexed domain model.</p>
+            </div>
+            <div>
+              <div class="text-xs font-mono uppercase tracking-wider text-stone-500 mb-1">Wins</div>
+              <ul class="grid grid-cols-1 sm:grid-cols-2 gap-1 text-xs text-slate-700">
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> domain model eliminates 6 parallel collections</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> illegal states become completely unrepresentable</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> locality: entry normalization happens at ingest</li>
+                <li class="flex items-center gap-1.5"><span class="text-emerald-600 font-bold">&check;</span> leverage: manifest feeds downstream projection directly</li>
+              </ul>
+            </div>
+          </div>
+        </article>
+
+      </section>
+
+      <!-- Top Recommendation Section -->
+      <section id="top-recommendation" class="rounded-xl border-2 border-emerald-600 bg-slate-900 text-white p-6 sm:p-8 shadow-md space-y-4">
+        <div class="flex items-center gap-2 text-emerald-400 text-xs font-mono uppercase tracking-wider font-semibold">
+          <span>&starf; Top Recommendation</span>
+        </div>
+        <div class="space-y-1">
+          <h3 class="text-2xl font-bold tracking-tight text-white font-serif">
+            <a href="#candidate-1" class="hover:text-emerald-300 transition-colors">Candidate 01: Collapse the Cross-Crate Hydration Pipeline</a>
+          </h3>
+          <p class="text-slate-300 text-sm leading-relaxed">
+            Hydration is the primary hot path of <code class="font-mono text-xs text-emerald-300 bg-slate-800 px-1 py-0.5 rounded">wt</code>. Collapsing the leaky choreography between <code class="font-mono text-xs text-slate-200 bg-slate-800 px-1 py-0.5 rounded">wt-cli</code> and <code class="font-mono text-xs text-slate-200 bg-slate-800 px-1 py-0.5 rounded">wt-store</code> eliminates over 15 pass-through parameters, stops the storage ledger sidecar and mirror publishing from leaking into command handlers, and concentrates all cache hits and projection mechanics behind a single testable storage interface.
+          </p>
+        </div>
+        <div class="pt-2">
+          <a href="#candidate-1" class="inline-flex items-center gap-1.5 text-xs font-mono font-medium text-emerald-400 hover:text-emerald-300 underline underline-offset-4">
+            <span>View Candidate 01 specification &rarr;</span>
+          </a>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

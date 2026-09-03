@@ -14,9 +14,7 @@ use crate::snapdiff::SnapshotDiff;
 use crate::snapindex::select_old_snapshot;
 use crate::snapshot::SnapshotBuildTiming;
 #[cfg(target_os = "macos")]
-use crate::snapshot::{
-    BuildError, Manifest, PublishOptions, PublishOutcome, SnapshotEntry, snapshot_tree_path,
-};
+use crate::snapshot::{BuildError, Manifest, PublishOptions, PublishOutcome, snapshot_tree_path};
 use crate::{ContentId, DiskStore};
 #[cfg(target_os = "macos")]
 use wt_copy::{ClonefileBackend, CopyBackend};
@@ -347,26 +345,21 @@ fn hydrate_impl(store: &mut DiskStore, req: &SnapshotProjectionRequest<'_>) -> S
     let v2 = req.snapshots_enabled && req.v2_enabled;
     let repo_key = req.repo_root.to_string_lossy().into_owned();
 
-    let entries =
-        match manifest_entries(req.dirs, req.files, req.symlinks, req.modes, req.heavy_rel) {
-            Ok(entries) => entries,
-            Err(msg) => return SnapshotOutcome::Failed(msg),
-        };
-    let mut unique_blobs = std::collections::BTreeMap::new();
-    for (rel, id) in req.files {
-        if let Some(&size) = req.file_sizes.get(rel) {
-            unique_blobs.entry(*id).or_insert(size);
+    let manifest = match crate::ingest::manifest_from_parts(
+        req.dirs,
+        req.dir_modes,
+        req.files,
+        req.file_sizes,
+        req.symlinks,
+        req.modes,
+        req.heavy_rel,
+        req.lockfile_hash.copied(),
+    ) {
+        Ok(m) => m,
+        Err(msg) => {
+            return SnapshotOutcome::Failed(format!("cannot build snapshot manifest: {msg}"));
         }
-    }
-    let total_size: u64 = unique_blobs.values().sum();
-    let manifest =
-        match Manifest::new_with_lockfile_and_size(entries, req.lockfile_hash.copied(), total_size)
-        {
-            Ok(m) => m,
-            Err(msg) => {
-                return SnapshotOutcome::Failed(format!("cannot build snapshot manifest: {msg}"));
-            }
-        };
+    };
 
     let dest_heavy = req.dest_root.join(req.heavy_rel);
 
@@ -535,7 +528,7 @@ fn try_incremental(
         .lockfile_hash(manifest.lockfile_hash)
         .base_snapshot(Some(old_hash))
         .paranoid(paranoid);
-    match store.publish_snapshot(manifest.entries.clone(), opts) {
+    match store.publish_manifest(manifest, opts) {
         Ok(receipt) => {
             let timing = receipt.timing;
             *build = Some(timing);
@@ -655,40 +648,6 @@ fn cleanup_partial(dest_heavy: &Path, restore_empty_dir: bool) -> Result<(), Clo
     Ok(())
 }
 
-/// Canonical manifest inputs from ingested content, relative to the
-/// heavy directory itself.
-#[cfg(target_os = "macos")]
-fn manifest_entries(
-    dirs: &[String],
-    files: &BTreeMap<String, ContentId>,
-    symlinks: &BTreeMap<String, String>,
-    modes: &BTreeMap<String, u32>,
-    heavy_rel: &str,
-) -> Result<Vec<SnapshotEntry>, String> {
-    let prefix = format!("{heavy_rel}/");
-    let strip = |path: &str| -> Result<String, String> {
-        path.strip_prefix(&prefix)
-            .map(str::to_owned)
-            .ok_or_else(|| format!("ingested path {path:?} lies outside {heavy_rel:?}"))
-    };
-    let mut out = Vec::new();
-    for dir in dirs {
-        if dir == heavy_rel {
-            continue;
-        }
-        out.push(SnapshotEntry::dir(strip(dir)?));
-    }
-    for (path, id) in files {
-        let rel = strip(path)?;
-        let mode = modes.get(path).copied().unwrap_or(0o644);
-        out.push(SnapshotEntry::file(rel, *id, mode));
-    }
-    for (path, target) in symlinks {
-        out.push(SnapshotEntry::symlink(strip(path)?, target));
-    }
-    Ok(out)
-}
-
 /// Make sure a valid published snapshot exists for `manifest`,
 /// building and publishing it when missing.
 #[cfg(target_os = "macos")]
@@ -705,7 +664,7 @@ fn ensure_published(
         let opts = PublishOptions::default()
             .lockfile_hash(manifest.lockfile_hash)
             .paranoid(paranoid);
-        match store.publish_snapshot(manifest.entries.clone(), opts) {
+        match store.publish_manifest(manifest, opts) {
             Ok(receipt) => {
                 *build = Some(receipt.timing);
                 return Ok(receipt.outcome);

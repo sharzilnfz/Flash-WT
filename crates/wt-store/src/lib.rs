@@ -25,10 +25,13 @@ pub mod mirror;
 pub use disk::{DiskStore, FsCapabilities, probe_fs};
 pub use fsutil::FlockGuard;
 pub use gc::{
-    GcMode, MarkReport, MarkSwept, NoopWorkspaceCleaner, RetirementReceipt, StoreReclaimer,
-    SweepPolicy, SweepSummary, WorkspaceCleaner,
+    GcMode, MarkReport, MarkSwept, PendingCleanup, RetirementReceipt, StoreReclaimer, SweepPolicy,
+    SweepSummary,
 };
-pub use hydrate::{HydrationReceipt, HydrationRequest};
+pub use hydrate::{
+    HydrateDest, HydrateOutcome, HydratePinned, HydratePolicy, HydrateReq, HydrateSrc, HydrateTree,
+    HydrationReceipt,
+};
 pub use ingest::{IngestOptions, Ingested};
 pub use lease::{
     DEFAULT_LEASE_TTL_SECS, ReadLease, WorktreeLease, current_process_start_time, is_lease_expired,

@@ -626,42 +626,18 @@ fn path_error(what: &str, e: io::Error) -> io::Error {
     io::Error::other(format!("cannot canonicalize {what}: {e}"))
 }
 
-/// Workspace cleaning adapter trait for external worktree and directory removal.
-pub trait WorkspaceCleaner: Send + Sync {
-    /// Compute the disk size of a worktree path in bytes.
-    fn worktree_size(&self, path: &Path) -> u64;
-    /// Clean up a worktree from git tracking and disk.
-    fn clean_workspace(&self, worktree: &Path, gitdir: &Path, branch_name: &str) -> io::Result<()>;
-    /// Remove a worktree directory from disk.
-    fn remove_worktree(&self, worktree: &Path) -> io::Result<()> {
-        if worktree.exists() {
-            fs::remove_dir_all(worktree)?;
-        }
-        Ok(())
-    }
-}
-
-/// Fallback / no-op workspace cleaner.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoopWorkspaceCleaner;
-
-impl WorkspaceCleaner for NoopWorkspaceCleaner {
-    fn worktree_size(&self, _path: &Path) -> u64 {
-        0
-    }
-
-    fn clean_workspace(
-        &self,
-        _worktree: &Path,
-        _gitdir: &Path,
-        _branch_name: &str,
-    ) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn remove_worktree(&self, _worktree: &Path) -> io::Result<()> {
-        Ok(())
-    }
+/// Filesystem work the CLI must perform after the store has unclaimed a lease.
+/// The store releases refs, removes mirrors and lease files, then hands these
+/// paths back for git and filesystem cleanup. The seam is unidirectional
+/// (CLI calls store, never the reverse).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingCleanup {
+    /// Worktree directory the CLI must remove.
+    pub worktree: PathBuf,
+    /// Administrative git dir the CLI must remove.
+    pub gitdir: PathBuf,
+    /// Branch the CLI must delete.
+    pub branch: String,
 }
 
 /// Garbage collection and lease sweep policy.
@@ -721,26 +697,35 @@ pub struct RetirementReceipt {
     pub mirror_removed: bool,
 }
 
-/// Unified store and lease reclamation engine.
+/// Unified store and lease reclamation engine. Owns metadata unclaim only:
+/// ref releases, mirror removal, lease-file removal. Filesystem and git
+/// lifecycle belongs to the CLI, which executes the returned cleanups.
 pub struct StoreReclaimer<'a> {
     store: &'a mut DiskStore,
-    cleaner: &'a dyn WorkspaceCleaner,
 }
 
 impl<'a> StoreReclaimer<'a> {
-    /// Construct a new `StoreReclaimer` on the given store with a workspace cleaner adapter.
-    pub fn new(store: &'a mut DiskStore, cleaner: &'a dyn WorkspaceCleaner) -> Self {
-        Self { store, cleaner }
+    /// Construct a new `StoreReclaimer` on the given store.
+    pub fn new(store: &'a mut DiskStore) -> Self {
+        Self { store }
     }
 
-    /// Sweep dead or expired worktree leases.
-    fn sweep_leases(&mut self, policy: &SweepPolicy) -> Result<(usize, usize, u64)> {
+    /// Sweep dead or expired worktree leases. Releases refs, removes mirrors
+    /// and lease files, and returns the filesystem cleanups the caller must
+    /// execute BEFORE calling [`Self::sweep_objects`]: the mark phase treats
+    /// a worktree gone from disk as dead, so the caller's deletions must land
+    /// between the two phases. `lease_bytes_reclaimed` is left to the caller,
+    /// which measures worktree sizes before running the cleanups.
+    pub fn sweep_leases(
+        &mut self,
+        policy: &SweepPolicy,
+    ) -> Result<(usize, usize, Vec<PendingCleanup>)> {
         let now = SystemTime::now();
         let cutoff = cutoff_of(now, policy.grace);
         let leases = crate::lease::read_all(self.store.root());
         let leases_examined = leases.len();
         let mut leases_reclaimed = 0usize;
-        let mut lease_bytes_reclaimed = 0u64;
+        let mut pending = Vec::new();
 
         for read in leases {
             let crate::lease::ReadLease {
@@ -757,13 +742,6 @@ impl<'a> StoreReclaimer<'a> {
                     let is_orphaned = !lease.worktree.exists();
 
                     if is_dead || is_expired || is_orphaned {
-                        let bytes = if lease.worktree.exists() {
-                            self.cleaner.worktree_size(&lease.worktree)
-                        } else {
-                            0
-                        };
-                        lease_bytes_reclaimed += bytes;
-
                         if lease.gitdir.exists() {
                             let ledger_path = lease.gitdir.join("wt-hydrated.tsv");
                             if ledger_path.exists() {
@@ -823,11 +801,11 @@ impl<'a> StoreReclaimer<'a> {
                             }
                         });
 
-                        let _ = self.cleaner.clean_workspace(
-                            &lease.worktree,
-                            &lease.gitdir,
-                            &branch_name,
-                        );
+                        pending.push(PendingCleanup {
+                            worktree: lease.worktree.clone(),
+                            gitdir: lease.gitdir.clone(),
+                            branch: branch_name,
+                        });
 
                         let _ = crate::lease::remove(self.store.root(), &id);
                         let _ = fs::remove_file(&path);
@@ -844,14 +822,14 @@ impl<'a> StoreReclaimer<'a> {
             }
         }
 
-        Ok((leases_examined, leases_reclaimed, lease_bytes_reclaimed))
+        Ok((leases_examined, leases_reclaimed, pending))
     }
 
-    /// Perform a full sweep across leases and store objects under the given policy.
-    pub fn sweep(&mut self, policy: &SweepPolicy) -> Result<SweepSummary> {
-        let (leases_examined, leases_reclaimed, lease_bytes_reclaimed) =
-            self.sweep_leases(policy)?;
-
+    /// Sweep store objects under the given policy. Runs AFTER the caller has
+    /// executed the [`Self::sweep_leases`] cleanups: the mark phase treats a
+    /// worktree gone from disk as dead. Lease fields are zeroed; the caller
+    /// fills them from its `sweep_leases` outcome plus measured byte sizes.
+    pub fn sweep_objects(&mut self, policy: &SweepPolicy) -> Result<SweepSummary> {
         let mode = self.store.gc_mode();
         match mode {
             GcMode::Legacy => {
@@ -865,9 +843,9 @@ impl<'a> StoreReclaimer<'a> {
                     snapshot_dirs_removed: 0,
                     snapshot_cap_evicted: 0,
                     deferred_by_grace: false,
-                    leases_examined,
-                    leases_reclaimed,
-                    lease_bytes_reclaimed,
+                    leases_examined: 0,
+                    leases_reclaimed: 0,
+                    lease_bytes_reclaimed: 0,
                     audit_disagreements,
                 })
             }
@@ -885,17 +863,19 @@ impl<'a> StoreReclaimer<'a> {
                     snapshot_dirs_removed: swept.snapshot_dirs_removed,
                     snapshot_cap_evicted: swept.snapshot_cap_evicted,
                     deferred_by_grace: swept.deferred_by_grace,
-                    leases_examined,
-                    leases_reclaimed,
-                    lease_bytes_reclaimed,
+                    leases_examined: 0,
+                    leases_reclaimed: 0,
+                    lease_bytes_reclaimed: 0,
                     audit_disagreements: Vec::new(),
                 })
             }
         }
     }
 
-    /// Retire a worktree: release its blob references from the sidecar ledger,
-    /// delete the store mirror, and remove the worktree directory.
+    /// Retire a worktree's store metadata: parse the sidecar ledger while the
+    /// git dir still exists, hold blob ids in memory, release refs (tolerant
+    /// of underflow), remove the ledger, and remove the store mirror. The
+    /// caller owns git and filesystem removal afterwards.
     pub fn retire_worktree(
         &mut self,
         worktree_path: &Path,
@@ -955,19 +935,6 @@ impl<'a> StoreReclaimer<'a> {
         let canon_worktree = fs::canonicalize(worktree_path).ok();
         let canon_gitdir = fs::canonicalize(gitdir).ok();
 
-        if worktree_path.exists() {
-            let _ = self.cleaner.remove_worktree(worktree_path);
-            if worktree_path.exists() {
-                fs::remove_dir_all(worktree_path).map_err(Error::Io)?;
-            }
-            if worktree_path.exists() {
-                return Err(Error::Io(std::io::Error::other(format!(
-                    "worktree {} still exists after removal",
-                    worktree_path.display()
-                ))));
-            }
-        }
-
         let mut references_released = 0;
         if !blob_ids.is_empty() && self.store.gc_mode() != GcMode::MarkSweepNoRefs {
             for cid in &blob_ids {
@@ -1025,17 +992,19 @@ mod tests {
         );
         crate::lease::publish(&store_root, &lease).expect("publish lease");
 
-        let cleaner = NoopWorkspaceCleaner;
-        let mut reclaimer = StoreReclaimer::new(&mut store, &cleaner);
+        let mut reclaimer = StoreReclaimer::new(&mut store);
         let policy = SweepPolicy {
             grace: Duration::ZERO,
             snapshot_cap: 64,
             max_snapshot_bytes: None,
         };
 
-        let summary = reclaimer.sweep(&policy).expect("sweep");
-        assert_eq!(summary.leases_examined, 1);
-        assert_eq!(summary.leases_reclaimed, 1);
+        let (leases_examined, leases_reclaimed, pending) =
+            reclaimer.sweep_leases(&policy).expect("sweep leases");
+        assert_eq!(leases_examined, 1);
+        assert_eq!(leases_reclaimed, 1);
+        assert_eq!(pending.len(), 1);
+        let summary = reclaimer.sweep_objects(&policy).expect("sweep objects");
         assert_eq!(summary.reclaimed_blobs, 1);
         assert_eq!(summary.examined_blobs, 1);
     }
@@ -1071,8 +1040,7 @@ mod tests {
             )
             .expect("publish mirror");
 
-        let cleaner = NoopWorkspaceCleaner;
-        let mut reclaimer = StoreReclaimer::new(&mut store, &cleaner);
+        let mut reclaimer = StoreReclaimer::new(&mut store);
         let receipt = reclaimer
             .retire_worktree(&worktree, &gitdir)
             .expect("retire worktree");
@@ -1081,5 +1049,9 @@ mod tests {
         assert!(receipt.mirror_removed);
         assert_eq!(store.ref_count(&blob_id).expect("ref count"), 0);
         assert!(!sidecar.exists());
+        assert!(
+            worktree.exists(),
+            "store retire leaves filesystem removal to the CLI"
+        );
     }
 }

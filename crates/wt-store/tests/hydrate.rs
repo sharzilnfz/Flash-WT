@@ -8,7 +8,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use tempfile::TempDir;
-use wt_store::{DiskStore, HydrationRequest};
+use wt_store::{DiskStore, HydrateDest, HydrateOutcome, HydratePinned, HydratePolicy, HydrateReq,
+    HydrateSrc, HydrateTree, Ingested};
 
 #[test]
 fn fallback_materialization_creates_files_dirs_and_metadata() {
@@ -51,29 +52,43 @@ fn fallback_materialization_creates_files_dirs_and_metadata() {
     modes.insert("bin/cli".to_string(), 0o755);
     modes.insert("nested/sub/package.json".to_string(), 0o644);
 
-    let req = HydrationRequest {
-        worktree_root: wt_dir.path(),
-        git_dir: git_dir.path(),
-        dirs: &dirs,
-        dir_modes: &dir_modes,
-        files: &files,
-        file_sizes: &file_sizes,
-        symlinks: &symlinks,
-        modes: &modes,
-        repo_root: repo_dir.path(),
-        pattern: "node_modules",
-        src_root: repo_dir.path(),
-        heavy_rel: "node_modules",
-        lockfile_hash: None,
-        base_branch: Some("main"),
-        base_commit: Some("abc1234"),
-        verify: true,
-        snapshots_enabled: false,
-        v2_enabled: false,
-        strategy_policy: wt_copy::StrategyPolicy::Default,
+    let ingested = Ingested {
+        dirs,
+        dir_modes,
+        files,
+        file_sizes,
+        symlinks,
+        modes,
+    };
+    let req = HydrateReq {
+        src: HydrateSrc::Tree(HydrateTree {
+            ingested: &ingested,
+            repo_root: repo_dir.path(),
+            pattern: "node_modules",
+            src_root: repo_dir.path(),
+            heavy_rel: "node_modules",
+            lockfile_hash: None,
+        }),
+        dest: HydrateDest {
+            worktree_root: wt_dir.path(),
+            git_dir: git_dir.path(),
+            base_branch: Some("main"),
+            base_commit: Some("abc1234"),
+        },
+        policy: HydratePolicy {
+            verify: true,
+            snapshots: false,
+            v2: false,
+            strategy: wt_copy::StrategyPolicy::Default,
+        },
     };
 
-    let receipt = store.hydrate(req).expect("hydrate");
+    let receipt = match store.hydrate(req).expect("hydrate") {
+        HydrateOutcome::Hydrated(r) => r,
+        HydrateOutcome::NeedIngest { .. } | HydrateOutcome::Failed(_) => {
+            panic!("tree hydration always resolves")
+        }
+    };
 
     assert_eq!(receipt.files_total, 3);
     assert!(!receipt.snapshot_hit);
@@ -113,15 +128,15 @@ fn fallback_materialization_creates_files_dirs_and_metadata() {
     assert!(sidecar_path.exists(), "sidecar must exist");
     let sidecar_content = fs::read_to_string(&sidecar_path).expect("read sidecar");
     assert!(
-        sidecar_content.contains(&format!("index.js\t{id1}")),
+        sidecar_content.contains(&format!("index.js\tblob\t{id1}")),
         "sidecar must list index.js"
     );
     assert!(
-        sidecar_content.contains(&format!("bin/cli\t{id2}")),
+        sidecar_content.contains(&format!("bin/cli\tblob\t{id2}")),
         "sidecar must list bin/cli"
     );
     assert!(
-        sidecar_content.contains(&format!("nested/sub/package.json\t{id3}")),
+        sidecar_content.contains(&format!("nested/sub/package.json\tblob\t{id3}")),
         "sidecar must list nested/sub/package.json"
     );
 
@@ -159,33 +174,143 @@ fn fallback_materialization_with_empty_heavy_rel() {
     let mut modes = BTreeMap::new();
     modes.insert("file.txt".to_string(), 0o644);
 
-    let req = HydrationRequest {
-        worktree_root: wt_dir.path(),
-        git_dir: git_dir.path(),
-        dirs: &dirs,
-        dir_modes: &dir_modes,
-        files: &files,
-        file_sizes: &file_sizes,
-        symlinks: &symlinks,
-        modes: &modes,
-        repo_root: repo_dir.path(),
-        pattern: "",
-        src_root: repo_dir.path(),
-        heavy_rel: "",
-        lockfile_hash: None,
-        base_branch: None,
-        base_commit: None,
-        verify: false,
-        snapshots_enabled: false,
-        v2_enabled: false,
-        strategy_policy: wt_copy::StrategyPolicy::ForceByteCopy,
+    let ingested = Ingested {
+        dirs,
+        dir_modes,
+        files,
+        file_sizes,
+        symlinks,
+        modes,
+    };
+    let req = HydrateReq {
+        src: HydrateSrc::Tree(HydrateTree {
+            ingested: &ingested,
+            repo_root: repo_dir.path(),
+            pattern: "",
+            src_root: repo_dir.path(),
+            heavy_rel: "",
+            lockfile_hash: None,
+        }),
+        dest: HydrateDest {
+            worktree_root: wt_dir.path(),
+            git_dir: git_dir.path(),
+            base_branch: None,
+            base_commit: None,
+        },
+        policy: HydratePolicy {
+            verify: false,
+            snapshots: false,
+            v2: false,
+            strategy: wt_copy::StrategyPolicy::ForceByteCopy,
+        },
     };
 
-    let receipt = store.hydrate(req).expect("hydrate");
+    let receipt = match store.hydrate(req).expect("hydrate") {
+        HydrateOutcome::Hydrated(r) => r,
+        HydrateOutcome::NeedIngest { .. } | HydrateOutcome::Failed(_) => {
+            panic!("tree hydration always resolves")
+        }
+    };
     assert_eq!(receipt.files_total, 1);
     assert_eq!(receipt.strategy, "byte-copy");
     assert_eq!(
         fs::read(wt_dir.path().join("file.txt")).expect("read file"),
         c1
     );
+}
+
+#[test]
+fn pinned_lockfile_hit_hydrates_without_ingest() {
+    let store_dir = TempDir::new().expect("store dir");
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+
+    let repo_dir = TempDir::new().expect("repo dir");
+    let wt_dir = TempDir::new().expect("wt dir");
+    let git_dir = TempDir::new().expect("git dir");
+
+    let heavy = repo_dir.path().join("node_modules");
+    fs::create_dir_all(heavy.join("pkg")).expect("mkdir");
+    let content = b"console.log('hi');\n";
+    fs::write(heavy.join("pkg/index.js"), content).expect("write");
+    let blob = store.put(content).expect("put");
+
+    let lock_hash = wt_store::hash_lockfile(b"pinned-lockfile-bytes");
+    let entries = vec![wt_store::SnapshotEntry::file(
+        "pkg/index.js",
+        blob,
+        0o644,
+    )];
+    let manifest =
+        wt_store::Manifest::new_with_lockfile_and_size(entries, Some(lock_hash), content.len() as u64)
+            .expect("manifest");
+    let hash = manifest.hash;
+    store
+        .publish_manifest(
+            &manifest,
+            wt_store::PublishOptions::default().lockfile_hash(Some(lock_hash)),
+        )
+        .expect("publish");
+
+    let repo_key = repo_dir.path().to_string_lossy().into_owned();
+    wt_store::record_snapshot_publish(
+        store_dir.path(),
+        &repo_key,
+        "node_modules/",
+        "node_modules",
+        &hash,
+    )
+    .expect("seed ring");
+
+    let req = HydrateReq {
+        src: HydrateSrc::PinnedLockfile(HydratePinned {
+            repo_root: repo_dir.path(),
+            pattern: "node_modules/",
+            src_root: repo_dir.path(),
+            heavy_rel: "node_modules",
+            lockfile_hash: lock_hash,
+        }),
+        dest: HydrateDest {
+            worktree_root: wt_dir.path(),
+            git_dir: git_dir.path(),
+            base_branch: None,
+            base_commit: None,
+        },
+        policy: HydratePolicy {
+            verify: false,
+            snapshots: true,
+            v2: false,
+            strategy: wt_copy::StrategyPolicy::Default,
+        },
+    };
+    let outcome = store.hydrate(req).expect("hydrate");
+
+    #[cfg(target_os = "macos")]
+    {
+        let receipt = match outcome {
+            HydrateOutcome::Hydrated(r) => r,
+            _ => panic!("expected a pinned lockfile hit, got {outcome:?}"),
+        };
+        assert!(receipt.snapshot_hit);
+        assert_eq!(receipt.files_total, 1);
+        let ledger =
+            fs::read_to_string(git_dir.path().join("wt-hydrated.tsv")).expect("read ledger");
+        assert_eq!(ledger, format!("-\tsnapshot\t{hash}\n"));
+        let mirror = store
+            .read_worktree_mirror(wt_dir.path(), git_dir.path())
+            .expect("read mirror")
+            .expect("mirror published");
+        assert!(mirror.snapshots.contains(&hash));
+        assert_eq!(
+            fs::read(wt_dir.path().join("node_modules/pkg/index.js")).expect("read file"),
+            content
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = hash;
+        assert!(
+            matches!(outcome, HydrateOutcome::NeedIngest { .. }),
+            "fast path is macOS-only"
+        );
+    }
 }

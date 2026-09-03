@@ -12,50 +12,100 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::ingest::Ingested;
 use crate::snapshot::{SnapshotOutcome, SnapshotProjectionEngine, SnapshotProjectionRequest};
 use crate::{ContentId, DiskStore, GcMode, Result};
 
-/// Request parameters for whole-worktree and heavy-directory hydration.
-#[derive(Debug, Clone)]
-pub struct HydrationRequest<'a> {
+/// Placement and verification policy for one hydration run.
+#[derive(Debug, Clone, Copy)]
+pub struct HydratePolicy {
+    /// Re-hash every blob before placement; also bypasses snapshot hits.
+    pub verify: bool,
+    /// Whether whole-directory snapshot projection is enabled.
+    pub snapshots: bool,
+    /// Whether v2 incremental snapshot rebuilds are enabled.
+    pub v2: bool,
+    /// Placement strategy for fallback materialization.
+    pub strategy: wt_copy::StrategyPolicy,
+}
+
+/// Destination identity for one hydrated directory.
+#[derive(Debug, Clone, Copy)]
+pub struct HydrateDest<'a> {
     /// Root directory of the destination worktree.
     pub worktree_root: &'a Path,
     /// Git directory path of the destination worktree.
     pub git_dir: &'a Path,
-    /// Relative directory paths to create.
-    pub dirs: &'a [String],
-    /// Explicit permissions for directories.
-    pub dir_modes: &'a BTreeMap<String, u32>,
-    /// Relative file path to content-addressed ID table.
-    pub files: &'a BTreeMap<String, ContentId>,
-    /// File size mapping in bytes.
-    pub file_sizes: &'a BTreeMap<String, u64>,
-    /// Relative symbolic links.
-    pub symlinks: &'a BTreeMap<String, String>,
-    /// Explicit permissions for files.
-    pub modes: &'a BTreeMap<String, u32>,
-    /// Source repository root.
-    pub repo_root: &'a Path,
-    /// Inclusion pattern string.
-    pub pattern: &'a str,
-    /// Source checkout root.
-    pub src_root: &'a Path,
-    /// Relative path to heavy directory.
-    pub heavy_rel: &'a str,
-    /// Pinned lockfile hash if present.
-    pub lockfile_hash: Option<&'a ContentId>,
     /// Optional base branch name.
     pub base_branch: Option<&'a str>,
     /// Optional base commit hash.
     pub base_commit: Option<&'a str>,
-    /// Whether paranoid verification is required.
-    pub verify: bool,
-    /// Whether snapshot projection is enabled.
-    pub snapshots_enabled: bool,
-    /// Whether v2 incremental snapshot rebuilds are enabled.
-    pub v2_enabled: bool,
-    /// Placement strategy policy.
-    pub strategy_policy: wt_copy::StrategyPolicy,
+}
+
+/// Already-ingested tree source for the full hydration path.
+#[derive(Debug, Clone, Copy)]
+pub struct HydrateTree<'a> {
+    /// Everything the ingest walk found, with source-root-relative paths.
+    pub ingested: &'a Ingested,
+    /// Source repository root.
+    pub repo_root: &'a Path,
+    /// Inclusion pattern string for this heavy tree.
+    pub pattern: &'a str,
+    /// Source checkout root.
+    pub src_root: &'a Path,
+    /// Relative path to the heavy directory.
+    pub heavy_rel: &'a str,
+    /// Pinned lockfile hash when the tree ships a strictly pinned lockfile.
+    pub lockfile_hash: Option<ContentId>,
+}
+
+/// Pinned-lockfile fast-path intent: a hit needs no ingest walk.
+#[derive(Debug, Clone, Copy)]
+pub struct HydratePinned<'a> {
+    /// Source repository root.
+    pub repo_root: &'a Path,
+    /// Inclusion pattern string for this heavy tree.
+    pub pattern: &'a str,
+    /// Source checkout root.
+    pub src_root: &'a Path,
+    /// Relative path to the heavy directory.
+    pub heavy_rel: &'a str,
+    /// SHA-256 of the strictly pinned lockfile.
+    pub lockfile_hash: ContentId,
+}
+
+/// Where the bytes come from: a full tree or a lockfile-hit intent.
+#[derive(Debug, Clone, Copy)]
+pub enum HydrateSrc<'a> {
+    /// Full path: ingest already ran, project or materialize it.
+    Tree(HydrateTree<'a>),
+    /// Fast path: clone a published snapshot without walking the tree.
+    PinnedLockfile(HydratePinned<'a>),
+}
+
+/// Compact hydration request: source, destination, policy.
+#[derive(Debug, Clone, Copy)]
+pub struct HydrateReq<'a> {
+    /// What to hydrate.
+    pub src: HydrateSrc<'a>,
+    /// Where to put it.
+    pub dest: HydrateDest<'a>,
+    /// How to place and verify it.
+    pub policy: HydratePolicy,
+}
+
+/// Outcome of one [`DiskStore::hydrate`] call.
+#[derive(Debug, Clone)]
+pub enum HydrateOutcome {
+    /// Bytes landed; the caller reports and continues.
+    Hydrated(HydrationReceipt),
+    /// The fast path missed; the caller ingests then retries as a tree.
+    NeedIngest {
+        /// Diagnostic carried for one-time printing, never fatal.
+        diagnostic: Option<String>,
+    },
+    /// The fast path failed loudly; the caller fails the create.
+    Failed(String),
 }
 
 /// Execution report returned by [`DiskStore::hydrate`].
@@ -84,68 +134,138 @@ pub struct HydrationReceipt {
 }
 
 impl DiskStore {
-    /// Hydrate a worktree using either snapshot projection (when enabled and available)
-    /// or verified fallback file materialization via `wt_copy::CopyEngine`.
-    pub fn hydrate(&mut self, req: HydrationRequest<'_>) -> Result<HydrationReceipt> {
+    /// Hydrate one heavy directory behind a compact interface.
+    ///
+    /// A [`HydrateSrc::PinnedLockfile`] intent attempts the O(1) lockfile
+    /// fast path with no ingest walk: a hit lands bytes plus ledger and
+    /// mirror records, a miss reports [`HydrateOutcome::NeedIngest`] so the
+    /// caller ingests and retries as [`HydrateSrc::Tree`]. A tree runs
+    /// snapshot projection when enabled, else verified fallback
+    /// materialization. Ledger and mirror writes live here in every path;
+    /// callers never touch either format.
+    pub fn hydrate(&mut self, req: HydrateReq<'_>) -> Result<HydrateOutcome> {
+        match req.src {
+            HydrateSrc::PinnedLockfile(pin) => self.hydrate_pinned(pin, req.dest, req.policy),
+            HydrateSrc::Tree(tree) => self
+                .hydrate_tree(tree, req.dest, req.policy)
+                .map(HydrateOutcome::Hydrated),
+        }
+    }
+
+    /// O(1) lockfile fast path: clone a published snapshot whose manifest
+    /// header matches the pinned lockfile hash, without walking the tree.
+    fn hydrate_pinned(
+        &mut self,
+        pin: HydratePinned<'_>,
+        dest: HydrateDest<'_>,
+        policy: HydratePolicy,
+    ) -> Result<HydrateOutcome> {
+        let start = Instant::now();
+        fs::create_dir_all(dest.worktree_root)?;
+        fs::create_dir_all(dest.git_dir)?;
+
+        match SnapshotProjectionEngine::try_lockfile_hit(
+            self,
+            pin.repo_root,
+            pin.pattern,
+            pin.src_root,
+            pin.heavy_rel,
+            dest.worktree_root,
+            &pin.lockfile_hash,
+            policy.verify,
+        ) {
+            SnapshotOutcome::Hydrated(info) => {
+                append_ledger(dest.git_dir, &BTreeMap::new(), Some(&info.hash))?;
+                let manifest_id = info.hash;
+                self.publish_worktree_mirror(
+                    dest.worktree_root,
+                    dest.git_dir,
+                    BTreeSet::new(),
+                    std::iter::once(&manifest_id),
+                    dest.base_branch,
+                    dest.base_commit,
+                )?;
+                Ok(HydrateOutcome::Hydrated(HydrationReceipt {
+                    strategy: format!("snapshot-{}", info.mode),
+                    files_total: info.files,
+                    files_copied: 0,
+                    bytes_shared: 0,
+                    bytes_copied: 0,
+                    snapshot_hit: true,
+                    elapsed_ms: start.elapsed().as_millis(),
+                    diagnostics: Vec::new(),
+                    v2_cloned: 0,
+                    v2_linked: 0,
+                }))
+            }
+            SnapshotOutcome::FellBack(reason) => {
+                Ok(HydrateOutcome::NeedIngest { diagnostic: reason })
+            }
+            SnapshotOutcome::Failed(msg) => Ok(HydrateOutcome::Failed(msg)),
+        }
+    }
+
+    /// Full path over an already-ingested tree: snapshot projection when
+    /// enabled and available, else verified fallback materialization via
+    /// `wt_copy::CopyEngine`.
+    fn hydrate_tree(
+        &mut self,
+        tree: HydrateTree<'_>,
+        dest: HydrateDest<'_>,
+        policy: HydratePolicy,
+    ) -> Result<HydrationReceipt> {
         let start = Instant::now();
         let mut diagnostics = Vec::new();
+        let ingested = tree.ingested;
 
-        fs::create_dir_all(req.worktree_root)?;
-        fs::create_dir_all(req.git_dir)?;
+        fs::create_dir_all(dest.worktree_root)?;
+        fs::create_dir_all(dest.git_dir)?;
 
-        if req.snapshots_enabled {
+        if policy.snapshots {
             let proj_req = SnapshotProjectionRequest {
-                dirs: req.dirs,
-                dir_modes: req.dir_modes,
-                files: req.files,
-                file_sizes: req.file_sizes,
-                symlinks: req.symlinks,
-                modes: req.modes,
-                repo_root: req.repo_root,
-                pattern: req.pattern,
-                src_root: req.src_root,
-                heavy_rel: req.heavy_rel,
-                dest_root: req.worktree_root,
-                lockfile_hash: req.lockfile_hash,
-                verify: req.verify,
-                snapshots_enabled: req.snapshots_enabled,
-                v2_enabled: req.v2_enabled,
+                dirs: &ingested.dirs,
+                dir_modes: &ingested.dir_modes,
+                files: &ingested.files,
+                file_sizes: &ingested.file_sizes,
+                symlinks: &ingested.symlinks,
+                modes: &ingested.modes,
+                repo_root: tree.repo_root,
+                pattern: tree.pattern,
+                src_root: tree.src_root,
+                heavy_rel: tree.heavy_rel,
+                dest_root: dest.worktree_root,
+                lockfile_hash: tree.lockfile_hash.as_ref(),
+                verify: policy.verify,
+                snapshots_enabled: policy.snapshots,
+                v2_enabled: policy.v2,
             };
 
             match SnapshotProjectionEngine::hydrate(self, &proj_req) {
                 SnapshotOutcome::Hydrated(info) => {
-                    let distinct_blobs: BTreeSet<&ContentId> = req.files.values().collect();
+                    let distinct_blobs: BTreeSet<&ContentId> =
+                        ingested.files.values().collect();
                     if self.gc_mode() != GcMode::MarkSweepNoRefs {
                         for id in &distinct_blobs {
                             self.add_ref(id)?;
                         }
                     }
 
-                    let sidecar_file = fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(req.git_dir.join("wt-hydrated.tsv"))?;
-                    let mut sidecar = io::BufWriter::with_capacity(128 * 1024, sidecar_file);
-                    for (rel, id) in req.files {
-                        writeln!(sidecar, "{rel}\tblob\t{id}")?;
-                    }
-                    writeln!(sidecar, "-\tsnapshot\t{}", info.hash)?;
-                    sidecar.flush()?;
+                    append_ledger(dest.git_dir, &ingested.files, Some(&info.hash))?;
 
                     let manifest_id = info.hash;
                     self.publish_worktree_mirror(
-                        req.worktree_root,
-                        req.git_dir,
+                        dest.worktree_root,
+                        dest.git_dir,
                         BTreeSet::new(),
                         std::iter::once(&manifest_id),
-                        req.base_branch,
-                        req.base_commit,
+                        dest.base_branch,
+                        dest.base_commit,
                     )?;
 
-                    let total_bytes: u64 = req.file_sizes.values().sum();
+                    let total_bytes: u64 = ingested.file_sizes.values().sum();
                     return Ok(HydrationReceipt {
                         strategy: format!("snapshot-{}", info.mode),
-                        files_total: req.files.len(),
+                        files_total: ingested.files.len(),
                         files_copied: 0,
                         bytes_shared: total_bytes,
                         bytes_copied: 0,
@@ -168,149 +288,79 @@ impl DiskStore {
         }
 
         // Fallback materialization
-        for rel in req.dirs {
-            let dir_path = resolve_dest_path(req.worktree_root, req.heavy_rel, rel);
+        for rel in &ingested.dirs {
+            let dir_path = resolve_dest_path(dest.worktree_root, tree.heavy_rel, rel);
             fs::create_dir_all(&dir_path)?;
         }
 
         let materializer =
-            wt_copy::Materializer::for_paths(req.strategy_policy, self.root(), req.worktree_root);
-        let files: Vec<(&String, &ContentId)> = req.files.iter().collect();
-        let num_cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        let num_workers = num_cpus.clamp(4, 8).min(files.len()).max(1);
-
-        let next_file_idx = std::sync::atomic::AtomicUsize::new(0);
-        let total_copied = std::sync::atomic::AtomicUsize::new(0);
-        let total_bytes_shared = std::sync::atomic::AtomicU64::new(0);
-        let total_bytes_copied = std::sync::atomic::AtomicU64::new(0);
-        let err_slot: std::sync::Mutex<Option<crate::Error>> = std::sync::Mutex::new(None);
-
-        std::thread::scope(|s| {
-            for _ in 0..num_workers {
-                s.spawn(|| {
-                    let mut worker_copied = 0usize;
-                    let mut worker_bytes_shared = 0u64;
-                    let mut worker_bytes_copied = 0u64;
-
-                    loop {
-                        if err_slot.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
-                            break;
-                        }
-
-                        let idx = next_file_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if idx >= files.len() {
-                            break;
-                        }
-
-                        let (rel, id) = files[idx];
-                        let size = req.file_sizes.get(rel).copied().unwrap_or(0);
-
-                        let v_res = if req.verify {
-                            self.get(id).map(|_| ())
-                        } else {
-                            self.ensure_verified(id)
-                        };
-
-                        if let Err(e) = v_res {
-                            let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
-                            if slot.is_none() {
-                                *slot = Some(e);
-                            }
-                            break;
-                        }
-
-                        let src = self.blob_path(id);
-                        let dest = resolve_dest_path(req.worktree_root, req.heavy_rel, rel);
-                        if let Some(parent) = dest.parent() {
-                            if !parent.exists() {
-                                let _ = fs::create_dir_all(parent);
-                            }
-                        }
-                        let mode = req.modes.get(rel).copied();
-
-                        let outcome = match materializer.materialize_file(&src, &dest, mode) {
-                            Ok(outcome) => outcome,
-                            Err(e) => {
-                                let mut slot = err_slot.lock().unwrap_or_else(|p| p.into_inner());
-                                if slot.is_none() {
-                                    *slot = Some(crate::Error::Io(e));
-                                }
-                                break;
-                            }
-                        };
-
-                        if outcome.is_shared_cow {
-                            worker_bytes_shared += size;
-                        } else {
-                            worker_copied += 1;
-                            worker_bytes_copied += size;
-                        }
-                    }
-
-                    total_copied.fetch_add(worker_copied, std::sync::atomic::Ordering::Relaxed);
-                    total_bytes_shared
-                        .fetch_add(worker_bytes_shared, std::sync::atomic::Ordering::Relaxed);
-                    total_bytes_copied
-                        .fetch_add(worker_bytes_copied, std::sync::atomic::Ordering::Relaxed);
-                });
+            wt_copy::Materializer::for_paths(policy.strategy, self.root(), dest.worktree_root);
+        let mut items = Vec::with_capacity(ingested.files.len());
+        for (rel, id) in &ingested.files {
+            if policy.verify {
+                self.get(id).map(|_| ())?;
+            } else {
+                self.ensure_verified(id)?;
             }
-        });
-
-        if let Some(err) = err_slot.into_inner().unwrap_or_default() {
-            return Err(err);
+            let src = self.blob_path(id);
+            let dest_path = resolve_dest_path(dest.worktree_root, tree.heavy_rel, rel);
+            let mode = ingested.modes.get(rel).copied();
+            let size = ingested.file_sizes.get(rel).copied().unwrap_or(0);
+            items.push(wt_copy::BatchItem {
+                src,
+                dest: dest_path,
+                mode,
+                size,
+            });
         }
+        let batch = materializer
+            .materialize_batch(&items)
+            .map_err(crate::Error::Io)?;
+        let total_copied = batch.placed.saturating_sub(batch.shared_cow);
+        let total_bytes_shared = batch.bytes_shared;
+        let total_bytes_copied = batch.bytes_copied;
 
-        for (rel, target) in req.symlinks {
-            let dest = resolve_dest_path(req.worktree_root, req.heavy_rel, rel);
-            if let Some(parent) = dest.parent() {
+        for (rel, target) in &ingested.symlinks {
+            let dest_path = resolve_dest_path(dest.worktree_root, tree.heavy_rel, rel);
+            if let Some(parent) = dest_path.parent() {
                 if !parent.exists() {
                     fs::create_dir_all(parent)?;
                 }
             }
             #[cfg(unix)]
             {
-                std::os::unix::fs::symlink(target, &dest)?;
+                std::os::unix::fs::symlink(target, &dest_path)?;
             }
         }
 
-        for rel in req.dirs.iter().rev() {
-            if let Some(&mode) = req.dir_modes.get(rel) {
-                let path = resolve_dest_path(req.worktree_root, req.heavy_rel, rel);
+        for rel in ingested.dirs.iter().rev() {
+            if let Some(&mode) = ingested.dir_modes.get(rel) {
+                let path = resolve_dest_path(dest.worktree_root, tree.heavy_rel, rel);
                 {
                     let _ = fs::set_permissions(&path, fs::Permissions::from_mode(mode));
                 }
             }
         }
 
-        let distinct_blobs: BTreeSet<&ContentId> = req.files.values().collect();
+        let distinct_blobs: BTreeSet<&ContentId> = ingested.files.values().collect();
         if self.gc_mode() != GcMode::MarkSweepNoRefs {
             for id in &distinct_blobs {
                 self.add_ref(id)?;
             }
         }
 
-        let sidecar_file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(req.git_dir.join("wt-hydrated.tsv"))?;
-        let mut sidecar = io::BufWriter::with_capacity(128 * 1024, sidecar_file);
-        for (rel, id) in req.files {
-            writeln!(sidecar, "{rel}\t{id}")?;
-        }
-        sidecar.flush()?;
+        append_ledger(dest.git_dir, &ingested.files, None)?;
 
         self.publish_worktree_mirror(
-            req.worktree_root,
-            req.git_dir,
+            dest.worktree_root,
+            dest.git_dir,
             distinct_blobs,
             std::iter::empty(),
-            req.base_branch,
-            req.base_commit,
+            dest.base_branch,
+            dest.base_commit,
         )?;
 
-        let strategy_str = match req.strategy_policy {
+        let strategy_str = match policy.strategy {
             wt_copy::StrategyPolicy::Default => "copy-on-write",
             wt_copy::StrategyPolicy::Hardlink => "hardlink",
             wt_copy::StrategyPolicy::ForceByteCopy => "byte-copy",
@@ -318,10 +368,10 @@ impl DiskStore {
 
         Ok(HydrationReceipt {
             strategy: strategy_str.to_string(),
-            files_total: req.files.len(),
-            files_copied: total_copied.into_inner(),
-            bytes_shared: total_bytes_shared.into_inner(),
-            bytes_copied: total_bytes_copied.into_inner(),
+            files_total: ingested.files.len(),
+            files_copied: total_copied,
+            bytes_shared: total_bytes_shared,
+            bytes_copied: total_bytes_copied,
             snapshot_hit: false,
             elapsed_ms: start.elapsed().as_millis(),
             diagnostics,
@@ -329,6 +379,30 @@ impl DiskStore {
             v2_linked: 0,
         })
     }
+}
+
+/// Single ledger writer for every hydration path. File rows are always
+/// `rel blob id`; a snapshot hydration appends one `snapshot` row.
+/// Readers accept the legacy two-column fallback rows, but nothing new
+/// writes them.
+fn append_ledger(
+    git_dir: &Path,
+    files: &BTreeMap<String, ContentId>,
+    snapshot: Option<&ContentId>,
+) -> Result<()> {
+    let sidecar_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(git_dir.join("wt-hydrated.tsv"))?;
+    let mut sidecar = io::BufWriter::with_capacity(128 * 1024, sidecar_file);
+    for (rel, id) in files {
+        writeln!(sidecar, "{rel}\tblob\t{id}")?;
+    }
+    if let Some(hash) = snapshot {
+        writeln!(sidecar, "-\tsnapshot\t{hash}")?;
+    }
+    sidecar.flush()?;
+    Ok(())
 }
 
 fn resolve_dest_path(worktree_root: &Path, heavy_rel: &str, rel: &str) -> PathBuf {

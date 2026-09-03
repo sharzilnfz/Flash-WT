@@ -889,13 +889,21 @@ fn edited_source_lands_in_the_next_hydrated_tree() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx.wt_with_store(&["create", "one"], &store).status.success());
+    assert!(
+        fx.wt_with_store(&["create", "one"], &store)
+            .status
+            .success()
+    );
 
     let target = fx.repo.join("heavy/pkg00/nested/file-0.txt");
     fs::write(&target, "edited between creates\n").expect("edit source");
     let (files_before, _bytes_before) = calc_store_footprint(&store);
 
-    assert!(fx.wt_with_store(&["create", "two"], &store).status.success());
+    assert!(
+        fx.wt_with_store(&["create", "two"], &store)
+            .status
+            .success()
+    );
     let (files_after, _bytes_after) = calc_store_footprint(&store);
     assert!(files_after > files_before);
 
@@ -916,7 +924,11 @@ fn warm_create_reads_no_unchanged_file_bytes() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx.wt_with_store(&["create", "one"], &store).status.success());
+    assert!(
+        fx.wt_with_store(&["create", "one"], &store)
+            .status
+            .success()
+    );
 
     {
         let heavy = fx.repo.join("heavy");
@@ -935,7 +947,11 @@ fn warm_create_reads_no_unchanged_file_bytes() {
         }
     }
 
-    assert!(fx.wt_with_store(&["create", "two"], &store).status.success());
+    assert!(
+        fx.wt_with_store(&["create", "two"], &store)
+            .status
+            .success()
+    );
 
     let expected = |i: usize| format!("fake-heavy file {i} of 12\n");
     let dest = fx.repo.parent().unwrap().join("origin-two/heavy");
@@ -971,7 +987,11 @@ fn touched_file_still_hydrates_correct_bytes() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx.wt_with_store(&["create", "one"], &store).status.success());
+    assert!(
+        fx.wt_with_store(&["create", "one"], &store)
+            .status
+            .success()
+    );
 
     let target = fx.repo.join("heavy/pkg01/nested/file-1.txt");
     {
@@ -984,7 +1004,11 @@ fn touched_file_still_hydrates_correct_bytes() {
     }
     let (files_before, bytes_before) = calc_store_footprint(&store);
 
-    assert!(fx.wt_with_store(&["create", "two"], &store).status.success());
+    assert!(
+        fx.wt_with_store(&["create", "two"], &store)
+            .status
+            .success()
+    );
 
     let (files_after, bytes_after) = calc_store_footprint(&store);
     assert_eq!((files_before, bytes_before), (files_after, bytes_after));
@@ -1002,7 +1026,11 @@ fn deleted_cache_falls_back_to_full_reingest_and_populates_again() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx.wt_with_store(&["create", "one"], &store).status.success());
+    assert!(
+        fx.wt_with_store(&["create", "one"], &store)
+            .status
+            .success()
+    );
     assert!(store.join("ingest-cache.tsv").is_file());
 
     fs::remove_file(store.join("ingest-cache.tsv")).expect("delete cache");
@@ -1012,7 +1040,11 @@ fn deleted_cache_falls_back_to_full_reingest_and_populates_again() {
     )
     .expect("edit source");
 
-    assert!(fx.wt_with_store(&["create", "two"], &store).status.success());
+    assert!(
+        fx.wt_with_store(&["create", "two"], &store)
+            .status
+            .success()
+    );
     assert!(store.join("ingest-cache.tsv").is_file());
     assert_heavy_matches_source(
         &fx.repo.join("heavy"),
@@ -1028,7 +1060,11 @@ fn corrupt_cache_degrades_to_full_reingest_not_wrong_output() {
     let base = tempfile::tempdir().expect("tempdir");
     let store = base.path().join("store");
 
-    assert!(fx.wt_with_store(&["create", "one"], &store).status.success());
+    assert!(
+        fx.wt_with_store(&["create", "one"], &store)
+            .status
+            .success()
+    );
 
     fs::write(
         store.join("ingest-cache.tsv"),
@@ -1036,7 +1072,11 @@ fn corrupt_cache_degrades_to_full_reingest_not_wrong_output() {
     )
     .expect("corrupt cache");
 
-    assert!(fx.wt_with_store(&["create", "two"], &store).status.success());
+    assert!(
+        fx.wt_with_store(&["create", "two"], &store)
+            .status
+            .success()
+    );
     assert_heavy_matches_source(
         &fx.repo.join("heavy"),
         &fx.repo.parent().unwrap().join("origin-two"),

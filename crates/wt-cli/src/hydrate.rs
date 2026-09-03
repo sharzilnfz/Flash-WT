@@ -32,6 +32,19 @@ fn store_dir() -> Result<PathBuf> {
     Ok(base.join("wt").join("store"))
 }
 
+fn store_policy(cfg: &RunConfig) -> wt_store::HydratePolicy {
+    wt_store::HydratePolicy {
+        verify: cfg.verify,
+        snapshots: cfg.snapshots,
+        v2: cfg.v2,
+        strategy: match cfg.strategy_policy {
+            StrategyPolicy::Default => wt_copy::StrategyPolicy::Default,
+            StrategyPolicy::Hardlink => wt_copy::StrategyPolicy::Hardlink,
+            StrategyPolicy::ForceByteCopy => wt_copy::StrategyPolicy::ForceByteCopy,
+        },
+    }
+}
+
 pub fn open_store() -> Result<DiskStore> {
     let dir = store_dir()?;
     DiskStore::open(&dir)
@@ -157,55 +170,32 @@ impl<'a> HydrationEngine<'a> {
                 _ => None,
             };
             if req.cfg.snapshots {
-                if let Some(lock_hash) = pinned_lockfile_hash.as_ref() {
+                if let Some(lock_hash) = pinned_lockfile_hash {
                     let stage = Instant::now();
-                    match wt_store::SnapshotProjectionEngine::try_lockfile_hit(
-                        self.store,
-                        req.root,
-                        pattern,
-                        &src,
-                        &heavy,
-                        req.dest,
-                        lock_hash,
-                        req.cfg.verify,
-                    ) {
-                        wt_store::SnapshotOutcome::Hydrated(info) => {
+                    let pin_req = wt_store::HydrateReq {
+                        src: wt_store::HydrateSrc::PinnedLockfile(wt_store::HydratePinned {
+                            repo_root: req.root,
+                            pattern,
+                            src_root: &src,
+                            heavy_rel: &heavy,
+                            lockfile_hash: lock_hash,
+                        }),
+                        dest: wt_store::HydrateDest {
+                            worktree_root: req.dest,
+                            git_dir: &git_dir,
+                            base_branch: req.base_branch,
+                            base_commit: req.base_commit,
+                        },
+                        policy: store_policy(req.cfg),
+                    };
+                    match self
+                        .store
+                        .hydrate(pin_req)
+                        .map_err(|e| Error::Store(format!("hydration of {heavy} failed: {e}")))?
+                    {
+                        wt_store::HydrateOutcome::Hydrated(info) => {
                             let hydration_ms = stage.elapsed().as_millis();
-                            let sidecar_file = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(git_dir.join("wt-hydrated.tsv"))
-                                .map_err(|e| {
-                                    Error::io_unanchored(
-                                        "open ledger",
-                                        git_dir.join("wt-hydrated.tsv"),
-                                        e,
-                                    )
-                                })?;
-                            let mut sidecar = std::io::BufWriter::new(sidecar_file);
-                            std::io::Write::write_all(
-                                &mut sidecar,
-                                format!("-\tsnapshot\t{}\n", info.hash).as_bytes(),
-                            )
-                            .map_err(|e| {
-                                Error::io_unanchored(
-                                    "write ledger",
-                                    git_dir.join("wt-hydrated.tsv"),
-                                    e,
-                                )
-                            })?;
-                            self.store
-                                .publish_worktree_mirror(
-                                    req.dest,
-                                    &git_dir,
-                                    BTreeSet::new(),
-                                    std::iter::once(&info.hash),
-                                    req.base_branch,
-                                    req.base_commit,
-                                )
-                                .map_err(|e| Error::Store(format!("cannot publish mirror: {e}")))?;
-
-                            total_files += info.files;
+                            total_files += info.files_total;
                             snapshot_hits_count += 1;
                             timings.snapshot_engaged = true;
                             timings.snapshot_ms += hydration_ms;
@@ -214,21 +204,23 @@ impl<'a> HydrationEngine<'a> {
                                 println!(
                                     "hydrated {heavy} from {} via snapshot (one clone, {} file{})",
                                     src.display(),
-                                    info.files,
-                                    if info.files == 1 { "" } else { "s" }
+                                    info.files_total,
+                                    if info.files_total == 1 { "" } else { "s" }
                                 );
                             }
                             continue;
                         }
-                        wt_store::SnapshotOutcome::FellBack(Some(reason)) => {
+                        wt_store::HydrateOutcome::NeedIngest {
+                            diagnostic: Some(reason),
+                        } => {
                             if !req.cfg.json {
                                 eprintln!(
                                     "wt-snapshots: {heavy}: lockfile fast path fell back ({reason})"
                                 );
                             }
                         }
-                        wt_store::SnapshotOutcome::FellBack(None) => {}
-                        wt_store::SnapshotOutcome::Failed(msg) => {
+                        wt_store::HydrateOutcome::NeedIngest { diagnostic: None } => {}
+                        wt_store::HydrateOutcome::Failed(msg) => {
                             return Err(Error::Store(format!(
                                 "hydration of {heavy} failed: {msg}"
                             )));
@@ -250,39 +242,45 @@ impl<'a> HydrationEngine<'a> {
                 .map_err(|e| Error::Store(format!("ingest {}: {e}", src.display())))?;
             timings.ingest_ms += stage.elapsed().as_millis();
 
-            let store_strategy_policy = match req.cfg.strategy_policy {
-                StrategyPolicy::Default => wt_copy::StrategyPolicy::Default,
-                StrategyPolicy::Hardlink => wt_copy::StrategyPolicy::Hardlink,
-                StrategyPolicy::ForceByteCopy => wt_copy::StrategyPolicy::ForceByteCopy,
-            };
-
-            let store_req = wt_store::HydrationRequest {
-                worktree_root: req.dest,
-                git_dir: &git_dir,
-                dirs: &ingested.dirs,
-                dir_modes: &ingested.dir_modes,
-                files: &ingested.files,
-                file_sizes: &ingested.file_sizes,
-                symlinks: &ingested.symlinks,
-                modes: &ingested.modes,
-                repo_root: req.root,
-                pattern,
-                src_root: &src,
-                heavy_rel: &heavy,
-                lockfile_hash: pinned_lockfile_hash.as_ref(),
-                base_branch: req.base_branch,
-                base_commit: req.base_commit,
-                verify: req.cfg.verify,
-                snapshots_enabled: req.cfg.snapshots,
-                v2_enabled: req.cfg.v2,
-                strategy_policy: store_strategy_policy,
+            let store_req = wt_store::HydrateReq {
+                src: wt_store::HydrateSrc::Tree(wt_store::HydrateTree {
+                    ingested: &ingested,
+                    repo_root: req.root,
+                    pattern,
+                    src_root: &src,
+                    heavy_rel: &heavy,
+                    lockfile_hash: pinned_lockfile_hash,
+                }),
+                dest: wt_store::HydrateDest {
+                    worktree_root: req.dest,
+                    git_dir: &git_dir,
+                    base_branch: req.base_branch,
+                    base_commit: req.base_commit,
+                },
+                policy: store_policy(req.cfg),
             };
 
             let stage = Instant::now();
-            let receipt = self
+            let receipt = match self
                 .store
                 .hydrate(store_req)
-                .map_err(|e| Error::Store(format!("hydration of {} failed: {e}", rel.display())))?;
+                .map_err(|e| Error::Store(format!("hydration of {} failed: {e}", rel.display())))?
+            {
+                wt_store::HydrateOutcome::Hydrated(r) => r,
+                wt_store::HydrateOutcome::NeedIngest { diagnostic } => {
+                    return Err(Error::Store(format!(
+                        "hydration of {} unexpectedly deferred{}",
+                        rel.display(),
+                        diagnostic.map(|d| format!(" ({d})")).unwrap_or_default(),
+                    )));
+                }
+                wt_store::HydrateOutcome::Failed(msg) => {
+                    return Err(Error::Store(format!(
+                        "hydration of {} failed: {msg}",
+                        rel.display()
+                    )));
+                }
+            };
             let hydration_ms = stage.elapsed().as_millis();
 
             total_files += receipt.files_total;

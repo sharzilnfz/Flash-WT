@@ -118,11 +118,15 @@ resolve_binary() {
     local out_name=$2
 
     if [ -z "$target" ] || [ "$target" = "current" ]; then
-        if [ ! -f "$REPO_ROOT/target/release/wt" ]; then
+        if [ ! -f "$REPO_ROOT/target/release/flashwt" ] && [ ! -f "$REPO_ROOT/target/release/wt" ]; then
             echo "eval: building release binary for current worktree..."
             cargo build --release --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p wt-cli
         fi
-        echo "$REPO_ROOT/target/release/wt"
+        if [ -f "$REPO_ROOT/target/release/flashwt" ]; then
+            echo "$REPO_ROOT/target/release/flashwt"
+        else
+            echo "$REPO_ROOT/target/release/wt"
+        fi
     elif [ -x "$target" ]; then
         echo "$target"
     else
@@ -136,7 +140,11 @@ resolve_binary() {
                 cargo build --release --quiet --manifest-path "$build_dir/Cargo.toml" -p wt-cli
         )
         local bin="$WORK/bin-$out_name"
-        cp "$build_dir/target/release/wt" "$bin"
+        if [ -f "$build_dir/target/release/flashwt" ]; then
+            cp "$build_dir/target/release/flashwt" "$bin"
+        else
+            cp "$build_dir/target/release/wt" "$bin"
+        fi
         git -C "$REPO_ROOT" worktree remove --force "$build_dir" >/dev/null 2>&1 || rm -rf "$build_dir"
         echo "$bin"
     fi

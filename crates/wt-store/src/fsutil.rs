@@ -25,13 +25,24 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
+/// Check if hardware durability flushes are disabled (via test environment or explicit env flag).
+#[inline]
+pub(crate) fn is_sync_disabled() -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    std::env::var_os("WT_NO_SYNC").is_some() || std::env::var_os("WT_TEST_NO_SYNC").is_some()
+}
+
 /// Write `bytes` to `path` crash-durably: create/truncate, write,
 /// `sync_all` the file, then `fsync` its parent directory so the
 /// (possibly new) directory entry itself survives power loss.
 pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = fs::File::create(path)?;
     file.write_all(bytes)?;
-    file.sync_all()?;
+    if !is_sync_disabled() {
+        file.sync_all()?;
+    }
     drop(file);
     sync_parent_dir(path)
 }
@@ -42,9 +53,11 @@ pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// can no longer leave `final_path` naming truncated or empty
 /// content — the worst pre-existing state was the complete temp file.
 pub(crate) fn durable_write_then_rename(tmp_path: &Path, final_path: &Path) -> io::Result<()> {
-    let file = fs::File::open(tmp_path)?;
-    file.sync_all()?;
-    drop(file);
+    if !is_sync_disabled() {
+        let file = fs::File::open(tmp_path)?;
+        file.sync_all()?;
+        drop(file);
+    }
     fs::rename(tmp_path, final_path)?;
     sync_parent_dir(final_path)
 }
@@ -52,6 +65,9 @@ pub(crate) fn durable_write_then_rename(tmp_path: &Path, final_path: &Path) -> i
 /// `fsync` the directory that contains `path`. Required after a
 /// rename/create for the NAME change itself to be durable.
 pub(crate) fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    if is_sync_disabled() {
+        return Ok(());
+    }
     let dir = fs::File::open(path.parent().unwrap_or_else(|| Path::new(".")))?;
     dir.sync_all()
 }

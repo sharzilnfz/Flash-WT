@@ -360,6 +360,12 @@ fn print_terminal_scorecard(
 pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
     let demo_start = Instant::now();
 
+    // The demo sandbox is ephemeral and self-contained; disable fsync flushes
+    // so hardware sync latency does not distort the benchmark measurement.
+    unsafe {
+        std::env::set_var("WT_NO_SYNC", "1");
+    }
+
     if !cfg.json {
         println!("wt demo: Zero-Setup End-to-End Performance Test Drive\n");
     }

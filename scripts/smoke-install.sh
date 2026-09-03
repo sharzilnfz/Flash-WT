@@ -55,12 +55,20 @@ package() {
     DIR="$WORK/wt-v$V-$T"
     mkdir "$DIR"
     if [ "$V" = "$VERSION" ]; then
-      cp target/release/wt "$DIR/wt"
+      if [ -f target/release/flashwt ]; then
+        cp target/release/flashwt "$DIR/flashwt"
+      else
+        cp target/release/wt "$DIR/flashwt"
+      fi
+      ln -s flashwt "$DIR/flash-wt"
+      ln -s flashwt "$DIR/wt"
     else
       # The stand-in older version must be distinguishable from the real
       # one so the upgrade assertions below mean something.
-      printf '#!/bin/sh\necho "wt-hydrate %s"\n' "$V" >"$DIR/wt"
-      chmod +x "$DIR/wt"
+      printf '#!/bin/sh\necho "flashwt %s"\n' "$V" >"$DIR/flashwt"
+      chmod +x "$DIR/flashwt"
+      ln -s flashwt "$DIR/flash-wt"
+      ln -s flashwt "$DIR/wt"
     fi
     tar czf "$TAG_DIR/wt-v$V-$T.tar.gz" -C "$WORK" "wt-v$V-$T"
     (
@@ -75,8 +83,8 @@ echo "== curl installer path"
 WT_DIST_DIR="$DIST/v$VERSION" WT_VERSION="v$VERSION" WT_BIN_DIR="$WORK/bin" \
   sh install.sh
 GOT=$("$WORK/bin/wt" --version)
-[ "$GOT" = "wt $VERSION" ] || [ "$GOT" = "wt-hydrate $VERSION" ] ||
-  { echo "smoke: expected 'wt $VERSION' or 'wt-hydrate $VERSION', got '$GOT'" >&2; exit 1; }
+[ "$GOT" = "flashwt $VERSION" ] || [ "$GOT" = "wt $VERSION" ] || [ "$GOT" = "wt-hydrate $VERSION" ] ||
+  { echo "smoke: expected 'flashwt $VERSION', 'wt $VERSION' or 'wt-hydrate $VERSION', got '$GOT'" >&2; exit 1; }
 echo "ok: curl path installed wt $VERSION and verified it runs"
 
 echo "== checksum rejection"

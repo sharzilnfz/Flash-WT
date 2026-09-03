@@ -71,10 +71,7 @@ fn walk(
 /// On success the staging tree is renamed onto `dest`; on any error
 /// it is removed first, so `dest` is either the complete copy or
 /// absent.
-pub(crate) fn staged_copy(
-    dest: &Path,
-    fill: &mut dyn FnMut(&Path) -> Result<()>,
-) -> Result<()> {
+pub(crate) fn staged_copy(dest: &Path, fill: &mut dyn FnMut(&Path) -> Result<()>) -> Result<()> {
     // Fast fail for the common case. The authoritative guard is the
     // final rename: a dest created between this check and the rename
     // can only be replaced atomically or make the rename fail — the

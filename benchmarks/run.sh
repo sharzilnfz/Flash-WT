@@ -139,7 +139,11 @@ if [ -z "$BIN" ]; then
     echo "building release binary..."
     cargo build --release --quiet \
         --manifest-path "$REPO_ROOT/Cargo.toml" -p wt-cli
-    BIN="$REPO_ROOT/target/release/wt"
+    if [ -x "$REPO_ROOT/target/release/flashwt" ]; then
+        BIN="$REPO_ROOT/target/release/flashwt"
+    else
+        BIN="$REPO_ROOT/target/release/wt"
+    fi
 fi
 [ -x "$BIN" ] || die "binary not runnable at $BIN"
 

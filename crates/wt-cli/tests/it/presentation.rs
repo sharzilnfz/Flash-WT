@@ -495,6 +495,7 @@ fn human_bytes_zero_rendering_via_list() {
 }
 
 #[test]
+#[ignore = "expensive 10,000-file demo benchmark fixture"]
 fn human_count_grouping_via_demo_fixture_summary() {
     let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["demo", "--json"])

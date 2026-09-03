@@ -1214,7 +1214,8 @@ fn sigkilled_creates_never_leave_a_half_published_snapshot_behind() {
                 "create",
                 &format!("after-{i}"),
                 "--dir",
-                &fx.worktree_path(&format!("origin-after-{i}")).to_string_lossy(),
+                &fx.worktree_path(&format!("origin-after-{i}"))
+                    .to_string_lossy(),
             ],
             BOTH_GATES,
         );
@@ -1401,10 +1402,7 @@ fn incremental_snapshot_tree_files_are_private_and_self_contained() {
     let sample =
         wt_store::snapshot_tree_path(&store, &wt_store::ContentId::from_hex(&b_hash).unwrap())
             .join("pkg01/file-000.txt");
-    assert_eq!(
-        fs::read_to_string(&sample).unwrap(),
-        "package 1 file 0\n"
-    );
+    assert_eq!(fs::read_to_string(&sample).unwrap(), "package 1 file 0\n");
 
     let md = fs::symlink_metadata(&sample).unwrap();
     assert_eq!(md.nlink(), 1);
@@ -1415,10 +1413,7 @@ fn incremental_snapshot_tree_files_are_private_and_self_contained() {
         &wt_store::ContentId::from_hex(&a_hash).unwrap(),
     ))
     .unwrap();
-    assert_eq!(
-        fs::read_to_string(&sample).unwrap(),
-        "package 1 file 0\n"
-    );
+    assert_eq!(fs::read_to_string(&sample).unwrap(), "package 1 file 0\n");
 }
 
 #[cfg(target_os = "macos")]
