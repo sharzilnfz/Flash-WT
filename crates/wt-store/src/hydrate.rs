@@ -175,8 +175,23 @@ impl DiskStore {
             policy.verify,
         ) {
             SnapshotOutcome::Hydrated(info) => {
-                append_ledger(dest.git_dir, &BTreeMap::new(), Some(&info.hash))?;
                 let manifest_id = info.hash;
+                if self.gc_mode() != GcMode::MarkSweepNoRefs {
+                    if let Some(manifest) =
+                        crate::snapshot::read_published(self.root(), &manifest_id)
+                    {
+                        let mut distinct_blobs = BTreeSet::new();
+                        for entry in &manifest.entries {
+                            if let Some(blob) = entry.blob {
+                                distinct_blobs.insert(blob);
+                            }
+                        }
+                        for id in &distinct_blobs {
+                            self.add_ref(id)?;
+                        }
+                    }
+                }
+                append_ledger(dest.git_dir, &BTreeMap::new(), Some(&info.hash))?;
                 self.publish_worktree_mirror(
                     dest.worktree_root,
                     dest.git_dir,
@@ -242,8 +257,7 @@ impl DiskStore {
 
             match SnapshotProjectionEngine::hydrate(self, &proj_req) {
                 SnapshotOutcome::Hydrated(info) => {
-                    let distinct_blobs: BTreeSet<&ContentId> =
-                        ingested.files.values().collect();
+                    let distinct_blobs: BTreeSet<&ContentId> = ingested.files.values().collect();
                     if self.gc_mode() != GcMode::MarkSweepNoRefs {
                         for id in &distinct_blobs {
                             self.add_ref(id)?;

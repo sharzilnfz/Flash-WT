@@ -15,15 +15,38 @@
 //!   `refs/` entirely. Only reachable through an explicit operator
 //!   command; legacy binaries must not use the store afterwards.
 //!
-//! Root validation is filesystem-existence based — recorded worktree
+//! # Cutover Steps
+//!
+//! The cutover protocol moves the store from legacy per-blob refcounts
+//! to store-local mirror marks in three verifiable stages:
+//!
+//! 1. Dual-write (`GcMode::Legacy`, default):
+//!    All creation paths, including fallback materialization, tree snapshot
+//!    hydration, and pinned lockfile snapshot hits, perform dual-writes.
+//!    They publish store-local mirror records and maintain reference counts
+//!    in `refs/` for all member blobs. Legacy sweepers check ref counts and
+//!    execute `audit_marks_against_refs` to verify parity. Any divergence
+//!    is reported as `wt-gc-audit:` diagnostic lines without collecting live data.
+//!
+//! 2. Activate mark-and-sweep (`wt store migrate --activate-mark-sweep`):
+//!    Sets `gc-mode` to `mark-sweep`. Sweepers switch to live mirror marks
+//!    and grace windows. Reference counts remain maintained on create and
+//!    remove so older binaries or mixed-version runs remain safe.
+//!
+//! 3. Drop legacy refs (`wt store migrate --drop-legacy-refs`):
+//!    Purges all `refs/` files and sets `gc-mode` to `mark-sweep-no-refs`.
+//!    Creates and removes stop touching `refs/` entirely. This step is
+//!    one-way; pre-cutover binaries must not use the store afterwards.
+//!
+//! Root validation is filesystem-existence based. A recorded worktree
 //! path exists and is a directory, gitdir exists, and either the
 //! `wt-hydrated.tsv` sidecar survives or the mirror is younger than
-//! the grace period. No `git worktree list` calls: git's
+//! the grace period. No `git worktree list` calls. Git's
 //! administrative records outlive `rm -rf` until pruned, so they are
 //! not a liveness oracle.
 //!
 //! Unreferenced snapshots additionally face an LRU retention cap
-//! (product-handoff §7.4): past the grace filter at most
+//! (product-handoff §7.4). Past the grace filter at most
 //! `snapshot_cap` of them survive each sweep (`WT_SNAPSHOT_CAP`,
 //! default 64), least-recently-used first, with last-use stamps in
 //! the [`crate::snapindex::SnapshotLru`] sidecar beside
@@ -748,6 +771,7 @@ impl<'a> StoreReclaimer<'a> {
                                 if let Ok(text) = fs::read_to_string(&ledger_path) {
                                     if self.store.gc_mode() != GcMode::MarkSweepNoRefs {
                                         let mut blob_ids = BTreeSet::new();
+                                        let mut snapshot_ids = BTreeSet::new();
                                         for line in text.lines() {
                                             if line.is_empty() {
                                                 continue;
@@ -764,7 +788,24 @@ impl<'a> StoreReclaimer<'a> {
                                                         blob_ids.insert(cid);
                                                     }
                                                 }
+                                                [_, kind, id_str] if *kind == "snapshot" => {
+                                                    if let Some(cid) = ContentId::from_hex(id_str) {
+                                                        snapshot_ids.insert(cid);
+                                                    }
+                                                }
                                                 _ => {}
+                                            }
+                                        }
+                                        for snap_id in &snapshot_ids {
+                                            if let Some(manifest) = crate::snapshot::read_published(
+                                                self.store.root(),
+                                                snap_id,
+                                            ) {
+                                                for entry in &manifest.entries {
+                                                    if let Some(blob) = entry.blob {
+                                                        blob_ids.insert(blob);
+                                                    }
+                                                }
                                             }
                                         }
                                         for cid in blob_ids {
@@ -934,6 +975,19 @@ impl<'a> StoreReclaimer<'a> {
 
         let canon_worktree = fs::canonicalize(worktree_path).ok();
         let canon_gitdir = fs::canonicalize(gitdir).ok();
+
+        if self.store.gc_mode() != GcMode::MarkSweepNoRefs {
+            for snap_id in &snapshot_ids {
+                if let Some(manifest) = crate::snapshot::read_published(self.store.root(), snap_id)
+                {
+                    for entry in &manifest.entries {
+                        if let Some(blob) = entry.blob {
+                            blob_ids.insert(blob);
+                        }
+                    }
+                }
+            }
+        }
 
         let mut references_released = 0;
         if !blob_ids.is_empty() && self.store.gc_mode() != GcMode::MarkSweepNoRefs {
