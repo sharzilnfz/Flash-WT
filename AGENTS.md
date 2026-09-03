@@ -2,7 +2,7 @@
 
 Never write comments in the codebase. All code must be completely comment-free.
 
-Always use codebase-memory MCP for all searching, querying, and reading code; never use grep or other read tools.
+Use codebase-memory MCP as the primary engine for discovery, symbol lookup, call hierarchies, and code reading. Call `search_graph` and `get_code_snippet` for symbol definitions, and `search_code` for literal matches and markdown. Filesystem read tools are reserved exclusively for unindexed non-AST files (dotfiles, lockfiles, CI configs) and live in-flight edit verification.
 
 ## Agent skills
 
@@ -21,7 +21,8 @@ Single-context layout: `CONTEXT.md` glossary plus `docs/adr/`. See `docs/agents/
 ### Codebase memory
 
 The repo is indexed in the codebase-memory MCP as project `instant-worktrees`.
-Refresh the index after pulling or landing code. See `docs/agents/codebase-memory.md`.
+All code and skill trees are indexed. Automated git hooks maintain index freshness.
+See `docs/agents/codebase-memory.md`.
 
 ## Verification and test performance
 
@@ -36,5 +37,3 @@ Refresh the index after pulling or landing code. See `docs/agents/codebase-memor
 - Dependency compilation uses `opt-level = 2` in dev and test profiles via `Cargo.toml` so crypto hashing and I/O loops run fast.
 - Store flushes bypass hardware `fsync` in test environments (`FLASHWT_TEST_NO_SYNC=1` or `cfg!(test)`). Do not add manual fsync calls into test paths.
 - Keep synthetic test fixtures sized around 50 to 200 files. Fixtures exceeding 1,000 files saturate APFS and must carry `#[ignore]`.
-
-

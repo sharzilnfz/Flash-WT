@@ -1,0 +1,11 @@
+{
+    "schema_version": 2,
+    "commit": "c94342eaab16302ccce8aa06ea075cbb0676d461",
+    "indexed_at": "2026-09-03T19:12:36Z",
+    "project": "instant-worktrees",
+    "nodes": 3769,
+    "edges": 14300,
+    "original_size": 9764864,
+    "compressed_size": 1946551,
+    "compression_level": 9
+}

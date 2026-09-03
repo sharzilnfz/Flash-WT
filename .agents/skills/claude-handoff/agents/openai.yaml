@@ -1,0 +1,6 @@
+interface:
+  display_name: "Claude Handoff"
+  short_description: "Hand off to a background agent"
+policy:
+  allow_implicit_invocation: false
+

@@ -2,13 +2,11 @@
 .fleet/
 .worktrees/
 .DS_Store
-# internal agent-workflow notes; not part of the public repo
 .scratch/
-.agents/
+.agents/**/.cache/
+.agents/**/scratch/
 skills-lock.json
 docs/archive/AGENT_HANDOFF_PLAN_REVISED.md
 docs/archive/step0-instrumentation-ticket.md
 docs/archive/v2-diff-rebuild-design-note-revised.md
-
-# verification skill proof artifacts (survive cleanup, never committed)
 /artifacts/
