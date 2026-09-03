@@ -37,6 +37,7 @@
 use std::cell::RefCell;
 #[cfg(target_os = "macos")]
 use std::ffi::CString;
+use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -86,6 +87,12 @@ pub struct BulkEntry {
     pub mtime_secs: u64,
     /// Modification time, sub-second nanoseconds.
     pub mtime_nanos: u32,
+    /// Inode number (`st_ino`).
+    pub inode: u64,
+    /// Attribute change time, seconds since the epoch.
+    pub ctime_secs: u64,
+    /// Attribute change time, sub-second nanoseconds.
+    pub ctime_nanos: u32,
     /// Access mode bits (`st_mode`, including S_IFMT type bits; the
     /// legacy walk's `MetadataExt::mode()` equivalent — mask with
     /// `0o7777` for permissions).
@@ -114,7 +121,9 @@ const VLNK: u32 = 5;
 const ATTR_CMN_NAME: u32 = 0x0000_0001;
 const ATTR_CMN_OBJTYPE: u32 = 0x0000_0008;
 const ATTR_CMN_MODTIME: u32 = 0x0000_0400;
+const ATTR_CMN_CHGTIME: u32 = 0x0000_0800;
 const ATTR_CMN_ACCESSMASK: u32 = 0x0002_0000;
+const ATTR_CMN_FILEID: u32 = 0x0200_0000;
 const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
 
 // File-attribute bits (<sys/attr.h>): sizes live here, not under CMN.
@@ -124,7 +133,9 @@ const ATTR_FILE_DATALENGTH: u32 = 0x0000_0200;
 const REQUEST_COMMON: u32 = ATTR_CMN_NAME
     | ATTR_CMN_OBJTYPE
     | ATTR_CMN_MODTIME
+    | ATTR_CMN_CHGTIME
     | ATTR_CMN_ACCESSMASK
+    | ATTR_CMN_FILEID
     | ATTR_CMN_RETURNED_ATTRS;
 const REQUEST_FILE: u32 = ATTR_FILE_DATALENGTH;
 
@@ -372,6 +383,24 @@ pub fn parse_record(
         }
     }
 
+    // CHGTIME: struct timespec { i64 seconds, i64 nanoseconds }.
+    let mut ctime_secs = 0u64;
+    let mut ctime_nanos = 0u32;
+    if common & ATTR_CMN_CHGTIME != 0 {
+        if pos + 16 > name_start || pos + 16 > record.len() {
+            return Err(io::Error::other(
+                "getattrlistbulk record too short for chgtime",
+            ));
+        }
+        let secs = read_i64(record, pos);
+        let nanos = read_i64(record, pos + 8);
+        pos += 16;
+        if secs >= 0 {
+            ctime_secs = secs as u64;
+            ctime_nanos = nanos.clamp(0, 999_999_999) as u32;
+        }
+    }
+
     // ACCESSMASK: u32 FULL st_mode including the S_IFMT type bits;
     // consumers mask to the 0o7777 permission slice like they would
     // with `MetadataExt::mode`.
@@ -384,6 +413,18 @@ pub fn parse_record(
         }
         mode = read_u32(record, pos);
         pos += 4;
+    }
+
+    // FILEID (inode): u64.
+    let mut inode = 0u64;
+    if common & ATTR_CMN_FILEID != 0 {
+        if pos + 8 > name_start || pos + 8 > record.len() {
+            return Err(io::Error::other(
+                "getattrlistbulk record too short for fileid",
+            ));
+        }
+        inode = read_u64(record, pos);
+        pos += 8;
     }
 
     // FILE DATALENGTH: u64; only returned for non-directories.
@@ -429,6 +470,31 @@ pub fn parse_record(
         format!("{prefix}/{name}")
     };
 
+    // If inode or ctime was not returned by getattrlistbulk, fallback safely to metadata.
+    let (inode, ctime_secs, ctime_nanos) =
+        if common & ATTR_CMN_FILEID != 0 && common & ATTR_CMN_CHGTIME != 0 {
+            (inode, ctime_secs, ctime_nanos)
+        } else {
+            #[cfg(target_os = "macos")]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let child_path = dir.join(std::ffi::OsStr::from_bytes(raw_name));
+                if let Ok(meta) = fs::symlink_metadata(&child_path) {
+                    (
+                        meta.ino(),
+                        meta.ctime().max(0) as u64,
+                        meta.ctime_nsec().clamp(0, 999_999_999) as u32,
+                    )
+                } else {
+                    (inode, ctime_secs, ctime_nanos)
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                (inode, ctime_secs, ctime_nanos)
+            }
+        };
+
     let is_dir = vtype == VDIR;
     let entry = BulkEntry {
         rel_path,
@@ -438,6 +504,9 @@ pub fn parse_record(
         size,
         mtime_secs,
         mtime_nanos,
+        inode,
+        ctime_secs,
+        ctime_nanos,
         mode,
     };
     if is_dir {
@@ -493,12 +562,16 @@ mod tests {
     use super::*;
 
     /// Helper to encode a synthetic attrlistbulk record.
+    #[allow(clippy::too_many_arguments)]
     fn encode_record(
         name: &str,
         vtype: u32,
         size: u64,
         mtime_secs: i64,
         mtime_nanos: i64,
+        ctime_secs: i64,
+        ctime_nanos: i64,
+        inode: u64,
         mode: u32,
         error_slot: u32,
     ) -> Vec<u8> {
@@ -521,9 +594,11 @@ mod tests {
         // pos 24: name ref (8 bytes) -> pos 32
         // pos 32: objtype (4 bytes) -> pos 36
         // pos 36: modtime (16 bytes) -> pos 52
-        // pos 52: accessmask (4 bytes) -> pos 56
-        // pos 56: datalength (8 bytes if filebits != 0) -> pos 64 (if file) or pos 56 (if non-file)
-        let fixed_len = if filebits != 0 { 64 } else { 56 };
+        // pos 52: chgtime (16 bytes) -> pos 68
+        // pos 68: accessmask (4 bytes) -> pos 72
+        // pos 72: fileid (8 bytes) -> pos 80
+        // pos 80: datalength (8 bytes if filebits != 0) -> pos 88 (if file) or pos 80 (if non-file)
+        let fixed_len = if filebits != 0 { 88 } else { 80 };
         let dataoffset: i32 = fixed_len - 24;
         let name_bytes = name.as_bytes();
         let name_len = (name_bytes.len() + 1) as u32;
@@ -538,8 +613,15 @@ mod tests {
         rec.extend_from_slice(&mtime_secs.to_le_bytes());
         rec.extend_from_slice(&mtime_nanos.to_le_bytes());
 
+        // chgtime (16 bytes)
+        rec.extend_from_slice(&ctime_secs.to_le_bytes());
+        rec.extend_from_slice(&ctime_nanos.to_le_bytes());
+
         // accessmask (4 bytes)
         rec.extend_from_slice(&mode.to_le_bytes());
+
+        // fileid (8 bytes)
+        rec.extend_from_slice(&inode.to_le_bytes());
 
         // datalength (8 bytes if filebits != 0)
         if filebits != 0 {
@@ -647,9 +729,24 @@ mod tests {
     #[test]
     fn strict_parsing_emits_valid_records_with_high_fidelity() {
         let mut raw = Vec::new();
-        let rec_file = encode_record("hello.txt", VREG, 4096, 1700000000, 500, 0o100644, 0);
-        let rec_dir = encode_record("sub", VDIR, 0, 1700000010, 0, 0o040755, 0);
-        let rec_link = encode_record("sym.lnk", VLNK, 0, 1700000020, 123, 0o120777, 0);
+        let rec_file = encode_record(
+            "hello.txt",
+            VREG,
+            4096,
+            1700000000,
+            500,
+            1700000001,
+            600,
+            1001,
+            0o100644,
+            0,
+        );
+        let rec_dir = encode_record(
+            "sub", VDIR, 0, 1700000010, 0, 1700000011, 0, 1002, 0o040755, 0,
+        );
+        let rec_link = encode_record(
+            "sym.lnk", VLNK, 0, 1700000020, 123, 1700000021, 456, 1003, 0o120777, 0,
+        );
 
         raw.extend_from_slice(&rec_file);
         raw.extend_from_slice(&rec_dir);
@@ -672,6 +769,9 @@ mod tests {
                 size: 4096,
                 mtime_secs: 1700000000,
                 mtime_nanos: 500,
+                inode: 1001,
+                ctime_secs: 1700000001,
+                ctime_nanos: 600,
                 mode: 0o100644,
             }
         );
@@ -686,6 +786,9 @@ mod tests {
                 size: 0,
                 mtime_secs: 1700000010,
                 mtime_nanos: 0,
+                inode: 1002,
+                ctime_secs: 1700000011,
+                ctime_nanos: 0,
                 mode: 0o040755,
             }
         );
@@ -701,6 +804,9 @@ mod tests {
                 size: 0,
                 mtime_secs: 1700000020,
                 mtime_nanos: 123,
+                inode: 1003,
+                ctime_secs: 1700000021,
+                ctime_nanos: 456,
                 mode: 0o120777,
             }
         );
@@ -709,10 +815,10 @@ mod tests {
     #[test]
     fn strict_parsing_prevents_ghost_entries_from_stale_buffer_tail() {
         let mut raw = Vec::new();
-        let rec1 = encode_record("valid1.txt", VREG, 100, 1000, 0, 0o100644, 0);
-        let rec2 = encode_record("valid2.txt", VREG, 200, 2000, 0, 0o100644, 0);
-        let ghost1 = encode_record("ghost1.txt", VREG, 999, 9999, 0, 0o100644, 0);
-        let ghost2 = encode_record("ghost2.txt", VREG, 888, 8888, 0, 0o100644, 0);
+        let rec1 = encode_record("valid1.txt", VREG, 100, 1000, 0, 1001, 0, 2001, 0o100644, 0);
+        let rec2 = encode_record("valid2.txt", VREG, 200, 2000, 0, 2001, 0, 2002, 0o100644, 0);
+        let ghost1 = encode_record("ghost1.txt", VREG, 999, 9999, 0, 9999, 0, 9999, 0o100644, 0);
+        let ghost2 = encode_record("ghost2.txt", VREG, 888, 8888, 0, 8888, 0, 8888, 0o100644, 0);
 
         raw.extend_from_slice(&rec1);
         raw.extend_from_slice(&rec2);
@@ -748,7 +854,7 @@ mod tests {
         assert!(parse_bulk_buffer(&short_buf, 1, dir, "", &mut out, &mut stack).is_err());
 
         // 2. Record length < 36 bytes
-        let mut bad_len = encode_record("a", VREG, 0, 0, 0, 0, 0);
+        let mut bad_len = encode_record("a", VREG, 0, 0, 0, 0, 0, 0, 0, 0);
         bad_len[0..4].copy_from_slice(&20u32.to_le_bytes());
         assert!(parse_bulk_buffer(&bad_len, 1, dir, "", &mut out, &mut stack).is_err());
 
@@ -761,27 +867,27 @@ mod tests {
         assert!(parse_bulk_buffer(&bad_len, 1, dir, "", &mut out, &mut stack).is_err());
 
         // 5. Entry error slot is non-zero
-        let err_slot = encode_record("err", VREG, 0, 0, 0, 0, libc::EIO as u32);
+        let err_slot = encode_record("err", VREG, 0, 0, 0, 0, 0, 0, 0, libc::EIO as u32);
         assert!(parse_bulk_buffer(&err_slot, 1, dir, "", &mut out, &mut stack).is_err());
 
         // 6. Name offset out of bounds / corrupted
-        let mut bad_name_off = encode_record("bad_offset", VREG, 0, 0, 0, 0, 0);
+        let mut bad_name_off = encode_record("bad_offset", VREG, 0, 0, 0, 0, 0, 0, 0, 0);
         bad_name_off[24..28].copy_from_slice(&(-10i32).to_le_bytes());
         assert!(parse_bulk_buffer(&bad_name_off, 1, dir, "", &mut out, &mut stack).is_err());
 
         // 7. Name length exceeds record length
-        let mut bad_name_len = encode_record("overflow", VREG, 0, 0, 0, 0, 0);
+        let mut bad_name_len = encode_record("overflow", VREG, 0, 0, 0, 0, 0, 0, 0, 0);
         bad_name_len[28..32].copy_from_slice(&500u32.to_le_bytes());
         assert!(parse_bulk_buffer(&bad_name_len, 1, dir, "", &mut out, &mut stack).is_err());
 
         // 8. Name missing trailing NUL
-        let mut no_nul = encode_record("nonul", VREG, 0, 0, 0, 0, 0);
-        let nul_idx = 64 + "nonul".len();
+        let mut no_nul = encode_record("nonul", VREG, 0, 0, 0, 0, 0, 0, 0, 0);
+        let nul_idx = 88 + "nonul".len();
         no_nul[nul_idx] = b'X';
         assert!(parse_bulk_buffer(&no_nul, 1, dir, "", &mut out, &mut stack).is_err());
 
         // 9. Unexpected common attributes
-        let mut unexp_attr = encode_record("unexp", VREG, 0, 0, 0, 0, 0);
+        let mut unexp_attr = encode_record("unexp", VREG, 0, 0, 0, 0, 0, 0, 0, 0);
         unexp_attr[4..8].copy_from_slice(&(REQUEST_COMMON | 0x0000_0002).to_le_bytes());
         assert!(parse_bulk_buffer(&unexp_attr, 1, dir, "", &mut out, &mut stack).is_err());
     }
