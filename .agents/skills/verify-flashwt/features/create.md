@@ -12,6 +12,7 @@ already materialized from the content-addressed store.
 - `create-base` honors `--base` for the starting ref.
 - `create-modern-verb` supports `flashwt new` as an alias to `flashwt create`, with `"command": "create"` in the JSON envelope.
 - `create-resumption` detects an interrupted operation receipt and resumes hydration rather than failing.
+- `create-lockfile-guard` refuses dependency hydration when `new --base <ref>` targets a branch whose lockfile differs from the donor checkout, leaving the worktree in place with a clean message naming the package manager to run.
 
 ## How to get to it (user POV)
 
@@ -43,6 +44,7 @@ Preconditions:
   reports `data.files_hydrated` of `0` and `data.hydration_method` of `none`.
   This proves that the manifest, not gitignore, drives hydration.
 - **Duplicate destination error.** Running create against an existing directory with no active receipt fails with exit code 2 and returns a JSON error envelope with `status: "error"`.
+- **Cross-branch lockfile mismatch.** From a checkout whose lockfile differs from `--base <ref>`, run `flashwt --json new <name> --base <ref> --dir <outside>`. Envelope `status` is `ok`; `data.hydration_method` is `"none"`; `data.files_hydrated` is `0`; one warning diagnostic carries `code` `"LOCKFILE_MISMATCH"` with a message naming the mismatched lockfile and the package manager command to run. Human output prints `flashwt: lockfile mismatch in <ref> (...)` plus the same command.
 - **Proof.** Save both envelopes plus `ls -R` of the hydrated tree and the
   `find "$FLASHWT_STORE" -maxdepth 2` listing to `artifacts/verify-flashwt/<run-id>/`.
 
@@ -58,3 +60,4 @@ Preconditions:
 - The default worktree destination is a sibling of the repo. Always pass
   `--dir` into the fixture, or proofs litter the real filesystem.
 - If an interrupted create leaves an incomplete receipt behind, a second create with the same name resumes hydration rather than failing.
+- A lockfile-guard refusal exits successfully with an empty heavy directory on purpose: run the named package manager inside the new worktree instead of treating the empty directory as broken. The guard only runs when `--base` is passed.

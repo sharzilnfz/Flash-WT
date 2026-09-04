@@ -8,6 +8,7 @@
 - `hydrate-source-discovery` infers the source repository from cwd or accepts an explicit `--source <path>`.
 - `hydrate-manifest` honors `--manifest` overrides of default `.flashwtinclude`.
 - `hydrate-cow` uses fast Copy-on-Write clones (`fclonefileat` on APFS) or falls back to byte copies.
+- `hydrate-lockfile-hit` skips store ingestion entirely when a pinned lockfile matches a published snapshot, cloning the snapshot tree in one step and reporting `hydration_method` `"clone"` with `bytes_shared_cow` above zero and `bytes_copied` at zero.
 - `hydrate-timing` measures stage durations and reports total files and bytes shared.
 
 ## How to get to it (user POV)
@@ -36,3 +37,4 @@ Preconditions:
 - Target path must already exist on disk and be a directory, or `flashwt hydrate` exits with a usage error.
 - When `--source` is omitted outside a git repository or worktree, `flashwt hydrate` cannot infer the source root and exits with an error.
 - Hydration into an existing directory does not register a git worktree or create a git branch; it strictly materializes the heavy files.
+- A lockfile-hit reports `hydration_method` `"clone"`, never `"snapshot"; check `bytes_shared_cow` and `bytes_copied` to distinguish a true snapshot hit from per-file placement.
