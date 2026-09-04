@@ -8,7 +8,8 @@ use std::path::Path;
 
 use flashwt_store::{
     DiskStore, HydrateDest, HydrateOutcome, HydratePinned, HydratePolicy, HydrateReq, HydrateSrc,
-    HydrateTree, Ingested,
+    HydrateTree, Ingested, StoreReclaimer, SweepPolicy, WorkspaceHydrateReq,
+    ZERO_SAVINGS_NO_FILES_HYDRATED, ZERO_SAVINGS_NO_MATCHING_DIRS,
 };
 use tempfile::TempDir;
 
@@ -311,4 +312,162 @@ fn pinned_lockfile_hit_hydrates_without_ingest() {
             "fast path is macOS-only"
         );
     }
+}
+
+#[test]
+fn workspace_hydration_zero_matching_directories_publishes_empty_mirror_and_records_metadata() {
+    let store_dir = TempDir::new().expect("store dir");
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+
+    let repo_dir = TempDir::new().expect("repo dir");
+    fs::create_dir_all(repo_dir.path().join("src")).expect("create src");
+    fs::write(repo_dir.path().join("src/main.rs"), b"fn main() {}\n").expect("write main");
+
+    let worktree_dir = TempDir::new().expect("worktree dir");
+    let git_dir = TempDir::new().expect("git dir");
+
+    let patterns = vec!["node_modules/".to_string(), "target/".to_string()];
+    let req = WorkspaceHydrateReq {
+        repo_root: repo_dir.path(),
+        worktree_root: worktree_dir.path(),
+        git_dir: git_dir.path(),
+        patterns: &patterns,
+        base_branch: Some("feature/zero-baseline"),
+        base_commit: Some("a1b2c3d4e5f67890"),
+        policy: HydratePolicy::default(),
+    };
+
+    let receipt = store.hydrate_workspace(req).expect("hydrate workspace");
+
+    assert_eq!(receipt.files_total, 0);
+    assert_eq!(receipt.files_copied, 0);
+    assert_eq!(receipt.bytes_copied, 0);
+    assert_eq!(receipt.bytes_shared, 0);
+    assert_eq!(receipt.strategy, "none");
+    assert!(!receipt.snapshot_hit);
+    assert!(
+        receipt
+            .diagnostics
+            .iter()
+            .any(|d| d == ZERO_SAVINGS_NO_MATCHING_DIRS)
+    );
+
+    let mirror = store
+        .read_worktree_mirror(worktree_dir.path(), git_dir.path())
+        .expect("read mirror")
+        .expect("mirror exists");
+
+    assert_eq!(
+        mirror.base_branch.as_deref(),
+        Some("feature/zero-baseline")
+    );
+    assert_eq!(
+        mirror.base_commit.as_deref(),
+        Some("a1b2c3d4e5f67890")
+    );
+    assert!(mirror.files.is_empty());
+    assert!(mirror.snapshots.is_empty());
+
+    let mirror_file = flashwt_store::mirror_path(
+        store_dir.path(),
+        &fs::canonicalize(worktree_dir.path()).expect("canon worktree"),
+        &fs::canonicalize(git_dir.path()).expect("canon gitdir"),
+    );
+    assert!(mirror_file.exists());
+}
+
+#[test]
+fn workspace_hydration_empty_heavy_tree_publishes_empty_mirror_and_reports_zero_savings() {
+    let store_dir = TempDir::new().expect("store dir");
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+
+    let repo_dir = TempDir::new().expect("repo dir");
+    fs::create_dir_all(repo_dir.path().join("node_modules")).expect("create node_modules");
+
+    let worktree_dir = TempDir::new().expect("worktree dir");
+    let git_dir = TempDir::new().expect("git dir");
+
+    let patterns = vec!["node_modules/".to_string()];
+    let req = WorkspaceHydrateReq {
+        repo_root: repo_dir.path(),
+        worktree_root: worktree_dir.path(),
+        git_dir: git_dir.path(),
+        patterns: &patterns,
+        base_branch: None,
+        base_commit: None,
+        policy: HydratePolicy::default(),
+    };
+
+    let receipt = store.hydrate_workspace(req).expect("hydrate workspace");
+
+    assert_eq!(receipt.files_total, 0);
+    assert_eq!(receipt.files_copied, 0);
+    assert_eq!(receipt.bytes_copied, 0);
+    assert_eq!(receipt.bytes_shared, 0);
+    assert_eq!(receipt.strategy, "none");
+    assert!(!receipt.snapshot_hit);
+    assert!(
+        receipt
+            .diagnostics
+            .iter()
+            .any(|d| d == ZERO_SAVINGS_NO_FILES_HYDRATED)
+    );
+
+    let mirror = store
+        .read_worktree_mirror(worktree_dir.path(), git_dir.path())
+        .expect("read mirror")
+        .expect("mirror exists");
+
+    assert_eq!(mirror.base_branch, None);
+    assert_eq!(mirror.base_commit, None);
+    assert!(mirror.files.is_empty());
+    assert!(mirror.snapshots.is_empty());
+}
+
+#[test]
+fn workspace_hydration_empty_mirror_preserves_blobs_during_garbage_collection() {
+    let store_dir = TempDir::new().expect("store dir");
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+
+    let blob_id = store.put(b"protected store payload").expect("put blob");
+    store.add_ref(&blob_id).expect("add ref");
+    assert_eq!(store.ref_count(&blob_id).expect("ref count"), 1);
+
+    let repo_dir = TempDir::new().expect("repo dir");
+    let worktree_dir = TempDir::new().expect("worktree dir");
+    let git_dir = TempDir::new().expect("git dir");
+
+    let patterns = vec!["node_modules/".to_string()];
+    let req = WorkspaceHydrateReq {
+        repo_root: repo_dir.path(),
+        worktree_root: worktree_dir.path(),
+        git_dir: git_dir.path(),
+        patterns: &patterns,
+        base_branch: Some("main"),
+        base_commit: Some("commit01"),
+        policy: HydratePolicy::default(),
+    };
+
+    let receipt = store.hydrate_workspace(req).expect("hydrate workspace");
+    assert_eq!(receipt.files_total, 0);
+
+    let mut reclaimer = StoreReclaimer::new(&mut store);
+    let policy = SweepPolicy {
+        grace: std::time::Duration::ZERO,
+        snapshot_cap: 64,
+        max_snapshot_bytes: None,
+        dry_run: false,
+    };
+
+    let summary = reclaimer.sweep_objects(&policy).expect("sweep objects");
+    assert_eq!(summary.reclaimed_blobs, 0);
+
+    assert!(store.get(&blob_id).is_ok());
+    assert_eq!(store.ref_count(&blob_id).expect("ref count"), 1);
+
+    let mirror = store
+        .read_worktree_mirror(worktree_dir.path(), git_dir.path())
+        .expect("read mirror")
+        .expect("mirror exists");
+    assert!(mirror.files.is_empty());
 }

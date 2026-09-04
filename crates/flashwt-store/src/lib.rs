@@ -22,7 +22,8 @@ pub use gc::{
 };
 pub use hydrate::{
     HydrateDest, HydrateOutcome, HydratePinned, HydratePolicy, HydrateReq, HydrateSrc, HydrateTree,
-    HydrationReceipt,
+    HydrationReceipt, WorkspaceHydrateReq, ZERO_SAVINGS_NO_FILES_HYDRATED,
+    ZERO_SAVINGS_NO_MATCHING_DIRS, collect_matches, is_volatile_cache, pattern_matches,
 };
 pub use ingest::{IngestOptions, Ingested, stream_hash_file};
 pub use lease::{

@@ -10,6 +10,12 @@ use crate::ingest::Ingested;
 use crate::snapshot::{SnapshotOutcome, SnapshotProjectionEngine, SnapshotProjectionRequest};
 use crate::{ContentId, DiskStore, GcMode, Result};
 
+pub const ZERO_SAVINGS_NO_MATCHING_DIRS: &str =
+    "ZERO_SAVINGS: hydration saved 0 bytes; no matching heavy directories found and the worktree relies strictly on git tracking";
+
+pub const ZERO_SAVINGS_NO_FILES_HYDRATED: &str =
+    "ZERO_SAVINGS: hydration saved 0 bytes; no files hydrated from matching directories and the worktree relies strictly on git tracking";
+
 #[derive(Debug, Clone, Copy)]
 pub struct HydratePolicy {
     pub verify: bool,
@@ -19,6 +25,34 @@ pub struct HydratePolicy {
     pub v2: bool,
 
     pub strategy: flashwt_copy::StrategyPolicy,
+}
+
+impl Default for HydratePolicy {
+    fn default() -> Self {
+        HydratePolicy {
+            verify: false,
+            snapshots: true,
+            v2: true,
+            strategy: flashwt_copy::StrategyPolicy::Default,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceHydrateReq<'a> {
+    pub repo_root: &'a Path,
+
+    pub worktree_root: &'a Path,
+
+    pub git_dir: &'a Path,
+
+    pub patterns: &'a [String],
+
+    pub base_branch: Option<&'a str>,
+
+    pub base_commit: Option<&'a str>,
+
+    pub policy: HydratePolicy,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -126,6 +160,61 @@ impl DiskStore {
                 .hydrate_tree(tree, req.dest, req.policy)
                 .map(HydrateOutcome::Hydrated),
         }
+    }
+
+    pub fn hydrate_workspace(&mut self, req: WorkspaceHydrateReq<'_>) -> Result<HydrationReceipt> {
+        let start = Instant::now();
+        let matched_dirs = collect_matches(req.repo_root, req.patterns)?;
+
+        let has_files = !matched_dirs.is_empty()
+            && matched_dirs
+                .iter()
+                .any(|rel| has_any_files(&req.repo_root.join(rel)));
+
+        if !has_files {
+            fs::create_dir_all(req.worktree_root)?;
+            fs::create_dir_all(req.git_dir)?;
+
+            self.publish_worktree_mirror(
+                req.worktree_root,
+                req.git_dir,
+                std::iter::empty(),
+                std::iter::empty(),
+                req.base_branch,
+                req.base_commit,
+            )?;
+
+            self.flush()?;
+
+            let diagnostic = if matched_dirs.is_empty() {
+                ZERO_SAVINGS_NO_MATCHING_DIRS.to_string()
+            } else {
+                ZERO_SAVINGS_NO_FILES_HYDRATED.to_string()
+            };
+
+            return Ok(HydrationReceipt {
+                strategy: "none".to_string(),
+                files_total: 0,
+                files_copied: 0,
+                bytes_shared: 0,
+                bytes_copied: 0,
+                snapshot_hit: false,
+                elapsed_ms: start.elapsed().as_millis(),
+                diagnostics: vec![diagnostic],
+                v2_cloned: 0,
+                v2_linked: 0,
+                incremental_decision: None,
+                incremental_fallback_reason: None,
+                incremental_hit_rate: None,
+                copy_backend: None,
+                refusal_reason: None,
+            });
+        }
+
+        Err(crate::Error::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "non-empty heavy directory hydration is not yet supported in this ticket",
+        )))
     }
 
     fn hydrate_pinned(
@@ -416,4 +505,154 @@ fn resolve_dest_path(worktree_root: &Path, heavy_rel: &str, rel: &str) -> PathBu
     } else {
         worktree_root.join(heavy_rel).join(rel)
     }
+}
+
+pub fn pattern_matches(pattern: &str, rel: &Path) -> bool {
+    let pat = pattern.trim_end_matches('/').trim_start_matches('/');
+    if pat.is_empty() {
+        return false;
+    }
+    let segs: Vec<&str> = pat.split('/').collect();
+    let rel_text = rel.to_string_lossy();
+    let rel_clean = rel_text.trim_start_matches('/').trim_end_matches('/');
+    if rel_clean.is_empty() {
+        return false;
+    }
+    let path_segs: Vec<&str> = rel_clean.split('/').collect();
+    if pat.contains('/') {
+        glob_match(&segs, &path_segs)
+    } else {
+        path_segs.iter().any(|seg| segment_match(pat, seg))
+    }
+}
+
+fn glob_match(pat: &[&str], path: &[&str]) -> bool {
+    match pat.split_first() {
+        None => path.is_empty(),
+        Some((&"**", rest)) => (0..=path.len()).any(|i| glob_match(rest, &path[i..])),
+        Some((p, rest)) => match path.split_first() {
+            Some((seg, tail)) if segment_match(p, seg) => glob_match(rest, tail),
+            _ => false,
+        },
+    }
+}
+
+fn segment_match(pattern: &str, segment: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == segment,
+        Some((prefix, suffix)) => {
+            segment.len() >= prefix.len() + suffix.len()
+                && segment.starts_with(prefix)
+                && segment.ends_with(suffix)
+        }
+    }
+}
+
+pub fn is_volatile_cache(rel_path: &str) -> bool {
+    let normalized = rel_path.trim_start_matches('/').trim_end_matches('/');
+    let segs: Vec<&str> = normalized.split('/').collect();
+
+    for (i, &seg) in segs.iter().enumerate() {
+        if seg == "target" {
+            if segs.get(i + 1) == Some(&"incremental") {
+                return true;
+            }
+            if segs.get(i + 2) == Some(&"incremental") {
+                return true;
+            }
+        }
+        if seg == "incremental" && i > 0 && segs[..i].contains(&"target") {
+            return true;
+        }
+        if seg == ".next" && segs.get(i + 1) == Some(&"cache") {
+            return true;
+        }
+        if seg == "cache" && i > 0 && segs[..i].ends_with(&[".next"]) {
+            return true;
+        }
+        if seg == "node_modules" && segs.get(i + 1) == Some(&".vite") {
+            return true;
+        }
+        if seg == ".vite" && i > 0 && segs[..i].ends_with(&["node_modules"]) {
+            return true;
+        }
+    }
+
+    false
+}
+
+pub fn collect_matches(root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>> {
+    let mut matched = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    let positive_patterns: Vec<&str> = patterns
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !p.starts_with('!'))
+        .collect();
+    let negative_patterns: Vec<&str> = patterns
+        .iter()
+        .map(String::as_str)
+        .filter(|p| p.starts_with('!'))
+        .map(|p| p.trim_start_matches('!'))
+        .collect();
+
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() || entry.file_name() == ".git" {
+                continue;
+            }
+            let rel = path.strip_prefix(root).map_err(|_| {
+                crate::Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("pattern matched path outside repository root: {}", path.display()),
+                ))
+            })?;
+            let rel_str = rel.to_string_lossy();
+            if negative_patterns.iter().any(|p| pattern_matches(p, rel))
+                || is_volatile_cache(&rel_str)
+            {
+                continue;
+            }
+            if positive_patterns.iter().any(|p| pattern_matches(p, rel)) {
+                matched.push(rel.to_path_buf());
+            } else {
+                stack.push(path);
+            }
+        }
+    }
+    matched.sort();
+    Ok(matched
+        .into_iter()
+        .scan(None::<PathBuf>, |prev, rel| {
+            let covered = prev.as_ref().is_some_and(|p| rel.starts_with(p));
+            if !covered {
+                *prev = Some(rel.clone());
+            }
+            Some((!covered).then_some(rel))
+        })
+        .flatten()
+        .collect())
+}
+
+fn has_any_files(dir: &Path) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() || path.is_symlink() {
+                return true;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    false
 }
