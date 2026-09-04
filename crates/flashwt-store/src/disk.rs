@@ -231,7 +231,9 @@ impl DiskStore {
         let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
         writeln!(tmp, "{count}")?;
 
-        tmp.as_file().sync_all()?;
+        if !crate::fsutil::is_sync_disabled() {
+            tmp.as_file().sync_all()?;
+        }
         tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
         crate::fsutil::sync_parent_dir(&path)?;
         Ok(())

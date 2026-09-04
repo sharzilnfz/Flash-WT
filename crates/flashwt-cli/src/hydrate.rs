@@ -430,7 +430,7 @@ impl<'a> HydrationEngine<'a> {
                             flashwt_store::HydratePinned {
                                 repo_root: req.root,
                                 pattern,
-                                src_root: &src,
+                                src_root: req.root,
                                 heavy_rel: &heavy,
                                 lockfile_hash: lock_hash,
                             },
@@ -450,6 +450,8 @@ impl<'a> HydrationEngine<'a> {
                         flashwt_store::HydrateOutcome::Hydrated(info) => {
                             let hydration_ms = stage.elapsed().as_millis();
                             total_files += info.files_total;
+                            bytes_shared_cow += info.bytes_shared;
+                            bytes_copied += info.bytes_copied;
                             snapshot_hits_count += 1;
                             timings.snapshot_engaged = true;
                             timings.snapshot_ms += hydration_ms;

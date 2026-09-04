@@ -150,16 +150,18 @@ impl DiskStore {
         ) {
             SnapshotOutcome::Hydrated(info) => {
                 let manifest_id = info.hash;
-                if self.gc_mode() != GcMode::MarkSweepNoRefs {
-                    if let Some(manifest) =
-                        crate::snapshot::read_published(self.root(), &manifest_id)
-                    {
-                        let mut distinct_blobs = BTreeSet::new();
-                        for entry in &manifest.entries {
-                            if let Some(blob) = entry.blob {
-                                distinct_blobs.insert(blob);
-                            }
+                let mut shared_bytes = 0u64;
+                if let Some(manifest) = crate::snapshot::read_published(self.root(), &manifest_id) {
+                    let mut distinct_blobs = BTreeSet::new();
+                    for entry in &manifest.entries {
+                        if let Some(blob) = entry.blob {
+                            distinct_blobs.insert(blob);
+                            shared_bytes += fs::metadata(self.object_path(&blob))
+                                .map(|m| m.len())
+                                .unwrap_or(0);
                         }
+                    }
+                    if self.gc_mode() != GcMode::MarkSweepNoRefs {
                         for id in &distinct_blobs {
                             self.add_ref(id)?;
                         }
@@ -178,7 +180,7 @@ impl DiskStore {
                     strategy: "snapshot-hit".to_string(),
                     files_total: info.files,
                     files_copied: 0,
-                    bytes_shared: 0,
+                    bytes_shared: shared_bytes,
                     bytes_copied: 0,
                     snapshot_hit: true,
                     elapsed_ms: start.elapsed().as_millis(),
