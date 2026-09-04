@@ -640,7 +640,7 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
         hydration_method: phases.method,
         bytes_shared_cow: phases.bytes_shared,
         bytes_copied: phases.bytes_copied,
-        space_savings_bytes: report.bytes_shared_cow.max(total_bytes),
+        space_savings_bytes: phases.bytes_shared,
         isolation_verified,
         cleaned_up,
         total_duration_ms,
