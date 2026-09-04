@@ -1,11 +1,11 @@
 {
     "schema_version": 2,
-    "commit": "c94342eaab16302ccce8aa06ea075cbb0676d461",
-    "indexed_at": "2026-09-03T19:12:36Z",
-    "project": "instant-worktrees",
-    "nodes": 3769,
-    "edges": 14300,
-    "original_size": 9764864,
-    "compressed_size": 1946551,
-    "compression_level": 9
+    "commit": "5ec882e068ed6f302f0ceefc71b51b863832fd70",
+    "indexed_at": "2026-09-04T06:44:23Z",
+    "project": "Users-sharzilnafis-Projects-dumps-idea1",
+    "nodes": 3759,
+    "edges": 14181,
+    "original_size": 15859712,
+    "compressed_size": 2677539,
+    "compression_level": 3
 }

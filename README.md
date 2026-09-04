@@ -8,27 +8,28 @@ Instant git worktrees with heavy dependency directories already hydrated.
 flashwt new feat-auth
 ```
 
-`flashwt` creates a git worktree on a new branch with `node_modules/`, `target/`, `.venv/`, and build caches in place. Files materialize from a local content-addressed store using copy-on-write clones. A 40,000-file project workspace appears in 1.3 seconds instead of minutes.
+`flashwt` creates a git worktree on a new branch with `node_modules/`, `target/`, `.venv/`, and build caches already in place. Files materialize from a local content-addressed store or your donor checkout using copy-on-write clones (`clonefile` on macOS, `reflink`/`copy_file_range` on Linux). Instead of copying gigabytes across physical disk sectors, heavy directories share physical storage blocks until modified.
 
 ## Why Flash-WT
 
-Standard `git worktree add` checks out source code quickly. It leaves untracked dependencies empty. Every fresh checkout pays the full setup tax again. Running `npm install`, `cargo build`, or recreating virtual environments across parallel branches wastes time, CPU, and disk space.
+Standard `git worktree add` checks out source code quickly, but leaves untracked dependencies empty. Every fresh worktree requires manually copying dependency folders or re-running package managers and compilers.
 
-`flashwt` eliminates this friction:
+`flashwt` streamlines this workflow:
 
-- **Instant hydration.** Hydrates project dependencies in ~1.3 seconds via APFS `clonefile` on macOS or reflink and `copy_file_range` on Linux.
-- **Zero-copy storage.** Worktree files share physical disk blocks with the store until modified. Five concurrent worktrees of a 150 MB project take ~120 MB total on disk instead of 780 MB.
-- **Private and isolated.** Worktree files are normal, fully writable files. Changes in one worktree never affect sibling branches or the central store.
-- **No background daemons.** No background sync processes and no filesystem watchers. All actions run on demand.
+- **Instant hydration.** Hydrates project dependencies in sub-seconds via APFS `clonefile` on macOS or reflink and `copy_file_range` on Linux.
+- **Copy-on-write storage.** Worktree files share physical disk blocks with the donor checkout and store until modified, avoiding redundant disk usage.
+- **Private and isolated.** Worktree files are normal, fully writable files. Edits in one worktree never bleed into sibling worktrees or the central store.
+- **Cross-branch lockfile guard.** If target branch lockfiles differ from the donor checkout, hydration is refused cleanly to prevent corrupted dependencies.
+- **No background daemons.** No background sync processes, daemons, or filesystem watchers. All operations run synchronously on demand.
 - **Agent automation.** Every command supports `--json` output conforming to a frozen schema for AI coding workflows.
 
-### Measured performance (40,000 files / 800 packages)
+### How it compares to physical duplication
 
-| Operation | Standard approach | Flash-WT | Delta |
+| Operation | Standard byte copy | Flash-WT (Copy-on-Write) | Benefit |
 |---|---|---|---|
-| Fresh worktree setup | 35.0s (`npm install`) | **1.3s** (`flashwt new`) | 27x faster |
-| Disk space (5 worktrees) | 781 MB (unshared copies) | **121 MB** (APFS CoW) | 6.5x storage saved |
-| Small repo setup (<500 files) | 2.0s (package install) | **0.05s** (tiny bypass) | 40x faster |
+| Heavy dir hydration (10,000 files) | ~1,000–3,000 ms (full byte I/O) | **~10–50 ms** (clonefile/reflink) | Near-instant checkout |
+| Storage footprint per worktree | 100% duplicated bytes | **0 B shared** (CoW metadata only) | Multi-worktree density |
+| Isolation | Isolated | **Isolated** (break-on-write) | Zero bleed across branches |
 
 ## Installation
 
