@@ -37,4 +37,4 @@ Preconditions:
 - Target path must already exist on disk and be a directory, or `flashwt hydrate` exits with a usage error.
 - When `--source` is omitted outside a git repository or worktree, `flashwt hydrate` cannot infer the source root and exits with an error.
 - Hydration into an existing directory does not register a git worktree or create a git branch; it strictly materializes the heavy files.
-- A lockfile-hit reports `hydration_method` `"clone"`, never `"snapshot"; check `bytes_shared_cow` and `bytes_copied` to distinguish a true snapshot hit from per-file placement.
+- A lockfile-hit reports `hydration_method` `"clone"`, never `"snapshot"`; check `bytes_shared_cow` and `bytes_copied` to distinguish a true snapshot hit from per-file placement.

@@ -5,7 +5,7 @@
 ## Sub-features
 
 - `doctor-store-path` resolves and reports the active content-addressed store root directory.
-- `doctor-env-vars` displays the presence and value of all ten configuration environment variables.
+- `doctor-env-vars` displays the presence and value of all twelve configuration environment variables.
 - `doctor-fs-capabilities` probes and reports support for APFS clonefile, FICLONE, and copy_file_range.
 - `doctor-disk-usage` inspects and categorizes storage consumption across objects, snapshots, mirrors, refs, and caches.
 - `doctor-json-envelope` outputs structured diagnostic data under `status: "ok"` and `command: "doctor"`.

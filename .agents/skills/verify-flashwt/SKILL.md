@@ -63,7 +63,7 @@ repo is broken. Rebuild it with `mkfixture.sh` rather than debugging it.
 
 ## Subcommands
 
-flashwt exposes 13 distinct command surfaces (with primary verbs and aliases):
+flashwt exposes 14 distinct command surfaces (with primary verbs and aliases):
 
 1. **`init`**: Initialize a starter `.flashwtinclude` manifest in the repository root or target directory.
    ```sh
@@ -119,7 +119,7 @@ flashwt exposes 13 distinct command surfaces (with primary verbs and aliases):
     ```sh
     flashwt doctor
     ```
-13. **`demo` / `test-drive`**: Run zero-setup 10,000-file benchmark, CoW verification, and isolation tests.
+13. **`demo` / `test-drive`**: Run zero-setup 800-file benchmark, CoW verification, and isolation tests.
     ```sh
     flashwt demo
     flashwt test-drive

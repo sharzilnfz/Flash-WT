@@ -35,7 +35,7 @@ flashwt --json remove demo  --dir "$FLASHWT_FIXTURE/demo"
 
 - **Dry-run preview.** `flashwt --json sweep --age 0s --dry-run`. Envelope `status` is
   `ok`; `data.dry_run` is `true`; `data.unreferenced_blobs` is greater than 0;
-  `data.reclaimed` is `0`.
+  `data.reclaimed` reports the count of unreferenced blobs eligible for reclamation.
 - **Live sweep with age floor.** `flashwt --json sweep --age 0s`. Envelope `status` is
   `ok`; `data.mode` is present; `data.examined` counts store entries;
   `data.reclaimed` reports entries deleted; `data.leases_examined` counts evaluated leases;

@@ -23,7 +23,7 @@ Preconditions:
 - Fixture loaded, cwd `$FLASHWT_ORIGIN`.
 - Store initialized with legacy ref files (default state after `flashwt create demo`).
 
-- **Inspect store disk usage.** `flashwt --json store du`. Envelope `status` is `ok`; `command` is `store`; `data.total_bytes` is numeric.
+- **Inspect store disk usage.** `flashwt --json store du`. Envelope `status` is `ok`; `command` is `store du`; `data.total_bytes` is numeric.
 - **Activate mark-sweep.** `flashwt --json store migrate --activate-mark-sweep`. Envelope `status` is `ok`; `command` is `store`; `data.gc_mode` is `mark-sweep`. Field `purged_legacy_refs` is omitted from serialized JSON when not dropping refs.
 - **Verify mode file.** `cat "$FLASHWT_STORE/gc-mode"` prints `mark-sweep`.
 - **Verify sweep in mark-sweep mode.** `flashwt --json sweep --age 0s` reports `data.mode` is `mark-sweep`, `data.mirrors_removed` is `0`, and `data.deferred_by_grace` is `false`.
