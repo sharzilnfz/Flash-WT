@@ -112,6 +112,8 @@ pub struct HydrationReceipt {
     pub copy_backend: Option<String>,
 
     pub refusal_reason: Option<String>,
+
+    pub snapshot_hash: Option<ContentId>,
 }
 
 impl DiskStore {
@@ -162,6 +164,7 @@ impl DiskStore {
                 incremental_hit_rate: None,
                 copy_backend: None,
                 refusal_reason: None,
+                snapshot_hash: None,
             });
         }
 
@@ -264,11 +267,16 @@ impl DiskStore {
             }
 
             if !hit_this_dir {
+                let mut tree_policy = req.policy;
+                if tree_policy.verify {
+                    tree_policy.snapshots = false;
+                }
+
                 let ingested = self.ingest_tree(
                     req.repo_root,
                     &src,
                     &crate::IngestOptions {
-                        snapshots: can_snapshot,
+                        snapshots: can_snapshot && !req.policy.verify,
                         exclude: &|rel_str| is_volatile_cache(rel_str),
                     },
                 )?;
@@ -288,13 +296,15 @@ impl DiskStore {
                         base_branch: req.base_branch,
                         base_commit: req.base_commit,
                     },
-                    req.policy,
+                    tree_policy,
                 )?;
 
                 if !tree_receipt.strategy.starts_with("snapshot") {
                     for blob in ingested.files.values() {
                         all_blob_ids.insert(*blob);
                     }
+                } else if let Some(hash) = tree_receipt.snapshot_hash {
+                    snapshot_ids.insert(hash);
                 }
 
                 total_files += tree_receipt.files_total;
@@ -370,6 +380,11 @@ impl DiskStore {
             incremental_hit_rate,
             copy_backend: last_copy_backend,
             refusal_reason: last_refusal_reason,
+            snapshot_hash: if snapshot_ids.len() == 1 {
+                snapshot_ids.iter().copied().next()
+            } else {
+                None
+            },
         })
     }
 
@@ -443,6 +458,7 @@ impl DiskStore {
                         incremental_hit_rate: info.incremental_hit_rate,
                         copy_backend: Some("clonefile".to_string()),
                         refusal_reason: None,
+                        snapshot_hash: Some(info.hash),
                     });
                 }
                 SnapshotOutcome::FellBack(diag) => {
@@ -558,6 +574,7 @@ impl DiskStore {
             incremental_hit_rate: None,
             copy_backend,
             refusal_reason,
+            snapshot_hash: None,
         })
     }
 }

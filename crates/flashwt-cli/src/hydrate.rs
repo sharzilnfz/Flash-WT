@@ -538,6 +538,8 @@ impl<'a> HydrationEngine<'a> {
         let cache_hit = (receipt.snapshot_hit && !timings.snapshot_built)
             || (total_files > 0 && total_copied == 0 && !timings.snapshot_built);
 
+        let snapshot_hashes = receipt.snapshot_hash.into_iter().collect();
+
         Ok(HydrationReport {
             total_files,
             total_copied,
@@ -548,7 +550,7 @@ impl<'a> HydrationEngine<'a> {
             copy_backend: last_copy_backend,
             refusal_reason: last_refusal_reason,
             cache_hit,
-            snapshot_hashes: Vec::new(),
+            snapshot_hashes,
             dirs_hydrated,
             timings,
             diagnostics,
