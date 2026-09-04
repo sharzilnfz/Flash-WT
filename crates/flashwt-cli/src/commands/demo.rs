@@ -2,12 +2,12 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
-use flashwt_store::{ContentId, DiskStore};
+use flashwt_store::{ContentId, DiskStore, HydratePolicy, WorkspaceHydrateReq};
 
 use crate::config::RunConfig;
 use crate::envelope::{DemoData, Diagnostic};
 use crate::error::{Error, Result};
-use crate::hydrate::{HydrationEngine, HydrationRequest, open_store};
+use crate::hydrate::open_store;
 use crate::output::{HumanBytes, HumanCount};
 use crate::workspace;
 
@@ -491,16 +491,19 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
     let warm_patterns = vec!["node_modules/".to_string()];
     {
         let mut store = open_store()?;
-        let mut engine = HydrationEngine::new(&mut store);
-        let req = HydrationRequest {
-            root: &donor_repo,
-            dest: &warm_dest,
+        let warm_git_dir = workspace::resolve_git_dir(&warm_dest);
+        let ws_req = WorkspaceHydrateReq {
+            repo_root: &donor_repo,
+            worktree_root: &warm_dest,
+            git_dir: &warm_git_dir,
             patterns: &warm_patterns,
             base_branch: None,
             base_commit: None,
-            cfg,
+            policy: HydratePolicy::default(),
         };
-        engine.hydrate(req)?;
+        store
+            .hydrate_workspace(ws_req)
+            .map_err(|e| Error::Store(format!("cold demo hydration failed: {e}")))?;
     }
     if !cfg.json {
         println!("  ✓ Store warmed (one-time cost, excluded from score)");
@@ -550,25 +553,34 @@ pub fn run(cfg: &RunConfig) -> Result<(DemoData, Vec<Diagnostic>)> {
 
     let patterns = vec!["node_modules/".to_string()];
     let mut store = open_store()?;
-    let mut engine = HydrationEngine::new(&mut store);
-    let req = HydrationRequest {
-        root: &donor_repo,
-        dest: &worktree_dest,
+    let worktree_git_dir = workspace::resolve_git_dir(&worktree_dest);
+    let ws_req = WorkspaceHydrateReq {
+        repo_root: &donor_repo,
+        worktree_root: &worktree_dest,
+        git_dir: &worktree_git_dir,
         patterns: &patterns,
         base_branch: None,
         base_commit: None,
-        cfg,
+        policy: HydratePolicy::default(),
     };
     let warm_start = Instant::now();
-    let report = engine.hydrate(req)?;
+    let receipt = store
+        .hydrate_workspace(ws_req)
+        .map_err(|e| Error::Store(format!("warm demo hydration failed: {e}")))?;
     let warm_ms = warm_start.elapsed().as_millis() as u64;
+
+    let method = if receipt.snapshot_hit || receipt.strategy.starts_with("snapshot") {
+        "clone".to_string()
+    } else {
+        receipt.strategy.clone()
+    };
 
     let phases = DemoPhases {
         baseline_ms,
         warm_hydrate_ms: warm_ms,
-        method: report.hydration_method.clone(),
-        bytes_copied: report.bytes_copied,
-        bytes_shared: report.bytes_shared_cow,
+        method,
+        bytes_copied: receipt.bytes_copied,
+        bytes_shared: receipt.bytes_shared,
     };
 
     if !cfg.json {

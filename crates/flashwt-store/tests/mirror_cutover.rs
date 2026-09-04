@@ -1,13 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::time::Duration;
 
 use flashwt_store::{
-    DiskStore, GcMode, HydrateDest, HydrateOutcome, HydratePinned, HydratePolicy, HydrateReq,
-    HydrateSrc, HydrateTree, Ingested, Manifest, PublishOptions, SnapshotEntry, StoreReclaimer,
-    hash_lockfile, record_snapshot_publish,
+    DiskStore, GcMode, HydratePolicy, Manifest, PublishOptions, SnapshotEntry, StoreReclaimer,
+    WorkspaceHydrateReq, hash_lockfile, record_snapshot_publish,
 };
 use tempfile::TempDir;
 
@@ -51,20 +49,16 @@ fn legacy_sweep_does_not_collect_active_pinned_snapshot_member_blobs() {
     )
     .expect("seed ring");
 
-    let req = HydrateReq {
-        src: HydrateSrc::PinnedLockfile(HydratePinned {
-            repo_root: repo_dir.path(),
-            pattern: "node_modules/",
-            src_root: repo_dir.path(),
-            heavy_rel: "node_modules",
-            lockfile_hash: lock_hash,
-        }),
-        dest: HydrateDest {
-            worktree_root: worktree_dir.path(),
-            git_dir: git_dir.path(),
-            base_branch: None,
-            base_commit: None,
-        },
+    fs::write(repo_dir.path().join("package-lock.json"), b"lockfile-pinned-v1").expect("write lock");
+
+    let patterns = vec!["node_modules/".to_string()];
+    let req = WorkspaceHydrateReq {
+        repo_root: repo_dir.path(),
+        worktree_root: worktree_dir.path(),
+        git_dir: git_dir.path(),
+        patterns: &patterns,
+        base_branch: None,
+        base_commit: None,
         policy: HydratePolicy {
             verify: false,
             snapshots: true,
@@ -73,16 +67,11 @@ fn legacy_sweep_does_not_collect_active_pinned_snapshot_member_blobs() {
         },
     };
 
-    let outcome = store.hydrate(req).expect("hydrate");
+    let receipt = store.hydrate_workspace(req).expect("hydrate");
 
     #[cfg(target_os = "macos")]
     {
-        match outcome {
-            HydrateOutcome::Hydrated(receipt) => {
-                assert!(receipt.snapshot_hit);
-            }
-            _ => panic!("expected snapshot hit on macos"),
-        }
+        assert!(receipt.snapshot_hit);
 
         assert_eq!(
             store.ref_count(&blob).expect("read ref_count"),
@@ -155,53 +144,24 @@ fn legacy_sweep_does_not_collect_active_tree_snapshot_member_blobs() {
     let worktree_dir = TempDir::new().expect("worktree dir");
     let git_dir = TempDir::new().expect("git dir");
 
+    let heavy = repo_dir.path().join("heavy");
+    fs::create_dir_all(heavy.join("sub")).expect("mkdir heavy/sub");
     let c1 = b"first file payload\n";
     let c2 = b"second file payload\n";
+    fs::write(heavy.join("root.js"), c1).expect("write root");
+    fs::write(heavy.join("sub/child.js"), c2).expect("write child");
+
     let id1 = store.put(c1).expect("put 1");
     let id2 = store.put(c2).expect("put 2");
 
-    let dirs = vec!["sub".to_string()];
-    let mut dir_modes = BTreeMap::new();
-    dir_modes.insert("sub".to_string(), 0o755);
-
-    let mut files = BTreeMap::new();
-    files.insert("root.js".to_string(), id1);
-    files.insert("sub/child.js".to_string(), id2);
-
-    let mut file_sizes = BTreeMap::new();
-    file_sizes.insert("root.js".to_string(), c1.len() as u64);
-    file_sizes.insert("sub/child.js".to_string(), c2.len() as u64);
-
-    let symlinks = BTreeMap::new();
-
-    let mut modes = BTreeMap::new();
-    modes.insert("root.js".to_string(), 0o644);
-    modes.insert("sub/child.js".to_string(), 0o644);
-
-    let ingested = Ingested {
-        dirs,
-        dir_modes,
-        files,
-        file_sizes,
-        symlinks,
-        modes,
-    };
-
-    let req = HydrateReq {
-        src: HydrateSrc::Tree(HydrateTree {
-            ingested: &ingested,
-            repo_root: repo_dir.path(),
-            pattern: "heavy/",
-            src_root: repo_dir.path(),
-            heavy_rel: "heavy",
-            lockfile_hash: None,
-        }),
-        dest: HydrateDest {
-            worktree_root: worktree_dir.path(),
-            git_dir: git_dir.path(),
-            base_branch: None,
-            base_commit: None,
-        },
+    let patterns = vec!["heavy/".to_string()];
+    let req = WorkspaceHydrateReq {
+        repo_root: repo_dir.path(),
+        worktree_root: worktree_dir.path(),
+        git_dir: git_dir.path(),
+        patterns: &patterns,
+        base_branch: None,
+        base_commit: None,
         policy: HydratePolicy {
             verify: false,
             snapshots: true,
@@ -210,8 +170,8 @@ fn legacy_sweep_does_not_collect_active_tree_snapshot_member_blobs() {
         },
     };
 
-    let outcome = store.hydrate(req).expect("hydrate");
-    assert!(matches!(outcome, HydrateOutcome::Hydrated(_)));
+    let receipt = store.hydrate_workspace(req).expect("hydrate");
+    assert_eq!(receipt.files_total, 2);
 
     assert_eq!(store.ref_count(&id1).expect("ref id1"), 1);
     assert_eq!(store.ref_count(&id2).expect("ref id2"), 1);

@@ -56,7 +56,7 @@ pub struct WorkspaceHydrateReq<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct HydrateDest<'a> {
+struct HydrateDest<'a> {
     pub worktree_root: &'a Path,
 
     pub git_dir: &'a Path,
@@ -67,7 +67,7 @@ pub struct HydrateDest<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct HydrateTree<'a> {
+struct HydrateTree<'a> {
     pub ingested: &'a Ingested,
 
     pub repo_root: &'a Path,
@@ -79,44 +79,6 @@ pub struct HydrateTree<'a> {
     pub heavy_rel: &'a str,
 
     pub lockfile_hash: Option<ContentId>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct HydratePinned<'a> {
-    pub repo_root: &'a Path,
-
-    pub pattern: &'a str,
-
-    pub src_root: &'a Path,
-
-    pub heavy_rel: &'a str,
-
-    pub lockfile_hash: ContentId,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum HydrateSrc<'a> {
-    Tree(HydrateTree<'a>),
-
-    PinnedLockfile(HydratePinned<'a>),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct HydrateReq<'a> {
-    pub src: HydrateSrc<'a>,
-
-    pub dest: HydrateDest<'a>,
-
-    pub policy: HydratePolicy,
-}
-
-#[derive(Debug, Clone)]
-pub enum HydrateOutcome {
-    Hydrated(HydrationReceipt),
-
-    NeedIngest { diagnostic: Option<String> },
-
-    Failed(String),
 }
 
 #[derive(Debug, Clone)]
@@ -153,14 +115,6 @@ pub struct HydrationReceipt {
 }
 
 impl DiskStore {
-    pub fn hydrate(&mut self, req: HydrateReq<'_>) -> Result<HydrateOutcome> {
-        match req.src {
-            HydrateSrc::PinnedLockfile(pin) => self.hydrate_pinned(pin, req.dest, req.policy),
-            HydrateSrc::Tree(tree) => self
-                .hydrate_tree(tree, req.dest, req.policy)
-                .map(HydrateOutcome::Hydrated),
-        }
-    }
 
     pub fn hydrate_workspace(&mut self, req: WorkspaceHydrateReq<'_>) -> Result<HydrationReceipt> {
         let start = Instant::now();
@@ -284,6 +238,9 @@ impl DiskStore {
                                         bytes_shared += fs::metadata(self.object_path(&blob))
                                             .map(|m| m.len())
                                             .unwrap_or(0);
+                                        if self.gc_mode() != GcMode::MarkSweepNoRefs {
+                                            self.add_ref(&blob)?;
+                                        }
                                     }
                                 }
                             }
@@ -414,79 +371,6 @@ impl DiskStore {
             copy_backend: last_copy_backend,
             refusal_reason: last_refusal_reason,
         })
-    }
-
-    fn hydrate_pinned(
-        &mut self,
-        pin: HydratePinned<'_>,
-        dest: HydrateDest<'_>,
-        policy: HydratePolicy,
-    ) -> Result<HydrateOutcome> {
-        let start = Instant::now();
-        fs::create_dir_all(dest.worktree_root)?;
-        fs::create_dir_all(dest.git_dir)?;
-
-        match SnapshotProjectionEngine::try_lockfile_hit(
-            self,
-            pin.repo_root,
-            pin.pattern,
-            pin.src_root,
-            pin.heavy_rel,
-            dest.worktree_root,
-            &pin.lockfile_hash,
-            policy.verify,
-        ) {
-            SnapshotOutcome::Hydrated(info) => {
-                let manifest_id = info.hash;
-                let mut shared_bytes = 0u64;
-                let mut distinct_blobs = BTreeSet::new();
-                if let Some(manifest) = crate::snapshot::read_published(self.root(), &manifest_id) {
-                    for entry in &manifest.entries {
-                        if let Some(blob) = entry.blob {
-                            distinct_blobs.insert(blob);
-                            shared_bytes += fs::metadata(self.object_path(&blob))
-                                .map(|m| m.len())
-                                .unwrap_or(0);
-                        }
-                    }
-                    if self.gc_mode() != GcMode::MarkSweepNoRefs {
-                        for id in &distinct_blobs {
-                            self.add_ref(id)?;
-                        }
-                    }
-                }
-                append_ledger(dest.git_dir, &BTreeMap::new(), Some(&info.hash))?;
-                self.publish_worktree_mirror(
-                    dest.worktree_root,
-                    dest.git_dir,
-                    BTreeSet::new(),
-                    std::iter::once(&manifest_id),
-                    dest.base_branch,
-                    dest.base_commit,
-                )?;
-                Ok(HydrateOutcome::Hydrated(HydrationReceipt {
-                    strategy: "snapshot-hit".to_string(),
-                    files_total: info.files,
-                    files_copied: 0,
-                    bytes_shared: shared_bytes,
-                    bytes_copied: 0,
-                    snapshot_hit: true,
-                    elapsed_ms: start.elapsed().as_millis(),
-                    diagnostics: Vec::new(),
-                    v2_cloned: 0,
-                    v2_linked: 0,
-                    incremental_decision: None,
-                    incremental_fallback_reason: None,
-                    incremental_hit_rate: None,
-                    copy_backend: Some("clonefile".to_string()),
-                    refusal_reason: None,
-                }))
-            }
-            SnapshotOutcome::FellBack(reason) => {
-                Ok(HydrateOutcome::NeedIngest { diagnostic: reason })
-            }
-            SnapshotOutcome::Failed(msg) => Ok(HydrateOutcome::Failed(msg)),
-        }
     }
 
     fn hydrate_tree(
