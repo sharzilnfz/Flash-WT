@@ -92,7 +92,7 @@ flashwt sweep
 | `store du` | Show disk usage breakdown in the store | `flashwt store du` |
 | `lease show` | Show active ephemeral scratch leases | `flashwt lease show` |
 | `init` | Generate a `.flashwtinclude` manifest | `flashwt init` |
-| `demo` | Run a self-contained 10,000-file benchmark | `flashwt demo` |
+| `demo` | Run a self-contained 800-file warm-hydration benchmark | `flashwt demo` |
 | `completions` | Generate shell completions (bash, zsh, fish) | `flashwt completions zsh` |
 
 ## Configuration

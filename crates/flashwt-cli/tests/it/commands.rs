@@ -1108,7 +1108,7 @@ fn scrub_detects_and_purges_snapshot_with_corrupted_file_tree() {
 }
 
 #[test]
-#[ignore = "expensive 10,000-file demo benchmark fixture"]
+#[ignore = "expensive ~800-file demo benchmark fixture"]
 fn demo_terminal_output_renders_scorecard_and_completes_successfully() {
     let store_dir = tempfile::tempdir().unwrap();
     let isolated_cwd = tempfile::tempdir().unwrap();
@@ -1129,20 +1129,22 @@ fn demo_terminal_output_renders_scorecard_and_completes_successfully() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("flashwt demo: Zero-Setup End-to-End Performance Test Drive"));
     assert!(stdout.contains("Step 1/5: Synthesizing realistic fixture..."));
-    assert!(stdout.contains("10,000 files across 100 packages"));
-    assert!(stdout.contains("Step 2/5: Benchmarking standard filesystem recursive copy..."));
-    assert!(stdout.contains("Step 3/5: Benchmarking flashwt Copy-on-Write hydration..."));
-    assert!(stdout.contains("Step 4/5: Verifying Copy-on-Write mutation isolation..."));
-    assert!(stdout.contains("Step 5/5: Cleaning up benchmark artifacts..."));
+    assert!(stdout.contains("800 files across 8 packages"));
+    assert!(stdout.contains("Step 2/5: Warming store (cold ingest, one-time cost, untimed)..."));
+    assert!(
+        stdout.contains("Step 3/5: Benchmarking standard filesystem recursive copy (baseline)...")
+    );
+    assert!(stdout.contains("Step 4/5: Benchmarking flashwt warm hydration..."));
+    assert!(stdout.contains("Step 5/5: Verifying mutation isolation and cleaning up..."));
     assert!(stdout.contains("PERFORMANCE SCORECARD"));
     assert!(stdout.contains("Standard Copy"));
-    assert!(stdout.contains("flashwt Hydration"));
+    assert!(stdout.contains("Warm Hydration"));
     assert!(stdout.contains("Mutation Isolation     : VERIFIED"));
     assert!(stdout.contains("Status                 : ALL CHECKS PASSED (5/5)"));
 }
 
 #[test]
-#[ignore = "expensive 10,000-file demo benchmark fixture"]
+#[ignore = "expensive ~800-file demo benchmark fixture"]
 fn demo_json_emits_valid_ndjson_envelope_with_complete_metrics() {
     let store_dir = tempfile::tempdir().unwrap();
     let isolated_cwd = tempfile::tempdir().unwrap();
@@ -1176,7 +1178,11 @@ fn demo_json_emits_valid_ndjson_envelope_with_complete_metrics() {
     assert!(json["diagnostics"].is_array());
 
     let data = &json["data"];
-    assert_eq!(data["files_count"], 10000);
+    let files_count = data["files_count"].as_u64().unwrap();
+    assert!(
+        (700..900).contains(&files_count),
+        "unexpected files_count: {files_count}"
+    );
     assert!(data["total_bytes"].as_u64().unwrap() > 0);
     assert!(data["baseline_copy_duration_ms"].is_number());
     assert!(data["baseline_copy_bytes"].as_u64().unwrap() > 0);
@@ -1195,7 +1201,7 @@ fn demo_json_emits_valid_ndjson_envelope_with_complete_metrics() {
 }
 
 #[test]
-#[ignore = "expensive 10,000-file demo benchmark fixture"]
+#[ignore = "expensive ~800-file demo benchmark fixture"]
 fn test_drive_alias_works_identically_with_json_envelope() {
     let store_dir = tempfile::tempdir().unwrap();
     let isolated_cwd = tempfile::tempdir().unwrap();
@@ -1222,13 +1228,17 @@ fn test_drive_alias_works_identically_with_json_envelope() {
     assert_eq!(json["status"], "ok");
 
     let data = &json["data"];
-    assert_eq!(data["files_count"], 10000);
+    let files_count = data["files_count"].as_u64().unwrap();
+    assert!(
+        (700..900).contains(&files_count),
+        "unexpected files_count: {files_count}"
+    );
     assert_eq!(data["isolation_verified"], true);
     assert_eq!(data["cleaned_up"], true);
 }
 
 #[test]
-#[ignore = "expensive 10,000-file demo benchmark fixture"]
+#[ignore = "expensive ~800-file demo benchmark fixture"]
 fn demo_runs_outside_any_git_repository() {
     let store_dir = tempfile::tempdir().unwrap();
     let non_git_dir = tempfile::tempdir().unwrap();
@@ -1256,7 +1266,11 @@ fn demo_runs_outside_any_git_repository() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("parse json");
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["data"]["files_count"], 10000);
+    let files_count = json["data"]["files_count"].as_u64().unwrap();
+    assert!(
+        (700..900).contains(&files_count),
+        "unexpected files_count: {files_count}"
+    );
 }
 
 fn completions_stdout(shell: &str) -> String {

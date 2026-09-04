@@ -485,7 +485,7 @@ fn human_bytes_zero_rendering_via_list() {
 }
 
 #[test]
-#[ignore = "expensive 10,000-file demo benchmark fixture"]
+#[ignore = "expensive ~800-file demo benchmark fixture"]
 fn human_count_grouping_via_demo_fixture_summary() {
     let out = Command::new(env!("CARGO_BIN_EXE_flashwt"))
         .args(["demo", "--json"])
@@ -499,7 +499,7 @@ fn human_count_grouping_via_demo_fixture_summary() {
         .find(|l| l.contains("\"files_count\""))
         .expect("demo json envelope with files_count");
     assert!(
-        line.contains("\"files_count\":100"),
+        line.contains("\"files_count\":800"),
         "demo json should report the fixture count line: {line}"
     );
 }
