@@ -134,7 +134,7 @@ fn legacy_sweep_does_not_collect_active_pinned_snapshot_member_blobs() {
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (blob, content, snap_hash, outcome);
+        let _ = (blob, content, snap_hash, receipt);
     }
 }
 
