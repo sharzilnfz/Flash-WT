@@ -215,7 +215,6 @@ impl DiskStore {
         let mut files_copied = 0;
         let mut bytes_shared = 0u64;
         let mut bytes_copied = 0u64;
-        let mut snapshot_hit = false;
         let mut diagnostics = Vec::new();
         let mut all_blob_ids = BTreeSet::new();
         let mut snapshot_ids = BTreeSet::new();
@@ -227,11 +226,23 @@ impl DiskStore {
         let mut incremental_decision = None;
         let mut incremental_fallback_reason = None;
         let mut incremental_hit_rate = None;
+        let mut nonempty_dir_count = 0;
+        let mut snapshot_hits_count = 0;
 
         fs::create_dir_all(req.worktree_root)?;
         fs::create_dir_all(req.git_dir)?;
 
+        let can_snapshot = req.policy.snapshots
+            && !req.policy.verify
+            && req.policy.strategy == flashwt_copy::StrategyPolicy::Default;
+
         for rel in &matched_dirs {
+            let src = req.repo_root.join(rel);
+            if !has_any_files(&src) {
+                continue;
+            }
+            nonempty_dir_count += 1;
+
             let pattern = req
                 .patterns
                 .iter()
@@ -252,7 +263,7 @@ impl DiskStore {
             });
 
             let mut hit_this_dir = false;
-            if req.policy.snapshots {
+            if can_snapshot {
                 if let Some(lock_hash) = pinned_lockfile_hash {
                     match SnapshotProjectionEngine::try_lockfile_hit(
                         self,
@@ -279,8 +290,8 @@ impl DiskStore {
                             }
                             append_ledger(req.git_dir, &BTreeMap::new(), Some(&info.hash))?;
                             total_files += info.files;
-                            snapshot_hit = true;
                             hit_this_dir = true;
+                            snapshot_hits_count += 1;
                             last_strategy = "snapshot-hit".to_string();
                             last_copy_backend = Some("clonefile".to_string());
                         }
@@ -297,15 +308,18 @@ impl DiskStore {
             }
 
             if !hit_this_dir {
-                let src = req.repo_root.join(rel);
                 let ingested = self.ingest_tree(
                     req.repo_root,
                     &src,
                     &crate::IngestOptions {
-                        snapshots: req.policy.snapshots,
+                        snapshots: can_snapshot,
                         exclude: &|rel_str| is_volatile_cache(rel_str),
                     },
                 )?;
+
+                for blob in ingested.files.values() {
+                    all_blob_ids.insert(*blob);
+                }
 
                 let tree_receipt = self.hydrate_tree(
                     HydrateTree {
@@ -347,7 +361,7 @@ impl DiskStore {
                     incremental_hit_rate = tree_receipt.incremental_hit_rate;
                 }
                 if tree_receipt.snapshot_hit {
-                    snapshot_hit = true;
+                    snapshot_hits_count += 1;
                 }
             }
         }
@@ -371,13 +385,24 @@ impl DiskStore {
 
         self.flush()?;
 
+        let overall_strategy = if nonempty_dir_count == 0 {
+            "none".to_string()
+        } else if snapshot_hits_count == nonempty_dir_count {
+            "snapshot-hit".to_string()
+        } else if snapshot_hits_count > 0 {
+            "mixed".to_string()
+        } else {
+            last_strategy
+        };
+        let overall_snapshot_hit = nonempty_dir_count > 0 && snapshot_hits_count == nonempty_dir_count;
+
         Ok(HydrationReceipt {
-            strategy: last_strategy,
+            strategy: overall_strategy,
             files_total: total_files,
             files_copied,
             bytes_shared,
             bytes_copied,
-            snapshot_hit,
+            snapshot_hit: overall_snapshot_hit,
             elapsed_ms: start.elapsed().as_millis(),
             diagnostics,
             v2_cloned,
@@ -523,7 +548,7 @@ impl DiskStore {
                         files_copied: 0,
                         bytes_shared: total_bytes,
                         bytes_copied: 0,
-                        snapshot_hit: true,
+                        snapshot_hit: info.mode == "hit",
                         elapsed_ms: start.elapsed().as_millis(),
                         diagnostics,
                         v2_cloned: info.cloned_units,
