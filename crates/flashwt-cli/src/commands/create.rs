@@ -154,14 +154,19 @@ pub fn run(
 
                 let mismatch = match (&donor_bytes, &dest_bytes) {
                     (Some(d_bytes), Some(t_bytes)) => {
-                        flashwt_store::hash_lockfile(d_bytes) != flashwt_store::hash_lockfile(t_bytes)
+                        flashwt_store::hash_lockfile(d_bytes)
+                            != flashwt_store::hash_lockfile(t_bytes)
                     }
                     (Some(_), None) => true,
                     _ => false,
                 };
 
                 if mismatch {
-                    let lock_name = donor_lock.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    let lock_name = donor_lock
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
                     let pkg_cmd = flashwt_store::package_manager_command(&lock_name).to_string();
                     lockfile_mismatch = Some((donor_lock, pkg_cmd));
                     break;

@@ -1492,12 +1492,20 @@ fn sweep_dry_run_reports_without_deleting() {
 #[test]
 fn create_refuses_hydration_on_cross_branch_lockfile_mismatch() {
     let fx = Fixture::heavy_repo(50);
-    fs::write(fx.repo.join("package-lock.json"), "{\"version\": \"1.0.0\"}\n").unwrap();
+    fs::write(
+        fx.repo.join("package-lock.json"),
+        "{\"version\": \"1.0.0\"}\n",
+    )
+    .unwrap();
     git(&fx.repo, &["add", "package-lock.json"]);
     git(&fx.repo, &["commit", "-m", "add lockfile v1"]);
 
     git(&fx.repo, &["checkout", "-b", "feature-branch"]);
-    fs::write(fx.repo.join("package-lock.json"), "{\"version\": \"2.0.0\"}\n").unwrap();
+    fs::write(
+        fx.repo.join("package-lock.json"),
+        "{\"version\": \"2.0.0\"}\n",
+    )
+    .unwrap();
     git(&fx.repo, &["add", "package-lock.json"]);
     git(&fx.repo, &["commit", "-m", "bump lockfile v2"]);
 
@@ -1518,8 +1526,7 @@ fn create_refuses_hydration_on_cross_branch_lockfile_mismatch() {
 
     let json_out = fx.flashwt(&["--json", "create", "target-json-wt", "--base", "master"]);
     assert!(json_out.status.success());
-    let parsed: serde_json::Value =
-        serde_json::from_slice(&json_out.stdout).expect("parse json");
+    let parsed: serde_json::Value = serde_json::from_slice(&json_out.stdout).expect("parse json");
     assert_eq!(parsed["status"], "ok");
     assert_eq!(parsed["data"]["files_hydrated"], 0);
     let diags = parsed["diagnostics"].as_array().unwrap();

@@ -31,8 +31,8 @@ pub use lease::{
     read_all as read_leases, remove as remove_lease,
 };
 pub use lockfile::{
-    DependencySafety, classify_lockfile, find_lockfile, find_lockfile_rel, hash_lockfile,
-    package_manager_command, LOCKFILES,
+    DependencySafety, LOCKFILES, classify_lockfile, find_lockfile, find_lockfile_rel,
+    hash_lockfile, package_manager_command,
 };
 pub use mirror::{
     ReadMirror, StoreMirror, escape, mirror_path, publish as publish_mirror,

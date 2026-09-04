@@ -45,7 +45,8 @@ pub fn package_manager_command(lockfile_name: &str) -> &'static str {
 }
 
 pub fn find_lockfile_rel(repo_root: &Path, heavy_rel: &Path) -> Option<PathBuf> {
-    find_lockfile(repo_root, heavy_rel).and_then(|abs| abs.strip_prefix(repo_root).ok().map(|p| p.to_path_buf()))
+    find_lockfile(repo_root, heavy_rel)
+        .and_then(|abs| abs.strip_prefix(repo_root).ok().map(|p| p.to_path_buf()))
 }
 
 pub fn find_lockfile(repo_root: &Path, heavy_rel: &Path) -> Option<PathBuf> {
