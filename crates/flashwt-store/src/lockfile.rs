@@ -11,7 +11,7 @@ pub enum DependencySafety {
     Mutable,
 }
 
-const LOCKFILES: &[&str] = &[
+pub const LOCKFILES: &[&str] = &[
     "package-lock.json",
     "npm-shrinkwrap.json",
     "pnpm-lock.yaml",
@@ -26,6 +26,27 @@ const LOCKFILES: &[&str] = &[
     "composer.lock",
     "Gemfile.lock",
 ];
+
+pub fn package_manager_command(lockfile_name: &str) -> &'static str {
+    match lockfile_name {
+        "package-lock.json" | "npm-shrinkwrap.json" => "npm install",
+        "pnpm-lock.yaml" => "pnpm install",
+        "yarn.lock" => "yarn install",
+        "bun.lockb" | "bun.lock" => "bun install",
+        "Cargo.lock" => "cargo build",
+        "poetry.lock" => "poetry install",
+        "Pipfile.lock" => "pipenv install",
+        "pdm.lock" => "pdm install",
+        "requirements.txt" => "pip install -r requirements.txt",
+        "composer.lock" => "composer install",
+        "Gemfile.lock" => "bundle install",
+        _ => "your package manager",
+    }
+}
+
+pub fn find_lockfile_rel(repo_root: &Path, heavy_rel: &Path) -> Option<PathBuf> {
+    find_lockfile(repo_root, heavy_rel).and_then(|abs| abs.strip_prefix(repo_root).ok().map(|p| p.to_path_buf()))
+}
 
 pub fn find_lockfile(repo_root: &Path, heavy_rel: &Path) -> Option<PathBuf> {
     let full_path = repo_root.join(heavy_rel);
@@ -243,5 +264,17 @@ source = "git+https://github.com/tokio-rs/tokio?branch=master#0123456789abcdef01
         std::fs::write(&nested_lock, "{}").unwrap();
         let found_nested = find_lockfile(root, Path::new("packages/app/node_modules")).unwrap();
         assert_eq!(found_nested, nested_lock);
+
+        let rel = find_lockfile_rel(root, Path::new("packages/app/node_modules")).unwrap();
+        assert_eq!(rel, PathBuf::from("packages/app/package-lock.json"));
+    }
+
+    #[test]
+    fn maps_lockfile_names_to_package_managers() {
+        assert_eq!(package_manager_command("package-lock.json"), "npm install");
+        assert_eq!(package_manager_command("pnpm-lock.yaml"), "pnpm install");
+        assert_eq!(package_manager_command("yarn.lock"), "yarn install");
+        assert_eq!(package_manager_command("bun.lock"), "bun install");
+        assert_eq!(package_manager_command("Cargo.lock"), "cargo build");
     }
 }

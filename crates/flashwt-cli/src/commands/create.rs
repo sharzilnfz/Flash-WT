@@ -142,20 +142,87 @@ pub fn run(
         LoadedPatterns::Loaded { patterns, .. } => patterns,
     };
 
-    let mut h_engine = HydrationEngine::auto();
-    let req = HydrationRequest {
-        root: &root,
-        dest: &dest,
-        patterns: &patterns,
-        base_branch: base,
-        base_commit: base_commit.as_deref(),
-        cfg,
+    let candidate_dirs = crate::hydration_filter::collect_matches(&root, &patterns)?;
+    let mut lockfile_mismatch: Option<(PathBuf, String)> = None;
+    if base.is_some() {
+        for rel in &candidate_dirs {
+            if let Some(donor_lock) = flashwt_store::find_lockfile_rel(&root, rel) {
+                let donor_abs = root.join(&donor_lock);
+                let dest_abs = dest.join(&donor_lock);
+                let donor_bytes = std::fs::read(&donor_abs).ok();
+                let dest_bytes = std::fs::read(&dest_abs).ok();
+
+                let mismatch = match (&donor_bytes, &dest_bytes) {
+                    (Some(d_bytes), Some(t_bytes)) => {
+                        flashwt_store::hash_lockfile(d_bytes) != flashwt_store::hash_lockfile(t_bytes)
+                    }
+                    (Some(_), None) => true,
+                    _ => false,
+                };
+
+                if mismatch {
+                    let lock_name = donor_lock.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    let pkg_cmd = flashwt_store::package_manager_command(&lock_name).to_string();
+                    lockfile_mismatch = Some((donor_lock, pkg_cmd));
+                    break;
+                }
+            }
+        }
+    }
+
+    let (report, guard) = if let Some((mismatched_lock, pkg_cmd)) = lockfile_mismatch {
+        let base_label = base.unwrap_or("target branch");
+        let msg = format!(
+            "lockfile mismatch in {base_label} ({}); skipped dependency hydration to prevent corrupted dependencies. Run '{pkg_cmd}' in the new worktree.",
+            mismatched_lock.display()
+        );
+        if !cfg.json {
+            println!("flashwt: {msg}");
+        }
+
+        let mut timings_stage = StageTimings::new();
+        timings_stage.git_worktree_ms = timings.git_worktree_ms;
+        guard.defuse();
+
+        let diag = Diagnostic::warning("LOCKFILE_MISMATCH", msg);
+        let rep = crate::hydrate::HydrationReport {
+            total_files: 0,
+            total_copied: 0,
+            bytes_shared_cow: 0,
+            bytes_copied: 0,
+            strategy: "none".to_string(),
+            hydration_method: "none".to_string(),
+            copy_backend: None,
+            refusal_reason: None,
+            cache_hit: false,
+            snapshot_hashes: Vec::new(),
+            dirs_hydrated: Vec::new(),
+            timings: timings_stage,
+            diagnostics: vec![diag],
+            incremental_decision: None,
+            incremental_fallback_reason: None,
+            incremental_hit_rate: None,
+        };
+        (rep, None)
+    } else {
+        let mut h_engine = HydrationEngine::auto();
+        let req = HydrationRequest {
+            root: &root,
+            dest: &dest,
+            patterns: &patterns,
+            base_branch: base,
+            base_commit: base_commit.as_deref(),
+            cfg,
+        };
+
+        let mut rep = h_engine.hydrate(req)?;
+        rep.timings.git_worktree_ms = timings.git_worktree_ms;
+        (rep, Some(guard))
     };
 
-    let mut report = h_engine.hydrate(req)?;
-    report.timings.git_worktree_ms = timings.git_worktree_ms;
-
-    guard.defuse();
+    if let Some(mut g) = guard {
+        g.defuse();
+    }
 
     let dirs: Vec<String> = report
         .dirs_hydrated

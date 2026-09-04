@@ -1474,3 +1474,40 @@ fn sweep_dry_run_reports_without_deleting() {
     );
     assert!(!lease_p.exists(), "live sweep must delete dead lease");
 }
+
+#[test]
+fn create_refuses_hydration_on_cross_branch_lockfile_mismatch() {
+    let fx = Fixture::heavy_repo(50);
+    fs::write(fx.repo.join("package-lock.json"), "{\"version\": \"1.0.0\"}\n").unwrap();
+    git(&fx.repo, &["add", "package-lock.json"]);
+    git(&fx.repo, &["commit", "-m", "add lockfile v1"]);
+
+    git(&fx.repo, &["checkout", "-b", "feature-branch"]);
+    fs::write(fx.repo.join("package-lock.json"), "{\"version\": \"2.0.0\"}\n").unwrap();
+    git(&fx.repo, &["add", "package-lock.json"]);
+    git(&fx.repo, &["commit", "-m", "bump lockfile v2"]);
+
+    let donor_node_modules = fx.repo.join("node_modules");
+    fs::create_dir_all(&donor_node_modules).unwrap();
+    fs::write(donor_node_modules.join("dep.js"), "console.log(2);\n").unwrap();
+
+    let out = fx.flashwt(&["create", "target-wt", "--base", "master"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("lockfile mismatch in master"));
+    assert!(stdout.contains("skipped dependency hydration"));
+    assert!(stdout.contains("Run 'npm install'"));
+
+    let dest = fx.repo.parent().unwrap().join("origin-target-wt");
+    assert!(dest.is_dir());
+    assert!(!dest.join("node_modules").exists());
+
+    let json_out = fx.flashwt(&["--json", "create", "target-json-wt", "--base", "master"]);
+    assert!(json_out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&json_out.stdout).expect("parse json");
+    assert_eq!(parsed["status"], "ok");
+    assert_eq!(parsed["data"]["files_hydrated"], 0);
+    let diags = parsed["diagnostics"].as_array().unwrap();
+    assert!(diags.iter().any(|d| d["code"] == "LOCKFILE_MISMATCH"));
+}
