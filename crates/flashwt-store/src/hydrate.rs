@@ -58,10 +58,6 @@ struct HydrateDest<'a> {
     pub worktree_root: &'a Path,
 
     pub git_dir: &'a Path,
-
-    pub base_branch: Option<&'a str>,
-
-    pub base_commit: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -288,8 +284,6 @@ impl DiskStore {
                     HydrateDest {
                         worktree_root: req.worktree_root,
                         git_dir: req.git_dir,
-                        base_branch: req.base_branch,
-                        base_commit: req.base_commit,
                     },
                     req.policy,
                 )?;
@@ -341,6 +335,15 @@ impl DiskStore {
                 req.git_dir,
                 &all_blob_ids,
                 &snapshot_ids,
+                req.base_branch,
+                req.base_commit,
+            )?;
+        } else {
+            self.publish_worktree_mirror(
+                req.worktree_root,
+                req.git_dir,
+                std::iter::empty(),
+                std::iter::empty(),
                 req.base_branch,
                 req.base_commit,
             )?;
@@ -427,16 +430,6 @@ impl DiskStore {
 
                     append_ledger(dest.git_dir, &ingested.files, Some(&info.hash))?;
 
-                    let manifest_id = info.hash;
-                    self.publish_worktree_mirror(
-                        dest.worktree_root,
-                        dest.git_dir,
-                        BTreeSet::new(),
-                        std::iter::once(&manifest_id),
-                        dest.base_branch,
-                        dest.base_commit,
-                    )?;
-
                     let total_bytes: u64 = ingested.file_sizes.values().sum();
                     return Ok(HydrationReceipt {
                         strategy: format!("snapshot-{}", info.mode),
@@ -522,23 +515,7 @@ impl DiskStore {
             }
         }
 
-        let distinct_blobs: BTreeSet<&ContentId> = ingested.files.values().collect();
-        if self.gc_mode() != GcMode::MarkSweepNoRefs {
-            for id in &distinct_blobs {
-                self.add_ref(id)?;
-            }
-        }
-
         append_ledger(dest.git_dir, &ingested.files, None)?;
-
-        self.publish_worktree_mirror(
-            dest.worktree_root,
-            dest.git_dir,
-            distinct_blobs,
-            std::iter::empty(),
-            dest.base_branch,
-            dest.base_commit,
-        )?;
 
         let strategy_str = match policy.strategy {
             flashwt_copy::StrategyPolicy::Default => "copy-on-write",

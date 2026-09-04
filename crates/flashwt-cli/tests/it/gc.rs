@@ -991,7 +991,12 @@ fn concurrent_lease_sweeping_stress() {
             fs::write(fx.repo.join(".flashwtinclude"), "heavy/\n").unwrap();
             let name = format!("concurrent-dead-{i}");
             let out = fx.flashwt_with_store(&["scratch", &name, "--json"], &store_p);
-            assert!(out.status.success());
+            assert!(
+                out.status.success(),
+                "scratch failed: stdout={}, stderr={}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
 
             let lease_p = lease_path(&store_p, &name);
             let text = fs::read_to_string(&lease_p).unwrap();
