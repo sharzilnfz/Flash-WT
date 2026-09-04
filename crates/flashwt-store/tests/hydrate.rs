@@ -33,9 +33,12 @@ fn fallback_materialization_creates_files_dirs_and_metadata() {
 
     #[cfg(unix)]
     {
-        fs::set_permissions(&heavy.join("bin"), fs::Permissions::from_mode(0o755)).expect("chmod bin");
-        fs::set_permissions(&heavy.join("nested/sub"), fs::Permissions::from_mode(0o755)).expect("chmod nested/sub");
-        fs::set_permissions(&heavy.join("bin/cli"), fs::Permissions::from_mode(0o755)).expect("chmod bin/cli");
+        fs::set_permissions(heavy.join("bin"), fs::Permissions::from_mode(0o755))
+            .expect("chmod bin");
+        fs::set_permissions(heavy.join("nested/sub"), fs::Permissions::from_mode(0o755))
+            .expect("chmod nested/sub");
+        fs::set_permissions(heavy.join("bin/cli"), fs::Permissions::from_mode(0o755))
+            .expect("chmod bin/cli");
         std::os::unix::fs::symlink("cli", heavy.join("bin/symlink-cli")).expect("symlink");
     }
 
@@ -195,14 +198,8 @@ fn workspace_hydration_zero_matching_directories_publishes_empty_mirror_and_reco
         .expect("read mirror")
         .expect("mirror exists");
 
-    assert_eq!(
-        mirror.base_branch.as_deref(),
-        Some("feature/zero-baseline")
-    );
-    assert_eq!(
-        mirror.base_commit.as_deref(),
-        Some("a1b2c3d4e5f67890")
-    );
+    assert_eq!(mirror.base_branch.as_deref(), Some("feature/zero-baseline"));
+    assert_eq!(mirror.base_commit.as_deref(), Some("a1b2c3d4e5f67890"));
     assert!(mirror.files.is_empty());
     assert!(mirror.snapshots.is_empty());
 
@@ -430,11 +427,14 @@ fn workspace_hydration_unpinned_lockfile_falls_back_to_tree_ingest_and_materiali
 
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink("../index.js", heavy.join("pkg/bin/link-index.js")).expect("symlink");
+        std::os::unix::fs::symlink("../index.js", heavy.join("pkg/bin/link-index.js"))
+            .expect("symlink");
     }
 
-    let unpinned_lockfile = b"{\n  \"dependencies\": {\n    \"local-dep\": \"file:../local-dep\"\n  }\n}\n";
-    fs::write(repo_dir.path().join("package-lock.json"), unpinned_lockfile).expect("write unpinned");
+    let unpinned_lockfile =
+        b"{\n  \"dependencies\": {\n    \"local-dep\": \"file:../local-dep\"\n  }\n}\n";
+    fs::write(repo_dir.path().join("package-lock.json"), unpinned_lockfile)
+        .expect("write unpinned");
 
     let patterns = vec!["node_modules/".to_string()];
     let req = WorkspaceHydrateReq {
@@ -457,17 +457,25 @@ fn workspace_hydration_unpinned_lockfile_falls_back_to_tree_ingest_and_materiali
     assert_eq!(receipt.files_total, 2);
 
     let dest_index = worktree_dir.path().join("node_modules/pkg/index.js");
-    assert_eq!(fs::read(&dest_index).expect("read dest index"), file_content);
+    assert_eq!(
+        fs::read(&dest_index).expect("read dest index"),
+        file_content
+    );
 
     let dest_bin = worktree_dir.path().join("node_modules/pkg/bin/run");
     assert_eq!(fs::read(&dest_bin).expect("read dest bin"), bin_content);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::symlink_metadata(&dest_bin).expect("stat dest bin").permissions().mode();
+        let mode = fs::symlink_metadata(&dest_bin)
+            .expect("stat dest bin")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o111, 0o111);
 
-        let dest_link = worktree_dir.path().join("node_modules/pkg/bin/link-index.js");
+        let dest_link = worktree_dir
+            .path()
+            .join("node_modules/pkg/bin/link-index.js");
         let link_target = fs::read_link(&dest_link).expect("read symlink");
         assert_eq!(link_target, Path::new("../index.js"));
     }
@@ -480,7 +488,8 @@ fn workspace_hydration_unpinned_lockfile_falls_back_to_tree_ingest_and_materiali
     assert_eq!(mirror.base_branch.as_deref(), Some("feature/fallback"));
     assert_eq!(mirror.base_commit.as_deref(), Some("commit-fallback-01"));
 
-    let ledger = fs::read_to_string(git_dir.path().join("flashwt-hydrated.tsv")).expect("read ledger");
+    let ledger =
+        fs::read_to_string(git_dir.path().join("flashwt-hydrated.tsv")).expect("read ledger");
     assert!(ledger.contains("pkg/index.js\tblob\t"));
     assert!(ledger.contains("pkg/bin/run\tblob\t"));
 }
@@ -547,7 +556,10 @@ fn workspace_hydration_multiple_matching_directories_hydrates_all() {
     let content2 = b"module.exports = 'two';\n";
     fs::write(dir2.join("pkg2/index.js"), content2).expect("write dir2");
 
-    let patterns = vec!["node_modules/".to_string(), "packages/**/node_modules/".to_string()];
+    let patterns = vec![
+        "node_modules/".to_string(),
+        "packages/**/node_modules/".to_string(),
+    ];
     let req = WorkspaceHydrateReq {
         repo_root: repo_dir.path(),
         worktree_root: worktree_dir.path(),
@@ -566,14 +578,22 @@ fn workspace_hydration_multiple_matching_directories_hydrates_all() {
     let receipt = store.hydrate_workspace(req).expect("hydrate workspace");
     assert_eq!(receipt.files_total, 2);
     assert_eq!(receipt.files_copied, 2);
-    assert_eq!(receipt.bytes_copied, (content1.len() + content2.len()) as u64);
+    assert_eq!(
+        receipt.bytes_copied,
+        (content1.len() + content2.len()) as u64
+    );
 
     assert_eq!(
         fs::read(worktree_dir.path().join("node_modules/pkg1/index.js")).expect("read dest1"),
         content1
     );
     assert_eq!(
-        fs::read(worktree_dir.path().join("packages/app/node_modules/pkg2/index.js")).expect("read dest2"),
+        fs::read(
+            worktree_dir
+                .path()
+                .join("packages/app/node_modules/pkg2/index.js")
+        )
+        .expect("read dest2"),
         content2
     );
 
@@ -655,7 +675,8 @@ fn workspace_hydration_mixed_snapshot_hit_and_ingest_fallback_aggregates_into_on
         assert!(!receipt.snapshot_hit);
 
         assert_eq!(
-            fs::read(worktree_dir.path().join("node_modules/pkg/index.js")).expect("read snap dest"),
+            fs::read(worktree_dir.path().join("node_modules/pkg/index.js"))
+                .expect("read snap dest"),
             snap_content
         );
         assert_eq!(

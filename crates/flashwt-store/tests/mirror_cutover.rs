@@ -49,7 +49,11 @@ fn legacy_sweep_does_not_collect_active_pinned_snapshot_member_blobs() {
     )
     .expect("seed ring");
 
-    fs::write(repo_dir.path().join("package-lock.json"), b"lockfile-pinned-v1").expect("write lock");
+    fs::write(
+        repo_dir.path().join("package-lock.json"),
+        b"lockfile-pinned-v1",
+    )
+    .expect("write lock");
 
     let patterns = vec!["node_modules/".to_string()];
     let req = WorkspaceHydrateReq {

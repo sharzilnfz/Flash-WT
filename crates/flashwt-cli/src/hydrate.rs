@@ -516,9 +516,7 @@ impl<'a> HydrationEngine<'a> {
 
         let hydration_method = if total_files == 0 {
             "none"
-        } else if is_snapshot
-            || (last_strategy == "copy-on-write" && total_copied == 0)
-        {
+        } else if is_snapshot || (last_strategy == "copy-on-write" && total_copied == 0) {
             "clone"
         } else if last_strategy == "hardlink" && total_copied == 0 {
             "hardlink"

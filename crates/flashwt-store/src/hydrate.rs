@@ -10,11 +10,9 @@ use crate::ingest::Ingested;
 use crate::snapshot::{SnapshotOutcome, SnapshotProjectionEngine, SnapshotProjectionRequest};
 use crate::{ContentId, DiskStore, GcMode, Result};
 
-pub const ZERO_SAVINGS_NO_MATCHING_DIRS: &str =
-    "ZERO_SAVINGS: hydration saved 0 bytes; no matching heavy directories found and the worktree relies strictly on git tracking";
+pub const ZERO_SAVINGS_NO_MATCHING_DIRS: &str = "ZERO_SAVINGS: hydration saved 0 bytes; no matching heavy directories found and the worktree relies strictly on git tracking";
 
-pub const ZERO_SAVINGS_NO_FILES_HYDRATED: &str =
-    "ZERO_SAVINGS: hydration saved 0 bytes; no files hydrated from matching directories and the worktree relies strictly on git tracking";
+pub const ZERO_SAVINGS_NO_FILES_HYDRATED: &str = "ZERO_SAVINGS: hydration saved 0 bytes; no files hydrated from matching directories and the worktree relies strictly on git tracking";
 
 #[derive(Debug, Clone, Copy)]
 pub struct HydratePolicy {
@@ -117,7 +115,6 @@ pub struct HydrationReceipt {
 }
 
 impl DiskStore {
-
     pub fn hydrate_workspace(&mut self, req: WorkspaceHydrateReq<'_>) -> Result<HydrationReceipt> {
         let start = Instant::now();
         let matched_dirs = collect_matches(req.repo_root, req.patterns)?;
@@ -208,16 +205,17 @@ impl DiskStore {
                 .unwrap_or("");
 
             let heavy_rel = rel.to_string_lossy();
-            let pinned_lockfile_hash = crate::lockfile::find_lockfile(req.repo_root, rel).and_then(|lp| {
-                let content = fs::read(&lp).ok()?;
-                let text = std::str::from_utf8(&content).ok()?;
-                let safety = crate::lockfile::classify_lockfile(text);
-                if safety == crate::lockfile::DependencySafety::Pinned {
-                    Some(crate::lockfile::hash_lockfile(&content))
-                } else {
-                    None
-                }
-            });
+            let pinned_lockfile_hash =
+                crate::lockfile::find_lockfile(req.repo_root, rel).and_then(|lp| {
+                    let content = fs::read(&lp).ok()?;
+                    let text = std::str::from_utf8(&content).ok()?;
+                    let safety = crate::lockfile::classify_lockfile(text);
+                    if safety == crate::lockfile::DependencySafety::Pinned {
+                        Some(crate::lockfile::hash_lockfile(&content))
+                    } else {
+                        None
+                    }
+                });
 
             let mut hit_this_dir = false;
             if can_snapshot {
@@ -235,7 +233,9 @@ impl DiskStore {
                         SnapshotOutcome::Hydrated(info) => {
                             let manifest_id = info.hash;
                             snapshot_ids.insert(manifest_id);
-                            if let Some(manifest) = crate::snapshot::read_published(self.root(), &manifest_id) {
+                            if let Some(manifest) =
+                                crate::snapshot::read_published(self.root(), &manifest_id)
+                            {
                                 for entry in &manifest.entries {
                                     if let Some(blob) = entry.blob {
                                         bytes_shared += fs::metadata(self.object_path(&blob))
@@ -267,16 +267,11 @@ impl DiskStore {
             }
 
             if !hit_this_dir {
-                let mut tree_policy = req.policy;
-                if tree_policy.verify {
-                    tree_policy.snapshots = false;
-                }
-
                 let ingested = self.ingest_tree(
                     req.repo_root,
                     &src,
                     &crate::IngestOptions {
-                        snapshots: can_snapshot && !req.policy.verify,
+                        snapshots: can_snapshot,
                         exclude: &|rel_str| is_volatile_cache(rel_str),
                     },
                 )?;
@@ -296,7 +291,7 @@ impl DiskStore {
                         base_branch: req.base_branch,
                         base_commit: req.base_commit,
                     },
-                    tree_policy,
+                    req.policy,
                 )?;
 
                 if !tree_receipt.strategy.starts_with("snapshot") {
@@ -362,7 +357,8 @@ impl DiskStore {
         } else {
             last_strategy
         };
-        let overall_snapshot_hit = nonempty_dir_count > 0 && snapshot_hits_count == nonempty_dir_count;
+        let overall_snapshot_hit =
+            nonempty_dir_count > 0 && snapshot_hits_count == nonempty_dir_count;
 
         Ok(HydrationReceipt {
             strategy: overall_strategy,
@@ -708,7 +704,10 @@ pub fn collect_matches(root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>>
             let rel = path.strip_prefix(root).map_err(|_| {
                 crate::Error::Io(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("pattern matched path outside repository root: {}", path.display()),
+                    format!(
+                        "pattern matched path outside repository root: {}",
+                        path.display()
+                    ),
                 ))
             })?;
             let rel_str = rel.to_string_lossy();
