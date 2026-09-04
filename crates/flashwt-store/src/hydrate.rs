@@ -281,7 +281,6 @@ impl DiskStore {
                             if let Some(manifest) = crate::snapshot::read_published(self.root(), &manifest_id) {
                                 for entry in &manifest.entries {
                                     if let Some(blob) = entry.blob {
-                                        all_blob_ids.insert(blob);
                                         bytes_shared += fs::metadata(self.object_path(&blob))
                                             .map(|m| m.len())
                                             .unwrap_or(0);
@@ -317,10 +316,6 @@ impl DiskStore {
                     },
                 )?;
 
-                for blob in ingested.files.values() {
-                    all_blob_ids.insert(*blob);
-                }
-
                 let tree_receipt = self.hydrate_tree(
                     HydrateTree {
                         ingested: &ingested,
@@ -338,6 +333,12 @@ impl DiskStore {
                     },
                     req.policy,
                 )?;
+
+                if !tree_receipt.strategy.starts_with("snapshot") {
+                    for blob in ingested.files.values() {
+                        all_blob_ids.insert(*blob);
+                    }
+                }
 
                 total_files += tree_receipt.files_total;
                 files_copied += tree_receipt.files_copied;
@@ -458,7 +459,7 @@ impl DiskStore {
                 self.publish_worktree_mirror(
                     dest.worktree_root,
                     dest.git_dir,
-                    &distinct_blobs,
+                    BTreeSet::new(),
                     std::iter::once(&manifest_id),
                     dest.base_branch,
                     dest.base_commit,
@@ -535,7 +536,7 @@ impl DiskStore {
                     self.publish_worktree_mirror(
                         dest.worktree_root,
                         dest.git_dir,
-                        distinct_blobs,
+                        BTreeSet::new(),
                         std::iter::once(&manifest_id),
                         dest.base_branch,
                         dest.base_commit,

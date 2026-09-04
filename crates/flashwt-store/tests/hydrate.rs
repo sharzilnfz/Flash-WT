@@ -549,7 +549,7 @@ fn workspace_hydration_pinned_lockfile_snapshot_hit_materializes_and_records_blo
             .read_worktree_mirror(worktree_dir.path(), git_dir.path())
             .expect("read mirror")
             .expect("mirror exists");
-        assert!(mirror.files.contains(&blob));
+        assert!(mirror.files.is_empty());
         assert!(mirror.snapshots.contains(&hash));
         assert_eq!(mirror.base_branch.as_deref(), Some("feature/snap-hit"));
         assert_eq!(mirror.base_commit.as_deref(), Some("commit-snap-hit"));
@@ -829,9 +829,8 @@ fn workspace_hydration_mixed_snapshot_hit_and_ingest_fallback_aggregates_into_on
             .read_worktree_mirror(worktree_dir.path(), git_dir.path())
             .expect("read mirror")
             .expect("mirror exists");
-        assert!(mirror.files.contains(&snap_blob));
         assert!(mirror.snapshots.contains(&snap_hash));
-        assert_eq!(mirror.files.len(), 2);
+        assert_eq!(mirror.snapshots.len(), 2);
     }
 
     #[cfg(not(target_os = "macos"))]

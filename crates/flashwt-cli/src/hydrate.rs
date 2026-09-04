@@ -1,13 +1,12 @@
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use flashwt_store::{ContentId, DiskStore, IngestOptions};
+use flashwt_store::{ContentId, DiskStore, WorkspaceHydrateReq};
 
 use crate::config::{RunConfig, StrategyPolicy};
 use crate::envelope::Diagnostic;
 use crate::error::{Error, Result};
-use crate::hydration_filter::{ZeroSavingsReason, collect_matches, pattern_matches};
+use crate::hydration_filter::{ZeroSavingsReason, collect_matches};
 use crate::timing::StageTimings;
 use crate::workspace;
 
@@ -327,283 +326,68 @@ impl<'a> HydrationEngine<'a> {
             let _ = std::fs::create_dir_all(&git_dir);
         }
 
-        if dirs.is_empty() {
-            let store = self.store_mut()?;
-            store
-                .publish_worktree_mirror(
-                    req.dest,
-                    &git_dir,
-                    BTreeSet::new(),
-                    std::iter::empty(),
-                    req.base_branch,
-                    req.base_commit,
-                )
-                .map_err(|e| Error::Store(format!("cannot publish worktree mirror: {e}")))?;
-
-            let mut diagnostics =
-                crate::base::check_base_movement(store, req.root, req.base_branch);
-            for d in &diagnostics {
-                if !req.cfg.json {
-                    eprintln!("flashwt: warning: {}", d.message);
-                }
-            }
-
-            let reason = ZeroSavingsReason::NoMatchingDirectories;
-            diagnostics.push(Diagnostic::warning(
-                ZeroSavingsReason::DIAGNOSTIC_CODE,
-                format!("hydration saved 0 bytes; {}", reason.explanation()),
-            ));
-
-            if !req.cfg.json {
-                println!("{}", reason.human_notice());
-            }
-
-            return Ok(HydrationReport {
-                total_files: 0,
-                total_copied: 0,
-                bytes_shared_cow: 0,
-                bytes_copied: 0,
-                strategy: "none".to_string(),
-                hydration_method: "none".to_string(),
-                copy_backend: None,
-                refusal_reason: None,
-                cache_hit: false,
-                snapshot_hashes: Vec::new(),
-                dirs_hydrated: Vec::new(),
-                timings,
-                diagnostics,
-                incremental_decision: None,
-                incremental_fallback_reason: None,
-                incremental_hit_rate: None,
-            });
-        }
-
         if should_bypass_tiny_repo(req.root, &dirs, req.cfg) {
             return self.hydrate_tiny_bypass(req, &dirs, timings);
         }
 
         let store = self.store_mut()?;
+        let ws_req = WorkspaceHydrateReq {
+            repo_root: req.root,
+            worktree_root: req.dest,
+            git_dir: &git_dir,
+            patterns: req.patterns,
+            base_branch: req.base_branch,
+            base_commit: req.base_commit,
+            policy: store_policy(req.cfg),
+        };
 
-        let mut total_files = 0usize;
-        let mut total_copied = 0usize;
-        let mut bytes_shared_cow = 0u64;
-        let mut bytes_copied = 0u64;
-        let mut last_strategy = "byte-copy".to_string();
-        let mut last_copy_backend: Option<String> = None;
-        let mut last_refusal_reason: Option<String> = None;
-        let mut snapshot_hits_count = 0usize;
-        let mut dirs_hydrated = Vec::new();
+        let receipt = store
+            .hydrate_workspace(ws_req)
+            .map_err(|e| Error::Store(format!("workspace hydration failed: {e}")))?;
+
+        let total_files = receipt.files_total;
+        let total_copied = receipt.files_copied;
+        let bytes_shared_cow = receipt.bytes_shared;
+        let bytes_copied = receipt.bytes_copied;
+        let last_strategy = receipt.strategy.clone();
+        let last_copy_backend = receipt.copy_backend.clone();
+        let last_refusal_reason = receipt.refusal_reason.clone();
+        let dirs_hydrated = if total_files == 0 && dirs.is_empty() {
+            Vec::new()
+        } else {
+            dirs.clone()
+        };
         let mut report_diagnostics = Vec::new();
-        let mut incremental_decision: Option<String> = None;
-        let mut incremental_fallback_reason: Option<String> = None;
-        let mut incremental_hit_rate: Option<f64> = None;
-
-        for rel in &dirs {
-            dirs_hydrated.push(rel.clone());
-            let src = req.root.join(rel);
-            let heavy = rel.to_string_lossy().into_owned();
-
-            let pattern = req
-                .patterns
-                .iter()
-                .find(|p| pattern_matches(p, rel))
-                .map(String::as_str)
-                .unwrap_or("");
-
-            let lockfile_info = flashwt_store::find_lockfile(req.root, rel).and_then(|lp| {
-                let content = std::fs::read(&lp).ok()?;
-                let text = std::str::from_utf8(&content).ok()?;
-                let safety = flashwt_store::classify_lockfile(text);
-                let hash = flashwt_store::hash_lockfile(&content);
-                Some((safety, hash))
-            });
-
-            let pinned_lockfile_hash = match lockfile_info {
-                Some((flashwt_store::DependencySafety::Pinned, hash)) => Some(hash),
-                _ => None,
-            };
-            if req.cfg.snapshots {
-                if let Some(lock_hash) = pinned_lockfile_hash {
-                    let stage = Instant::now();
-                    let pin_req = flashwt_store::HydrateReq {
-                        src: flashwt_store::HydrateSrc::PinnedLockfile(
-                            flashwt_store::HydratePinned {
-                                repo_root: req.root,
-                                pattern,
-                                src_root: req.root,
-                                heavy_rel: &heavy,
-                                lockfile_hash: lock_hash,
-                            },
-                        ),
-                        dest: flashwt_store::HydrateDest {
-                            worktree_root: req.dest,
-                            git_dir: &git_dir,
-                            base_branch: req.base_branch,
-                            base_commit: req.base_commit,
-                        },
-                        policy: store_policy(req.cfg),
-                    };
-                    match store
-                        .hydrate(pin_req)
-                        .map_err(|e| Error::Store(format!("hydration of {heavy} failed: {e}")))?
-                    {
-                        flashwt_store::HydrateOutcome::Hydrated(info) => {
-                            let hydration_ms = stage.elapsed().as_millis();
-                            total_files += info.files_total;
-                            bytes_shared_cow += info.bytes_shared;
-                            bytes_copied += info.bytes_copied;
-                            snapshot_hits_count += 1;
-                            timings.snapshot_engaged = true;
-                            timings.snapshot_ms += hydration_ms;
-                            timings.snapshot_mode = "hit";
-                            if !req.cfg.json {
-                                println!(
-                                    "hydrated {heavy} from {} via snapshot (one clone, {} file{})",
-                                    src.display(),
-                                    info.files_total,
-                                    if info.files_total == 1 { "" } else { "s" }
-                                );
-                            }
-                            continue;
-                        }
-                        flashwt_store::HydrateOutcome::NeedIngest {
-                            diagnostic: Some(reason),
-                        } => {
-                            if !req.cfg.json {
-                                eprintln!(
-                                    "flashwt-snapshots: {heavy}: lockfile fast path fell back ({reason})"
-                                );
-                            }
-                        }
-                        flashwt_store::HydrateOutcome::NeedIngest { diagnostic: None } => {}
-                        flashwt_store::HydrateOutcome::Failed(msg) => {
-                            return Err(Error::Store(format!(
-                                "hydration of {heavy} failed: {msg}"
-                            )));
-                        }
-                    }
-                }
-            }
-            let stage = Instant::now();
-            let ingested = store
-                .ingest_tree(
-                    req.root,
-                    &src,
-                    &IngestOptions {
-                        snapshots: req.cfg.snapshots,
-                        exclude: &|rel| crate::toolchain::is_volatile_cache(rel),
-                    },
-                )
-                .map_err(|e| Error::Store(format!("ingest {}: {e}", src.display())))?;
-            timings.ingest_ms += stage.elapsed().as_millis();
-
-            let store_req = flashwt_store::HydrateReq {
-                src: flashwt_store::HydrateSrc::Tree(flashwt_store::HydrateTree {
-                    ingested: &ingested,
-                    repo_root: req.root,
-                    pattern,
-                    src_root: &src,
-                    heavy_rel: &heavy,
-                    lockfile_hash: pinned_lockfile_hash,
-                }),
-                dest: flashwt_store::HydrateDest {
-                    worktree_root: req.dest,
-                    git_dir: &git_dir,
-                    base_branch: req.base_branch,
-                    base_commit: req.base_commit,
-                },
-                policy: store_policy(req.cfg),
-            };
-
-            let stage = Instant::now();
-            let receipt = match store
-                .hydrate(store_req)
-                .map_err(|e| Error::Store(format!("hydration of {} failed: {e}", rel.display())))?
+        for diag in &receipt.diagnostics {
+            if diag != flashwt_store::ZERO_SAVINGS_NO_MATCHING_DIRS
+                && diag != flashwt_store::ZERO_SAVINGS_NO_FILES_HYDRATED
             {
-                flashwt_store::HydrateOutcome::Hydrated(r) => r,
-                flashwt_store::HydrateOutcome::NeedIngest { diagnostic } => {
-                    return Err(Error::Store(format!(
-                        "hydration of {} unexpectedly deferred{}",
-                        rel.display(),
-                        diagnostic.map(|d| format!(" ({d})")).unwrap_or_default(),
-                    )));
-                }
-                flashwt_store::HydrateOutcome::Failed(msg) => {
-                    return Err(Error::Store(format!(
-                        "hydration of {} failed: {msg}",
-                        rel.display()
-                    )));
-                }
-            };
-            let hydration_ms = stage.elapsed().as_millis();
-
-            total_files += receipt.files_total;
-            total_copied += receipt.files_copied;
-            bytes_shared_cow += receipt.bytes_shared;
-            bytes_copied += receipt.bytes_copied;
-            last_strategy = receipt.strategy.clone();
-            last_copy_backend = receipt.copy_backend.clone();
-            if receipt.refusal_reason.is_some() {
-                last_refusal_reason = receipt.refusal_reason.clone();
+                report_diagnostics.push(Diagnostic::warning("HYDRATION_DIAGNOSTIC", diag.clone()));
             }
-
+        }
+        let incremental_decision = receipt.incremental_decision.map(|d| d.to_string());
+        let incremental_fallback_reason = receipt.incremental_fallback_reason.clone();
+        let incremental_hit_rate = receipt.incremental_hit_rate;
+        let is_snapshot = receipt.snapshot_hit || receipt.strategy.starts_with("snapshot");
+        if is_snapshot {
+            timings.snapshot_engaged = true;
+            timings.snapshot_ms = receipt.elapsed_ms;
             if receipt.snapshot_hit {
-                snapshot_hits_count += 1;
-                timings.snapshot_engaged = true;
-                timings.snapshot_ms += hydration_ms;
-                if let Some(dec) = receipt.incremental_decision {
-                    incremental_decision = Some(dec.to_string());
-                }
-                if let Some(reason) = receipt.incremental_fallback_reason {
-                    incremental_fallback_reason = Some(reason);
-                }
-                if let Some(rate) = receipt.incremental_hit_rate {
-                    incremental_hit_rate = Some(rate);
-                }
-                if let Some(mode) = receipt.strategy.strip_prefix("snapshot-") {
-                    match mode {
-                        "hit" => timings.snapshot_mode = "hit",
-                        "build" => {
-                            timings.snapshot_mode = "build";
-                            timings.snapshot_built = true;
-                        }
-                        "v2" => timings.snapshot_mode = "v2",
-                        _ => {}
+                timings.snapshot_mode = "hit";
+                timings.snapshot_built = false;
+            } else if let Some(mode) = receipt.strategy.strip_prefix("snapshot-") {
+                timings.snapshot_mode = match mode {
+                    "hit" => "hit",
+                    "build" => {
+                        timings.snapshot_built = true;
+                        "build"
                     }
-                }
-                timings.v2_cloned += receipt.v2_cloned;
-                timings.v2_linked += receipt.v2_linked;
-                if !req.cfg.json {
-                    println!(
-                        "hydrated {heavy} from {} via snapshot (one clone, {} file{})",
-                        src.display(),
-                        receipt.files_total,
-                        if receipt.files_total == 1 { "" } else { "s" }
-                    );
-                }
-            } else {
-                timings.materialize_ms += hydration_ms;
-                if !req.cfg.json {
-                    println!(
-                        "hydrated {} from {} via store ({} file{})",
-                        rel.display(),
-                        src.display(),
-                        receipt.files_total,
-                        if receipt.files_total == 1 { "" } else { "s" }
-                    );
-                }
-                if !req.cfg.json {
-                    for diag in &receipt.diagnostics {
-                        eprintln!(
-                            "flashwt-snapshots: {heavy}: falling back to per-file placement ({diag})"
-                        );
-                    }
-                }
+                    "v2" => "v2",
+                    _ => "build",
+                };
             }
-
-            for diag in receipt.diagnostics {
-                report_diagnostics.push(Diagnostic::warning("HYDRATION_DIAGNOSTIC", diag));
-            }
+            timings.v2_cloned = receipt.v2_cloned;
+            timings.v2_linked = receipt.v2_linked;
         }
 
         crate::toolchain::relocate_toolchains(req.root, req.dest, &dirs)?;
@@ -649,22 +433,65 @@ impl<'a> HydrationEngine<'a> {
             .flush()
             .map_err(|e| Error::io_unanchored("update verified-blob ledger", store.root(), e))?;
 
-        if !req.cfg.json {
+        let mut diagnostics = crate::base::check_base_movement(store, req.root, req.base_branch);
+        diagnostics.extend(report_diagnostics);
+
+        if total_files == 0 {
+            let reason = if dirs.is_empty() {
+                ZeroSavingsReason::NoMatchingDirectories
+            } else {
+                ZeroSavingsReason::NoFilesHydrated
+            };
+            diagnostics.push(Diagnostic::warning(
+                ZeroSavingsReason::DIAGNOSTIC_CODE,
+                format!("hydration saved 0 bytes; {}", reason.explanation()),
+            ));
+            if !req.cfg.json {
+                println!("{}", reason.human_notice());
+            }
+        } else if !req.cfg.json {
+            for rel in &dirs {
+                let src = req.root.join(rel);
+                let rel_str = rel.to_string_lossy();
+                if receipt.v2_cloned > 0 || receipt.v2_linked > 0 {
+                    println!(
+                        "hydrated {rel_str} from {} via snapshot-v2 ({} clone unit{}, {} link{})",
+                        src.display(),
+                        receipt.v2_cloned,
+                        if receipt.v2_cloned == 1 { "" } else { "s" },
+                        receipt.v2_linked,
+                        if receipt.v2_linked == 1 { "" } else { "s" }
+                    );
+                } else if is_snapshot {
+                    println!(
+                        "hydrated {rel_str} from {} via snapshot (one clone, {} file{})",
+                        src.display(),
+                        total_files,
+                        if total_files == 1 { "" } else { "s" }
+                    );
+                } else {
+                    println!(
+                        "hydrated {rel_str} from {} via store ({} file{})",
+                        src.display(),
+                        total_files,
+                        if total_files == 1 { "" } else { "s" }
+                    );
+                }
+            }
             println!(
                 "hydration complete: {total_files} file{} through the store",
                 if total_files == 1 { "" } else { "s" }
             );
         }
 
-        let mut diagnostics = crate::base::check_base_movement(store, req.root, req.base_branch);
-        diagnostics.extend(report_diagnostics);
-
-        if total_files == 0 {
-            let reason = ZeroSavingsReason::NoFilesHydrated;
-            diagnostics.push(Diagnostic::warning(
-                ZeroSavingsReason::DIAGNOSTIC_CODE,
-                format!("hydration saved 0 bytes; {}", reason.explanation()),
-            ));
+        if !req.cfg.json {
+            for diag in &receipt.diagnostics {
+                if diag != flashwt_store::ZERO_SAVINGS_NO_MATCHING_DIRS
+                    && diag != flashwt_store::ZERO_SAVINGS_NO_FILES_HYDRATED
+                {
+                    eprintln!("flashwt-snapshots: falling back to per-file placement ({diag})");
+                }
+            }
         }
 
         if total_copied > 0 && req.cfg.strategy_policy != StrategyPolicy::Hardlink {
@@ -679,14 +506,17 @@ impl<'a> HydrationEngine<'a> {
             ));
         }
         for d in &diagnostics {
-            if !req.cfg.json && d.code != ZeroSavingsReason::DIAGNOSTIC_CODE {
+            if !req.cfg.json
+                && d.code != ZeroSavingsReason::DIAGNOSTIC_CODE
+                && d.code != "HYDRATION_DIAGNOSTIC"
+            {
                 eprintln!("flashwt: warning: {}", d.message);
             }
         }
 
         let hydration_method = if total_files == 0 {
             "none"
-        } else if snapshot_hits_count == dirs.len()
+        } else if is_snapshot
             || (last_strategy == "copy-on-write" && total_copied == 0)
         {
             "clone"
@@ -705,7 +535,7 @@ impl<'a> HydrationEngine<'a> {
         }
         .to_string();
 
-        let cache_hit = (snapshot_hits_count == dirs.len() && !timings.snapshot_built)
+        let cache_hit = (receipt.snapshot_hit && !timings.snapshot_built)
             || (total_files > 0 && total_copied == 0 && !timings.snapshot_built);
 
         Ok(HydrationReport {
