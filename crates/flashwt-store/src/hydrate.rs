@@ -211,10 +211,121 @@ impl DiskStore {
             });
         }
 
-        Err(crate::Error::Io(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "non-empty heavy directory hydration is not yet supported in this ticket",
-        )))
+        let mut total_files = 0;
+        let mut bytes_shared = 0u64;
+        let mut snapshot_hit = false;
+        let mut diagnostics = Vec::new();
+        let mut all_blob_ids = BTreeSet::new();
+        let mut snapshot_ids = BTreeSet::new();
+
+        fs::create_dir_all(req.worktree_root)?;
+        fs::create_dir_all(req.git_dir)?;
+
+        for rel in &matched_dirs {
+            let pattern = req
+                .patterns
+                .iter()
+                .find(|p| pattern_matches(p, rel))
+                .map(String::as_str)
+                .unwrap_or("");
+
+            let heavy_rel = rel.to_string_lossy();
+            let pinned_lockfile_hash = crate::lockfile::find_lockfile(req.repo_root, rel).and_then(|lp| {
+                let content = fs::read(&lp).ok()?;
+                let text = std::str::from_utf8(&content).ok()?;
+                let safety = crate::lockfile::classify_lockfile(text);
+                if safety == crate::lockfile::DependencySafety::Pinned {
+                    Some(crate::lockfile::hash_lockfile(&content))
+                } else {
+                    None
+                }
+            });
+
+            let mut hit_this_dir = false;
+            if req.policy.snapshots {
+                if let Some(lock_hash) = pinned_lockfile_hash {
+                    match SnapshotProjectionEngine::try_lockfile_hit(
+                        self,
+                        req.repo_root,
+                        pattern,
+                        req.repo_root,
+                        &heavy_rel,
+                        req.worktree_root,
+                        &lock_hash,
+                        req.policy.verify,
+                    ) {
+                        SnapshotOutcome::Hydrated(info) => {
+                            let manifest_id = info.hash;
+                            snapshot_ids.insert(manifest_id);
+                            if let Some(manifest) = crate::snapshot::read_published(self.root(), &manifest_id) {
+                                for entry in &manifest.entries {
+                                    if let Some(blob) = entry.blob {
+                                        all_blob_ids.insert(blob);
+                                        bytes_shared += fs::metadata(self.object_path(&blob))
+                                            .map(|m| m.len())
+                                            .unwrap_or(0);
+                                    }
+                                }
+                            }
+                            append_ledger(req.git_dir, &BTreeMap::new(), Some(&info.hash))?;
+                            total_files += info.files;
+                            snapshot_hit = true;
+                            hit_this_dir = true;
+                        }
+                        SnapshotOutcome::FellBack(diag) => {
+                            if let Some(msg) = diag {
+                                diagnostics.push(msg);
+                            }
+                        }
+                        SnapshotOutcome::Failed(msg) => {
+                            diagnostics.push(msg);
+                        }
+                    }
+                }
+            }
+
+            if !hit_this_dir {
+                return Err(crate::Error::Io(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "non-snapshot hit hydration is not yet supported in this ticket",
+                )));
+            }
+        }
+
+        if self.gc_mode() != GcMode::MarkSweepNoRefs {
+            for id in &all_blob_ids {
+                self.add_ref(id)?;
+            }
+        }
+
+        self.publish_worktree_mirror(
+            req.worktree_root,
+            req.git_dir,
+            &all_blob_ids,
+            &snapshot_ids,
+            req.base_branch,
+            req.base_commit,
+        )?;
+
+        self.flush()?;
+
+        Ok(HydrationReceipt {
+            strategy: "snapshot-hit".to_string(),
+            files_total: total_files,
+            files_copied: 0,
+            bytes_shared,
+            bytes_copied: 0,
+            snapshot_hit,
+            elapsed_ms: start.elapsed().as_millis(),
+            diagnostics,
+            v2_cloned: 0,
+            v2_linked: 0,
+            incremental_decision: None,
+            incremental_fallback_reason: None,
+            incremental_hit_rate: None,
+            copy_backend: Some("clonefile".to_string()),
+            refusal_reason: None,
+        })
     }
 
     fn hydrate_pinned(
@@ -240,8 +351,8 @@ impl DiskStore {
             SnapshotOutcome::Hydrated(info) => {
                 let manifest_id = info.hash;
                 let mut shared_bytes = 0u64;
+                let mut distinct_blobs = BTreeSet::new();
                 if let Some(manifest) = crate::snapshot::read_published(self.root(), &manifest_id) {
-                    let mut distinct_blobs = BTreeSet::new();
                     for entry in &manifest.entries {
                         if let Some(blob) = entry.blob {
                             distinct_blobs.insert(blob);
@@ -260,7 +371,7 @@ impl DiskStore {
                 self.publish_worktree_mirror(
                     dest.worktree_root,
                     dest.git_dir,
-                    BTreeSet::new(),
+                    &distinct_blobs,
                     std::iter::once(&manifest_id),
                     dest.base_branch,
                     dest.base_commit,

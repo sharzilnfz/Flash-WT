@@ -471,3 +471,96 @@ fn workspace_hydration_empty_mirror_preserves_blobs_during_garbage_collection() 
         .expect("mirror exists");
     assert!(mirror.files.is_empty());
 }
+
+#[test]
+fn workspace_hydration_pinned_lockfile_snapshot_hit_materializes_and_records_blobs_in_mirror() {
+    let store_dir = TempDir::new().expect("store dir");
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+
+    let repo_dir = TempDir::new().expect("repo dir");
+    let worktree_dir = TempDir::new().expect("worktree dir");
+    let git_dir = TempDir::new().expect("git dir");
+
+    let heavy = repo_dir.path().join("node_modules");
+    fs::create_dir_all(heavy.join("pkg")).expect("mkdir");
+    let content = b"console.log('hi');\n";
+    fs::write(heavy.join("pkg/index.js"), content).expect("write");
+    let blob = store.put(content).expect("put");
+
+    let lockfile_bytes = b"{\n  \"name\": \"test-app\",\n  \"version\": \"1.0.0\",\n  \"lockfileVersion\": 3,\n  \"packages\": {}\n}\n";
+    fs::write(repo_dir.path().join("package-lock.json"), lockfile_bytes).expect("write lockfile");
+    let lock_hash = flashwt_store::hash_lockfile(lockfile_bytes);
+    let entries = vec![flashwt_store::SnapshotEntry::file(
+        "pkg/index.js",
+        blob,
+        0o644,
+    )];
+    let manifest = flashwt_store::Manifest::new_with_lockfile_and_size(
+        entries,
+        Some(lock_hash),
+        content.len() as u64,
+    )
+    .expect("manifest");
+    let hash = manifest.hash;
+    store
+        .publish_manifest(
+            &manifest,
+            flashwt_store::PublishOptions::default().lockfile_hash(Some(lock_hash)),
+        )
+        .expect("publish");
+
+    let repo_key = repo_dir.path().to_string_lossy().into_owned();
+    flashwt_store::record_snapshot_publish(
+        store_dir.path(),
+        &repo_key,
+        "node_modules/",
+        "node_modules",
+        &hash,
+    )
+    .expect("seed ring");
+
+    let patterns = vec!["node_modules/".to_string()];
+    let req = WorkspaceHydrateReq {
+        repo_root: repo_dir.path(),
+        worktree_root: worktree_dir.path(),
+        git_dir: git_dir.path(),
+        patterns: &patterns,
+        base_branch: Some("feature/snap-hit"),
+        base_commit: Some("commit-snap-hit"),
+        policy: HydratePolicy::default(),
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        let receipt = store.hydrate_workspace(req).expect("hydrate workspace");
+        assert!(receipt.snapshot_hit);
+        assert_eq!(receipt.files_total, 1);
+        assert_eq!(receipt.files_copied, 0);
+        assert_eq!(receipt.bytes_shared, content.len() as u64);
+        assert_eq!(receipt.bytes_copied, 0);
+        assert_eq!(receipt.strategy, "snapshot-hit");
+
+        assert_eq!(
+            fs::read(worktree_dir.path().join("node_modules/pkg/index.js")).expect("read"),
+            content
+        );
+
+        let mirror = store
+            .read_worktree_mirror(worktree_dir.path(), git_dir.path())
+            .expect("read mirror")
+            .expect("mirror exists");
+        assert!(mirror.files.contains(&blob));
+        assert!(mirror.snapshots.contains(&hash));
+        assert_eq!(mirror.base_branch.as_deref(), Some("feature/snap-hit"));
+        assert_eq!(mirror.base_commit.as_deref(), Some("commit-snap-hit"));
+
+        let ledger =
+            fs::read_to_string(git_dir.path().join("flashwt-hydrated.tsv")).expect("read ledger");
+        assert_eq!(ledger, format!("-\tsnapshot\t{hash}\n"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (req, hash, blob);
+    }
+}
