@@ -564,3 +564,128 @@ fn workspace_hydration_pinned_lockfile_snapshot_hit_materializes_and_records_blo
         let _ = (req, hash, blob);
     }
 }
+
+#[test]
+fn workspace_hydration_unpinned_lockfile_falls_back_to_tree_ingest_and_materializes() {
+    let store_dir = TempDir::new().expect("store dir");
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+
+    let repo_dir = TempDir::new().expect("repo dir");
+    let worktree_dir = TempDir::new().expect("worktree dir");
+    let git_dir = TempDir::new().expect("git dir");
+
+    let heavy = repo_dir.path().join("node_modules");
+    fs::create_dir_all(heavy.join("pkg/bin")).expect("mkdir");
+
+    let file_content = b"console.log('hello world');\n";
+    let file_path = heavy.join("pkg/index.js");
+    fs::write(&file_path, file_content).expect("write index.js");
+
+    let bin_content = b"#!/bin/sh\necho 42\n";
+    let bin_path = heavy.join("pkg/bin/run");
+    fs::write(&bin_path, bin_content).expect("write run");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("../index.js", heavy.join("pkg/bin/link-index.js")).expect("symlink");
+    }
+
+    let unpinned_lockfile = b"{\n  \"dependencies\": {\n    \"local-dep\": \"file:../local-dep\"\n  }\n}\n";
+    fs::write(repo_dir.path().join("package-lock.json"), unpinned_lockfile).expect("write unpinned");
+
+    let patterns = vec!["node_modules/".to_string()];
+    let req = WorkspaceHydrateReq {
+        repo_root: repo_dir.path(),
+        worktree_root: worktree_dir.path(),
+        git_dir: git_dir.path(),
+        patterns: &patterns,
+        base_branch: Some("feature/fallback"),
+        base_commit: Some("commit-fallback-01"),
+        policy: HydratePolicy {
+            verify: false,
+            snapshots: false,
+            v2: false,
+            strategy: flashwt_copy::StrategyPolicy::Default,
+        },
+    };
+
+    let receipt = store.hydrate_workspace(req).expect("hydrate workspace");
+    assert!(!receipt.snapshot_hit);
+    assert_eq!(receipt.files_total, 2);
+
+    let dest_index = worktree_dir.path().join("node_modules/pkg/index.js");
+    assert_eq!(fs::read(&dest_index).expect("read dest index"), file_content);
+
+    let dest_bin = worktree_dir.path().join("node_modules/pkg/bin/run");
+    assert_eq!(fs::read(&dest_bin).expect("read dest bin"), bin_content);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::symlink_metadata(&dest_bin).expect("stat dest bin").permissions().mode();
+        assert_eq!(mode & 0o111, 0o111);
+
+        let dest_link = worktree_dir.path().join("node_modules/pkg/bin/link-index.js");
+        let link_target = fs::read_link(&dest_link).expect("read symlink");
+        assert_eq!(link_target, Path::new("../index.js"));
+    }
+
+    let mirror = store
+        .read_worktree_mirror(worktree_dir.path(), git_dir.path())
+        .expect("read mirror")
+        .expect("mirror exists");
+    assert_eq!(mirror.files.len(), 2);
+    assert_eq!(mirror.base_branch.as_deref(), Some("feature/fallback"));
+    assert_eq!(mirror.base_commit.as_deref(), Some("commit-fallback-01"));
+
+    let ledger = fs::read_to_string(git_dir.path().join("flashwt-hydrated.tsv")).expect("read ledger");
+    assert!(ledger.contains("pkg/index.js\tblob\t"));
+    assert!(ledger.contains("pkg/bin/run\tblob\t"));
+}
+
+#[test]
+fn workspace_hydration_steps_down_to_byte_copies_when_forced_policy() {
+    let store_dir = TempDir::new().expect("store dir");
+    let mut store = DiskStore::open(store_dir.path()).expect("open store");
+
+    let repo_dir = TempDir::new().expect("repo dir");
+    let worktree_dir = TempDir::new().expect("worktree dir");
+    let git_dir = TempDir::new().expect("git dir");
+
+    let heavy = repo_dir.path().join("node_modules");
+    fs::create_dir_all(heavy.join("sub")).expect("mkdir");
+    let content = b"export const answer = 42;\n";
+    fs::write(heavy.join("sub/lib.js"), content).expect("write lib.js");
+
+    let patterns = vec!["node_modules/".to_string()];
+    let req = WorkspaceHydrateReq {
+        repo_root: repo_dir.path(),
+        worktree_root: worktree_dir.path(),
+        git_dir: git_dir.path(),
+        patterns: &patterns,
+        base_branch: None,
+        base_commit: None,
+        policy: HydratePolicy {
+            verify: false,
+            snapshots: false,
+            v2: false,
+            strategy: flashwt_copy::StrategyPolicy::ForceByteCopy,
+        },
+    };
+
+    let receipt = store.hydrate_workspace(req).expect("hydrate workspace");
+    assert_eq!(receipt.strategy, "byte-copy");
+    assert_eq!(receipt.files_total, 1);
+    assert_eq!(receipt.files_copied, 1);
+    assert_eq!(receipt.bytes_copied, content.len() as u64);
+    assert_eq!(receipt.bytes_shared, 0);
+
+    assert_eq!(
+        fs::read(worktree_dir.path().join("node_modules/sub/lib.js")).expect("read dest"),
+        content
+    );
+}

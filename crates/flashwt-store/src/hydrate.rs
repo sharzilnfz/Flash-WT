@@ -212,11 +212,21 @@ impl DiskStore {
         }
 
         let mut total_files = 0;
+        let mut files_copied = 0;
         let mut bytes_shared = 0u64;
+        let mut bytes_copied = 0u64;
         let mut snapshot_hit = false;
         let mut diagnostics = Vec::new();
         let mut all_blob_ids = BTreeSet::new();
         let mut snapshot_ids = BTreeSet::new();
+        let mut last_strategy = "copy-on-write".to_string();
+        let mut last_copy_backend = None;
+        let mut last_refusal_reason = None;
+        let mut v2_cloned = 0;
+        let mut v2_linked = 0;
+        let mut incremental_decision = None;
+        let mut incremental_fallback_reason = None;
+        let mut incremental_hit_rate = None;
 
         fs::create_dir_all(req.worktree_root)?;
         fs::create_dir_all(req.git_dir)?;
@@ -271,6 +281,8 @@ impl DiskStore {
                             total_files += info.files;
                             snapshot_hit = true;
                             hit_this_dir = true;
+                            last_strategy = "snapshot-hit".to_string();
+                            last_copy_backend = Some("clonefile".to_string());
                         }
                         SnapshotOutcome::FellBack(diag) => {
                             if let Some(msg) = diag {
@@ -285,46 +297,96 @@ impl DiskStore {
             }
 
             if !hit_this_dir {
-                return Err(crate::Error::Io(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "non-snapshot hit hydration is not yet supported in this ticket",
-                )));
+                let src = req.repo_root.join(rel);
+                let ingested = self.ingest_tree(
+                    req.repo_root,
+                    &src,
+                    &crate::IngestOptions {
+                        snapshots: req.policy.snapshots,
+                        exclude: &|rel_str| is_volatile_cache(rel_str),
+                    },
+                )?;
+
+                let tree_receipt = self.hydrate_tree(
+                    HydrateTree {
+                        ingested: &ingested,
+                        repo_root: req.repo_root,
+                        pattern,
+                        src_root: &src,
+                        heavy_rel: &heavy_rel,
+                        lockfile_hash: pinned_lockfile_hash,
+                    },
+                    HydrateDest {
+                        worktree_root: req.worktree_root,
+                        git_dir: req.git_dir,
+                        base_branch: req.base_branch,
+                        base_commit: req.base_commit,
+                    },
+                    req.policy,
+                )?;
+
+                total_files += tree_receipt.files_total;
+                files_copied += tree_receipt.files_copied;
+                bytes_shared += tree_receipt.bytes_shared;
+                bytes_copied += tree_receipt.bytes_copied;
+                last_strategy = tree_receipt.strategy;
+                last_copy_backend = tree_receipt.copy_backend;
+                if tree_receipt.refusal_reason.is_some() {
+                    last_refusal_reason = tree_receipt.refusal_reason;
+                }
+                diagnostics.extend(tree_receipt.diagnostics);
+                v2_cloned += tree_receipt.v2_cloned;
+                v2_linked += tree_receipt.v2_linked;
+                if tree_receipt.incremental_decision.is_some() {
+                    incremental_decision = tree_receipt.incremental_decision;
+                }
+                if tree_receipt.incremental_fallback_reason.is_some() {
+                    incremental_fallback_reason = tree_receipt.incremental_fallback_reason;
+                }
+                if tree_receipt.incremental_hit_rate.is_some() {
+                    incremental_hit_rate = tree_receipt.incremental_hit_rate;
+                }
+                if tree_receipt.snapshot_hit {
+                    snapshot_hit = true;
+                }
             }
         }
 
-        if self.gc_mode() != GcMode::MarkSweepNoRefs {
-            for id in &all_blob_ids {
-                self.add_ref(id)?;
+        if !all_blob_ids.is_empty() || !snapshot_ids.is_empty() {
+            if self.gc_mode() != GcMode::MarkSweepNoRefs {
+                for id in &all_blob_ids {
+                    self.add_ref(id)?;
+                }
             }
-        }
 
-        self.publish_worktree_mirror(
-            req.worktree_root,
-            req.git_dir,
-            &all_blob_ids,
-            &snapshot_ids,
-            req.base_branch,
-            req.base_commit,
-        )?;
+            self.publish_worktree_mirror(
+                req.worktree_root,
+                req.git_dir,
+                &all_blob_ids,
+                &snapshot_ids,
+                req.base_branch,
+                req.base_commit,
+            )?;
+        }
 
         self.flush()?;
 
         Ok(HydrationReceipt {
-            strategy: "snapshot-hit".to_string(),
+            strategy: last_strategy,
             files_total: total_files,
-            files_copied: 0,
+            files_copied,
             bytes_shared,
-            bytes_copied: 0,
+            bytes_copied,
             snapshot_hit,
             elapsed_ms: start.elapsed().as_millis(),
             diagnostics,
-            v2_cloned: 0,
-            v2_linked: 0,
-            incremental_decision: None,
-            incremental_fallback_reason: None,
-            incremental_hit_rate: None,
-            copy_backend: Some("clonefile".to_string()),
-            refusal_reason: None,
+            v2_cloned,
+            v2_linked,
+            incremental_decision,
+            incremental_fallback_reason,
+            incremental_hit_rate,
+            copy_backend: last_copy_backend,
+            refusal_reason: last_refusal_reason,
         })
     }
 
@@ -448,7 +510,7 @@ impl DiskStore {
                     self.publish_worktree_mirror(
                         dest.worktree_root,
                         dest.git_dir,
-                        BTreeSet::new(),
+                        distinct_blobs,
                         std::iter::once(&manifest_id),
                         dest.base_branch,
                         dest.base_commit,
