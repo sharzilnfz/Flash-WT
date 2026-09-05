@@ -226,6 +226,12 @@ impl DiskStore {
     }
 
     fn write_ref_count(&self, id: &ContentId, count: u64) -> Result<()> {
+        self.write_ref_count_unsynced(id, count)?;
+        crate::fsutil::sync_parent_dir(&self.ref_path(id))?;
+        Ok(())
+    }
+
+    fn write_ref_count_unsynced(&self, id: &ContentId, count: u64) -> Result<()> {
         let dir = self.root.join("refs");
         let path = dir.join(id.to_string());
         let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
@@ -235,7 +241,6 @@ impl DiskStore {
             tmp.as_file().sync_all()?;
         }
         tmp.persist(&path).map_err(|e| Error::Io(e.error))?;
-        crate::fsutil::sync_parent_dir(&path)?;
         Ok(())
     }
 
@@ -608,6 +613,34 @@ impl DiskStore {
             )))
         })?;
         self.write_ref_count(id, next)
+    }
+
+    pub fn add_refs(&mut self, ids: impl IntoIterator<Item = ContentId>) -> Result<()> {
+        let _lock = self.lock_refs()?;
+        let mut wrote_any = false;
+        for id in ids {
+            let current = match fs::metadata(self.ref_path(&id)) {
+                Ok(_) => self.read_ref_count(&id)?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    if !self.contains(&id) {
+                        return Err(Error::UnknownContent(id));
+                    }
+                    0
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let next = current.checked_add(1).ok_or_else(|| {
+                Error::Io(io::Error::other(format!(
+                    "reference count overflow for {id}"
+                )))
+            })?;
+            self.write_ref_count_unsynced(&id, next)?;
+            wrote_any = true;
+        }
+        if wrote_any {
+            crate::fsutil::sync_dir(&self.root.join("refs"))?;
+        }
+        Ok(())
     }
 
     pub fn release_ref(&mut self, id: &ContentId) -> Result<()> {

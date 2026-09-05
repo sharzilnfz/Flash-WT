@@ -232,15 +232,17 @@ impl DiskStore {
                             if let Some(manifest) =
                                 crate::snapshot::read_published(self.root(), &manifest_id)
                             {
+                                let mut hit_blobs = Vec::new();
                                 for entry in &manifest.entries {
                                     if let Some(blob) = entry.blob {
                                         bytes_shared += fs::metadata(self.object_path(&blob))
                                             .map(|m| m.len())
                                             .unwrap_or(0);
-                                        if self.gc_mode() != GcMode::MarkSweepNoRefs {
-                                            self.add_ref(&blob)?;
-                                        }
+                                        hit_blobs.push(blob);
                                     }
+                                }
+                                if self.gc_mode() != GcMode::MarkSweepNoRefs {
+                                    self.add_refs(hit_blobs)?;
                                 }
                             }
                             append_ledger(req.git_dir, &BTreeMap::new(), Some(&info.hash))?;
@@ -325,9 +327,7 @@ impl DiskStore {
 
         if !all_blob_ids.is_empty() || !snapshot_ids.is_empty() {
             if self.gc_mode() != GcMode::MarkSweepNoRefs {
-                for id in &all_blob_ids {
-                    self.add_ref(id)?;
-                }
+                self.add_refs(all_blob_ids.iter().copied())?;
             }
 
             self.publish_worktree_mirror(
@@ -423,9 +423,7 @@ impl DiskStore {
                 SnapshotOutcome::Hydrated(info) => {
                     let distinct_blobs: BTreeSet<&ContentId> = ingested.files.values().collect();
                     if self.gc_mode() != GcMode::MarkSweepNoRefs {
-                        for id in &distinct_blobs {
-                            self.add_ref(id)?;
-                        }
+                        self.add_refs(distinct_blobs.into_iter().copied())?;
                     }
 
                     append_ledger(dest.git_dir, &ingested.files, Some(&info.hash))?;
