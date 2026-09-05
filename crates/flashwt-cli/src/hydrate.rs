@@ -388,6 +388,11 @@ impl<'a> HydrationEngine<'a> {
             }
             timings.v2_cloned = receipt.v2_cloned;
             timings.v2_linked = receipt.v2_linked;
+            timings.snapshot_lookup_ms = receipt.snapshot_lookup_ms;
+            timings.snapshot_clonefile_ms = receipt.snapshot_clonefile_ms;
+            timings.build_verify_ms = receipt.build_verify_ms;
+            timings.build_link_train_ms = receipt.build_link_train_ms;
+            timings.build_publish_ms = receipt.build_publish_ms;
         }
 
         crate::toolchain::relocate_toolchains(req.root, req.dest, &dirs)?;

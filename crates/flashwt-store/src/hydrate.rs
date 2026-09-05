@@ -89,6 +89,16 @@ pub struct HydrationReceipt {
 
     pub snapshot_hit: bool,
 
+    pub snapshot_lookup_ms: u128,
+
+    pub snapshot_clonefile_ms: u128,
+
+    pub build_verify_ms: u64,
+
+    pub build_link_train_ms: u64,
+
+    pub build_publish_ms: u64,
+
     pub elapsed_ms: u128,
 
     pub diagnostics: Vec<String>,
@@ -148,6 +158,11 @@ impl DiskStore {
                 bytes_shared: 0,
                 bytes_copied: 0,
                 snapshot_hit: false,
+                snapshot_lookup_ms: 0,
+                snapshot_clonefile_ms: 0,
+                build_verify_ms: 0,
+                build_link_train_ms: 0,
+                build_publish_ms: 0,
                 elapsed_ms: start.elapsed().as_millis(),
                 diagnostics: vec![diagnostic],
                 v2_cloned: 0,
@@ -178,6 +193,11 @@ impl DiskStore {
         let mut incremental_hit_rate = None;
         let mut nonempty_dir_count = 0;
         let mut snapshot_hits_count = 0;
+        let mut snapshot_lookup_ms = 0u128;
+        let mut snapshot_clonefile_ms = 0u128;
+        let mut build_verify_ms = 0u64;
+        let mut build_link_train_ms = 0u64;
+        let mut build_publish_ms = 0u64;
 
         fs::create_dir_all(req.worktree_root)?;
         fs::create_dir_all(req.git_dir)?;
@@ -249,6 +269,8 @@ impl DiskStore {
                             total_files += info.files;
                             hit_this_dir = true;
                             snapshot_hits_count += 1;
+                            snapshot_lookup_ms += info.lookup_ms;
+                            snapshot_clonefile_ms += info.clonefile_ms;
                             last_strategy = "snapshot-hit".to_string();
                             last_copy_backend = Some("clonefile".to_string());
                         }
@@ -310,6 +332,11 @@ impl DiskStore {
                 diagnostics.extend(tree_receipt.diagnostics);
                 v2_cloned += tree_receipt.v2_cloned;
                 v2_linked += tree_receipt.v2_linked;
+                snapshot_lookup_ms += tree_receipt.snapshot_lookup_ms;
+                snapshot_clonefile_ms += tree_receipt.snapshot_clonefile_ms;
+                build_verify_ms += tree_receipt.build_verify_ms;
+                build_link_train_ms += tree_receipt.build_link_train_ms;
+                build_publish_ms += tree_receipt.build_publish_ms;
                 if tree_receipt.incremental_decision.is_some() {
                     incremental_decision = tree_receipt.incremental_decision;
                 }
@@ -370,6 +397,11 @@ impl DiskStore {
             bytes_shared,
             bytes_copied,
             snapshot_hit: overall_snapshot_hit,
+            snapshot_lookup_ms,
+            snapshot_clonefile_ms,
+            build_verify_ms,
+            build_link_train_ms,
+            build_publish_ms,
             elapsed_ms: start.elapsed().as_millis(),
             diagnostics,
             v2_cloned,
@@ -436,6 +468,11 @@ impl DiskStore {
                         bytes_shared: total_bytes,
                         bytes_copied: 0,
                         snapshot_hit: info.mode == "hit",
+                        snapshot_lookup_ms: info.lookup_ms,
+                        snapshot_clonefile_ms: info.clonefile_ms,
+                        build_verify_ms: info.build.map(|b| b.verify_ms).unwrap_or(0),
+                        build_link_train_ms: info.build.map(|b| b.link_train_ms).unwrap_or(0),
+                        build_publish_ms: info.build.map(|b| b.publish_ms).unwrap_or(0),
                         elapsed_ms: start.elapsed().as_millis(),
                         diagnostics,
                         v2_cloned: info.cloned_units,
@@ -536,6 +573,11 @@ impl DiskStore {
             bytes_shared: total_bytes_shared,
             bytes_copied: total_bytes_copied,
             snapshot_hit: false,
+            snapshot_lookup_ms: 0,
+            snapshot_clonefile_ms: 0,
+            build_verify_ms: 0,
+            build_link_train_ms: 0,
+            build_publish_ms: 0,
             elapsed_ms: start.elapsed().as_millis(),
             diagnostics,
             v2_cloned: 0,
